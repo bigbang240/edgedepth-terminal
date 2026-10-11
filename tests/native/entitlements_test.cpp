@@ -357,6 +357,24 @@ void test_pricing_href_preserves_billing_choice() {
               "https://edgedepth.com/pricing?billing=yearly", "unknown period defaults yearly");
 }
 
+void test_self_hosted_venues_follow_the_feed() {
+    reset_state();
+
+    // Hosted: every venue the picker lists is served.
+    for (const char* venue : {"binancef", "hl", "bybit"})
+        expect_true(Entitlements::venue_available(venue, false), "hosted serves every listed venue");
+
+    // Self-hosted: the bundled community gateway serves Binance only, so the
+    // other venues are not offered until the feed sends their 24h ticker.
+    Entitlements::hosted() = false;
+    expect_true(Entitlements::venue_available("binancef", false), "self-hosted Binance is available");
+    expect_true(!Entitlements::venue_available("hl", false), "self-hosted Hyperliquid needs a feed for it");
+    expect_true(!Entitlements::venue_available("bybit", false), "self-hosted Bybit needs a feed for it");
+    expect_true(Entitlements::venue_available("hl", true), "a feed that reports Hyperliquid enables it");
+    expect_true(Entitlements::venue_available("bybit", true), "a feed that reports Bybit enables it");
+    reset_state();
+}
+
 }  // namespace
 
 int main() {
@@ -369,6 +387,7 @@ int main() {
     test_symbol_and_speed_gates();
     test_authentication_is_not_the_same_question_as_tier();
     test_pricing_href_preserves_billing_choice();
+    test_self_hosted_venues_follow_the_feed();
 
     if (failures != 0) {
         std::fprintf(stderr, "%d failure(s)\n", failures);

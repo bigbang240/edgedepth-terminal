@@ -21,6 +21,7 @@
 #include "core/scanner_manager.h"
 #include "core/stream_presence.h"
 #include "core/url_router.h"
+#include "core/entitlements.h"
 #include "replayer/replay_manager.h"
 #include "ui/upsell_modal.h"
 #include <cctype>
@@ -310,6 +311,10 @@ void render_symbol_picker_popup(
             const float ven_logo = 14.0f;
             for (int i = 0; i < 3; ++i) {
                 const bool active = (g_symbol_picker.selected_exchange == venues[i].id);
+                // A self-hosted feed without this venue would open empty panels;
+                // keep the chip visible but disabled so the boundary is explicit.
+                const bool usable = active || Entitlements::venue_available(
+                    venues[i].id, TickerManager::instance().has_venue(venues[i].id));
                 const ImVec2 ts = ImGui::CalcTextSize(venues[i].label);
                 // Exchange mark left of the label; only insets once its texture is
                 // ready so a missing logo never leaves a permanent gap.
@@ -322,16 +327,20 @@ void render_symbol_picker_popup(
                 const bool clk = ImGui::InvisibleButton("##venue", ImVec2(cw, chip_h));
                 const bool hov = ImGui::IsItemHovered();
                 ImGui::PopID();
-                if (hov) dl->AddRectFilled(cp, ImVec2(cp.x + cw, cp.y + chip_h), u32(Tokens::HOVER));
+                if (hov && usable) dl->AddRectFilled(cp, ImVec2(cp.x + cw, cp.y + chip_h), u32(Tokens::HOVER));
+                if (hov && !usable)
+                    Theme::tooltip("Hosted only: this feed does not serve %s.\nThe bundled community gateway covers Binance.",
+                                   venues[i].label);
                 const ImVec2 selection(cp.x + cw - 10.0f, cp.y + chip_h * 0.5f);
-                dl->AddCircle(selection, 4.0f, u32(active ? Tokens::TX1 : Tokens::TX3), 16, 1.0f);
+                dl->AddCircle(selection, 4.0f, u32(active ? Tokens::TX1 : usable ? Tokens::TX3 : Tokens::TX4), 16, 1.0f);
                 if (active) dl->AddCircleFilled(selection, 2.0f, u32(Tokens::TX1), 16);
                 if (ven_tex)
                     dl->AddImage(ven_tex, ImVec2(cp.x + 8.0f, cp.y + (chip_h - ven_logo) * 0.5f),
-                                 ImVec2(cp.x + 8.0f + ven_logo, cp.y + (chip_h + ven_logo) * 0.5f));
+                                 ImVec2(cp.x + 8.0f + ven_logo, cp.y + (chip_h + ven_logo) * 0.5f),
+                                 ImVec2(0, 0), ImVec2(1, 1), usable ? IM_COL32_WHITE : IM_COL32(255, 255, 255, 90));
                 dl->AddText(ImVec2(cp.x + 8.0f + logo_inset, cp.y + (chip_h - ts.y) * 0.5f),
-                    u32(active ? Tokens::BRAND_TX : Tokens::TX2), venues[i].label);
-                if (clk && !active) {
+                    u32(active ? Tokens::BRAND_TX : usable ? Tokens::TX2 : Tokens::TX4), venues[i].label);
+                if (clk && !active && usable) {
                     g_symbol_picker.selected_exchange = venues[i].id;
                     g_symbol_picker.selected_category = -1; // categories are per-venue
                     g_symbol_picker.invalidate_cache();

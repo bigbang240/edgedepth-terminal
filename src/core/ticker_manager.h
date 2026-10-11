@@ -8,6 +8,8 @@
 
 #include <string>
 #include <unordered_map>
+#include <string_view>
+#include <vector>
 #include <cstdint>
 #include <algorithm>
 #include <cctype>
@@ -41,6 +43,11 @@ public:
     }
 
     bool has_data() const { return !tickers_.empty(); }
+    // True once the connected feed has sent this venue's 24h ticker, i.e. the
+    // feed actually serves it (see Entitlements::venue_available).
+    bool has_venue(std::string_view exchange) const {
+        return std::find(venues_.begin(), venues_.end(), exchange) != venues_.end();
+    }
     int64_t last_update_ms() const { return last_update_ms_; }
     size_t count() const { return tickers_.size(); }
 
@@ -58,5 +65,6 @@ public:
 private:
     TickerManager() = default;
     std::unordered_map<std::string, TickerEntry> tickers_;
+    std::vector<std::string> venues_;  // at most one entry per venue
     int64_t last_update_ms_ = 0;
 };

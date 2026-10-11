@@ -16,5 +16,6 @@ void TickerManager::apply_update(const std::string& exchange, const pb::Ticker24
         t.event_time_ms  = entry.event_time_ms();
     }
 
+    if (update.entries_size() > 0 && !has_venue(exchange)) venues_.push_back(exchange);
     last_update_ms_ = update.timestamp_ms();
 }

@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <string_view>
 #include <array>
 #include <algorithm>
 #include <cctype>
@@ -134,6 +135,19 @@ inline bool  is_admin() { return current() == Tier::Admin; }
 // user does not have, contradicting the Unlock CTA in the same window. Tier
 // answers "what may this user do"; this answers "is there an account at all".
 inline bool& hosted() { static bool b = true; return b; }
+
+// Whether a venue can show data in this deployment. Symbol metadata lists every
+// venue, but the community gateway bundled with the self-hosted stack serves
+// Binance futures only, so Hyperliquid and Bybit would open there as empty panels.
+// Off the hosted product they stay unavailable until the connected feed proves
+// otherwise by sending that venue's 24h ticker (feed_reports_venue), so a
+// gateway that adds one of these venues enables it without a client change.
+inline bool venue_needs_hosted_feed(std::string_view exchange) {
+    return exchange == "hl" || exchange == "bybit";
+}
+inline bool venue_available(std::string_view exchange, bool feed_reports_venue) {
+    return hosted() || feed_reports_venue || !venue_needs_hosted_feed(exchange);
+}
 
 // Signed-in user's email (account menu header). Set by the host via
 // window.__EDGEDEPTH_USER_EMAIL__; empty in standalone/dev.
