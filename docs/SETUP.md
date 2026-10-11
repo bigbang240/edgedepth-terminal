@@ -30,13 +30,24 @@ For a file, replay pack or custom feed, see [data sources](DATA_SOURCES.md).
   gateway images used a legacy Binance endpoint; current source separates trade
   and depth connections. Update to a published gateway revision and check network
   access before changing stream URLs.
+- **Live view stays empty:** the gateway connects from your machine to Binance's
+  public futures endpoints, and Binance may be unavailable in some regions.
+  Repeated `could not load symbol list` or `binance stream dropped, reconnecting`
+  warnings in `docker compose logs gateway` mean it cannot reach Binance. Use
+  **Replay → Open Replay Library** instead (recordings come from
+  `replays.edgedepth.com`, not Binance), or the
+  [hosted replay](https://app.edgedepth.com/demo/20260809_071325_tutusdt_pump_4h_4h_371pct?utm_source=github&utm_medium=oss&utm_campaign=terminal),
+  which needs no install or account.
 
 ## Pin a version
 
-Terminal and gateway releases are independent. Choose published tags from their
-[terminal](https://github.com/edgedepthhq/edgedepth-terminal/releases) and
-[gateway](https://github.com/edgedepthhq/edgedepth-gateway/releases) release pages,
-then change each `image:` in `docker-compose.yml`.
+Terminal and gateway versions are independent. Choose published image tags from
+the GHCR pages for the
+[terminal](https://github.com/edgedepthhq/edgedepth-terminal/pkgs/container/edgedepth-terminal) and
+[gateway](https://github.com/edgedepthhq/edgedepth-gateway/pkgs/container/edgedepth-gateway),
+then change each `image:` in `docker-compose.yml`. Terminal release notes are on its
+[releases page](https://github.com/edgedepthhq/edgedepth-terminal/releases); a
+`sha-<short>` tag matches that commit in each repo's history.
 
 | Image tag | Meaning |
 | --- | --- |

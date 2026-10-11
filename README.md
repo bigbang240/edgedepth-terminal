@@ -1,5 +1,8 @@
 # EdgeDepth Terminal
 
+[![build](https://github.com/edgedepthhq/edgedepth-terminal/actions/workflows/build.yml/badge.svg)](https://github.com/edgedepthhq/edgedepth-terminal/actions/workflows/build.yml)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+
 **Open-source crypto order flow in your browser.**
 
 See resting orders, watch trades as they happen, and replay recorded markets.
@@ -25,8 +28,14 @@ Open **[localhost:8080](http://localhost:8080)**. This starts the terminal and t
 - **Live:** select a market, then choose **Real-time** to see depth and trade bubbles.
 - **Replay:** choose **Replay → Open Replay Library** and pick a free recording. It plays locally, without a live feed.
 
+The gateway connects from your machine to Binance's public futures endpoints, and
+Binance may be unavailable in some regions. If the live view stays empty, use the Replay
+Library (its recordings come from `replays.edgedepth.com`, not Binance) or the no-install
+replay below.
+
 Use Chrome or Firefox; Safari is unverified. [Setup, troubleshooting and source builds](docs/SETUP.md).
-Prefer no installation? [Open the hosted terminal](https://app.edgedepth.com/terminal?utm_source=github&utm_medium=oss&utm_campaign=terminal).
+Prefer no installation? [Play the same TUT recording in your browser](https://app.edgedepth.com/demo/20260809_071325_tutusdt_pump_4h_4h_371pct?utm_source=github&utm_medium=oss&utm_campaign=terminal):
+a recorded replay served by EdgeDepth, no account needed.
 
 ## What's included
 
@@ -42,32 +51,15 @@ Prefer no installation? [Open the hosted terminal](https://app.edgedepth.com/ter
 
 *Both views use the public TUT pack. Footprints require recorded volume at each price; older context candles may have none.*
 
-## What self-hosting doesn't include
+## Hosted EdgeDepth
 
 The **terminal is open source; EdgeDepth's hosted data and research services are separate.**
-
-- **No hosted historical archive.** The gateway supplies public Binance data and candle history. Depth starts with what you observe; footprint/profile history is bounded. Packs contain only their recorded markets, times and streams.
-- **No server-derived analytics or research engine.** Panels such as VPIN and positioning need compatible analytics streams; the community gateway doesn't supply them.
-- **You operate the feed.** Exchange access, connection gaps and storage are yours to manage. Missing data stays missing.
-
-Local real-time depth, sub-minute candles and pack replay need **no Pro subscription**.
-[Data-source details](docs/DATA_SOURCES.md) explain coverage and custom feeds.
-
-## When to use hosted EdgeDepth
-
-| Option | Best for | What it adds |
-| --- | --- | --- |
-| **OSS** | Run, inspect and customize the terminal | Your feed and recordings, on your machine. |
-| **Pro** | Follow markets without running the data stack | Managed multi-venue feeds, live depth, advanced analytics, up to 90 days of available tick replay and 50 research credits/month. |
-| **Research** | Investigate more questions and revisit older events | Everything in Pro, 300 credits/month, deeper available tick replay, onboarding and a first-study review. |
-
-Research lets you test a condition against recorded history, compare what followed
-with a baseline, and inspect counterexamples. Web, REST API and MCP share your allowance.
-Hosted Free includes 10 credits/month to try it.
-
-**Research history and tick replay have different coverage.** A credit is not
-necessarily one study, and historical results do not establish a profitable strategy.
-[Compare current plans and coverage](https://edgedepth.com/pricing?utm_source=github&utm_medium=oss&utm_campaign=terminal).
+Nothing in this terminal needs a subscription. Self-hosted, you run the feed: depth starts
+with what you observe, packs hold only their recorded markets, and server-derived panels
+such as VPIN stay empty ([coverage details](docs/DATA_SOURCES.md)). Hosted EdgeDepth adds
+managed Binance, Hyperliquid and Bybit feeds, recorded tick history and research tools for
+testing an idea against past cases.
+[Plans and coverage](https://edgedepth.com/pricing?utm_source=github&utm_medium=oss&utm_campaign=terminal) · [Open-source overview](https://edgedepth.com/open-source?utm_source=github&utm_medium=oss&utm_campaign=terminal)
 
 ## Build on it
 
