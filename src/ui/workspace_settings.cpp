@@ -15,10 +15,14 @@
 #include "core/tpo_manager.h"
 #include "core/volume_profile_manager.h"
 #include "core/candle_manager.h"
+#include "core/entitlements.h"
+#include "core/education_boot.h"
+#include "replayer/replay_manager.h"
 using workspace::Json;
 
 Json DOMWidget::save_settings() const {
     Json j = Json::object();
+    j["mode_companion"] = mode_companion;
     j["group_mult"] = group_mult_;
     j["levels_per_side"] = levels_per_side_;
     j["auto_center"] = auto_center_;
@@ -29,6 +33,7 @@ Json DOMWidget::save_settings() const {
     return j;
 }
 void DOMWidget::load_settings(const Json& j) {
+    workspace::read(j, "mode_companion", mode_companion);
     workspace::read(j, "group_mult", group_mult_, 1, 1000);
     workspace::read(j, "levels_per_side", levels_per_side_, 5, 200);
     workspace::read(j, "auto_center", auto_center_);
@@ -44,13 +49,19 @@ void DOMWidget::load_settings(const Json& j) {
 
 Json TradesWidget::save_settings() const {
     Json j = Json::object();
+    j["mode_companion"] = mode_companion;
     j["auto_scroll"] = auto_scroll_;
     j["show_stats"] = show_stats_;
+    j["display_usd"] = display_usd_;
+    j["highlight_large"] = highlight_large_;
     return j;
 }
 void TradesWidget::load_settings(const Json& j) {
+    workspace::read(j, "mode_companion", mode_companion);
     workspace::read(j, "auto_scroll", auto_scroll_);
     workspace::read(j, "show_stats", show_stats_);
+    workspace::read(j, "display_usd", display_usd_);
+    workspace::read(j, "highlight_large", highlight_large_);
 }
 
 Json OrderbookWidget::save_settings() const {
@@ -68,13 +79,13 @@ void OrderbookWidget::load_settings(const Json& j) {
 
 Json StatsWidget::save_settings() const {
     Json j = Json::object();
-    j["sections"] = Json::array({section_open_[0], section_open_[1], section_open_[2]});
+    j["sections"] = Json::array({section_open_[0], section_open_[1], section_open_[2], section_open_[3], section_open_[4], section_open_[5]});
     return j;
 }
 void StatsWidget::load_settings(const Json& j) {
     auto it = j.find("sections");
-    if (it != j.end() && it->is_array() && it->size() == 3)
-        for (size_t i = 0; i < 3; ++i)
+    if (it != j.end() && it->is_array() && (it->size() >= 3 && it->size() <= SEC_COUNT))
+        for (size_t i = 0; i < it->size(); ++i)
             if ((*it)[i].is_boolean()) section_open_[i] = (*it)[i].get<bool>();
 }
 
@@ -100,7 +111,9 @@ Json ChartWidget::save_settings() const {
     j["previous_week"] = previous_week_;
     j["vwap_anchor"] = {{"time",vwap_anchor_ms_},{"exchange",pair_.exchange},{"symbol",pair_.symbol}};
     j["rt_mode"] = rt_mode_;
+    j["rt_show_standalone"] = rt_show_standalone_;
     j["rt_candles"] = rt_candles_;
+    j["chart_layer_defaults"] = 2;
     j["rt_bubbles"] = rt_bubbles_;
     j["candle_bubbles"] = candle_bubbles_;
     j["candle_bubble_history"] = candle_bubble_history_enabled_;
@@ -108,6 +121,7 @@ Json ChartWidget::save_settings() const {
     j["rt_trade_line"] = rt_trade_line_;
     j["rt_dom"] = rt_dom_shown_;
     j["rt_extend_depth"] = rt_extend_depth_;
+    j["rt_bridge_gaps"] = rt_bridge_gaps_;
     j["rt_depth"] = rt_depth_enabled_;
     j["liquidity_response"] = liquidity_response_enabled_;
     j["rt_auto_fit_history"] = rt_auto_fit_history_;
@@ -135,12 +149,28 @@ Json ChartWidget::save_settings() const {
     j["liq_dense_field"] = liq_dense_field_;
     j["liq_profile_enabled"] = liq_profile_enabled_;
     j["liq_observed_enabled"] = liq_observed_enabled_;
+    j["rt_liq_observed_enabled"] = rt_liq_observed_enabled_;
     j["rt_liq_strip"] = rt_liq_strip_;
+    j["candle_liq_strip"] = candle_liq_strip_;
+    j["liq_markers"] = liq_markers_;
+    j["rt_liq_markers"] = rt_liq_markers_;
+    j["liq_report_profile"] = liq_report_profile_;
+    j["rt_liq_height"] = rt_liq_height_;
+    j["candle_liq_height"] = candle_liq_height_;
+    j["activity_enabled"] = activity_enabled_; j["activity_collapsed"] = activity_collapsed_;
+    j["activity_trades"] = activity_trades_; j["activity_volume"] = activity_volume_;
+    j["activity_oi"] = activity_oi_; j["activity_buy"] = activity_buy_;
+    j["activity_shading"] = activity_shading_; j["activity_book"] = activity_book_enabled_;
+    j["alert_lines"] = alert_lines_; j["alert_markers"] = alert_markers_;
+    j["rt_liq_collapsed"] = rt_liq_collapsed_;
+    j["candle_liq_collapsed"] = candle_liq_collapsed_;
     j["liq_census_enabled"] = liq_census_enabled_;
     j["liq_census_history"] = liq_census_show_history_;
     j["liq_census_min_usd"] = liq_census_min_usd_;
     j["liq_obs_min_usd"] = liq_obs_min_usd_;
     j["liq_obs_ref_usd"] = liq_obs_ref_usd_;
+    j["liq_obs_auto_size"] = liq_obs_auto_size_;
+    j["liq_callout_x"] = liq_callout_x_;
     j["vpvr_enabled"] = vpvr_enabled_;
     j["vpvr_ticks_per_row"] = vpvr_ticks_per_row_;
     j["renko_brick_ticks"] = renko_brick_ticks_;
@@ -231,10 +261,12 @@ void ChartWidget::load_settings(const Json& j) {
     workspace::read(j, "rt_trade_line", rt_trade_line_);
     workspace::read(j, "rt_dom", rt_dom_shown_);
     workspace::read(j, "rt_extend_depth", rt_extend_depth_);
+    workspace::read(j, "rt_bridge_gaps", rt_bridge_gaps_);
     workspace::read(j, "rt_depth", rt_depth_enabled_);
     workspace::read(j, "liquidity_response", liquidity_response_enabled_);
     liquidity_response_history_.reset();
     // A manual inspection is transient. Restored sessions start following price.
+    workspace::read(j, "rt_show_standalone", rt_show_standalone_);
     workspace::read(j, "rt_auto_fit_history", rt_auto_fit_history_);
     rt_auto_fit_ = {};
     rt_auto_price_ = true;
@@ -262,11 +294,47 @@ void ChartWidget::load_settings(const Json& j) {
     workspace::read(j, "liq_profile_enabled", liq_profile_enabled_);
     workspace::read(j, "liq_observed_enabled", liq_observed_enabled_);
     workspace::read(j, "rt_liq_strip", rt_liq_strip_);
+    workspace::read(j, "candle_liq_strip", candle_liq_strip_);
+    workspace::read(j, "liq_markers", liq_markers_);
+    workspace::read(j, "rt_liq_markers", rt_liq_markers_);
+    workspace::read(j, "liq_report_profile", liq_report_profile_);
+    workspace::read(j, "rt_liq_height", rt_liq_height_, 60, 600);
+    workspace::read(j, "candle_liq_height", candle_liq_height_, 60, 600);
+    workspace::read(j,"activity_enabled",activity_enabled_); workspace::read(j,"activity_collapsed",activity_collapsed_);
+    workspace::read(j,"activity_trades",activity_trades_); workspace::read(j,"activity_volume",activity_volume_);
+    workspace::read(j,"activity_oi",activity_oi_); workspace::read(j,"activity_buy",activity_buy_);
+    workspace::read(j,"activity_shading",activity_shading_); workspace::read(j,"activity_book",activity_book_enabled_);
+    workspace::read(j,"alert_lines",alert_lines_); workspace::read(j,"alert_markers",alert_markers_);
+    workspace::read(j, "rt_liq_collapsed", rt_liq_collapsed_);
+    workspace::read(j, "candle_liq_collapsed", candle_liq_collapsed_);
+    if (!j.contains("candle_liq_strip") && j.contains("rt_liq_strip") && rt_liq_strip_) liq_observed_enabled_ = true;
+    if (!j.contains("candle_liq_strip") && j.contains("liq_observed_enabled") && liq_observed_enabled_) {
+        candle_liq_strip_=true; rt_liq_strip_=true;
+    }
+    // Apply the requested quieter defaults to pre-change saved charts once. Save
+    // the version above so later explicit choices survive reloads and imports.
+    // Older workspaces had one shared report switch. Preserve its saved RT value
+    // before applying candle-only defaults; a fresh chart must not seed RT from them.
+    if (!j.contains("rt_liq_observed_enabled")) {
+        if (j.contains("liq_observed_enabled")) rt_liq_observed_enabled_ = liq_observed_enabled_;
+        else if (!j.contains("candle_liq_strip") && j.contains("rt_liq_strip")) rt_liq_observed_enabled_ = rt_liq_strip_;
+    }
+    workspace::read(j, "rt_liq_observed_enabled", rt_liq_observed_enabled_);
+    int layer_defaults = 0;
+    workspace::read(j, "chart_layer_defaults", layer_defaults, 0, 100);
+    if (layer_defaults < 1) {
+        candle_bubbles_ = false;
+        liq_observed_enabled_ = Entitlements::is_pro() || !Entitlements::hosted() ||
+            ctx_.replay_mgr().is_active() || EducationBoot::instance().is_pack();
+        candle_liq_strip_ = true;
+    }
     workspace::read(j, "liq_census_enabled", liq_census_enabled_);
     workspace::read(j, "liq_census_history", liq_census_show_history_);
     workspace::read(j, "liq_census_min_usd", liq_census_min_usd_, 0, 1e12);
     workspace::read(j, "liq_obs_min_usd", liq_obs_min_usd_, 0, 1000000000000000.0);
     workspace::read(j, "liq_obs_ref_usd", liq_obs_ref_usd_, 1, 1000000000000000.0);
+    workspace::read(j, "liq_obs_auto_size", liq_obs_auto_size_);
+    workspace::read(j, "liq_callout_x", liq_callout_x_, 1, 20);
     workspace::read(j, "vpvr_enabled", vpvr_enabled_);
     workspace::read(j, "vpvr_ticks_per_row", vpvr_ticks_per_row_, 0, 100000);
     workspace::read(j, "renko_brick_ticks", renko_brick_ticks_, 0, 100000);

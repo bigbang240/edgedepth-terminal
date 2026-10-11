@@ -28,7 +28,7 @@ Choose 5m or 15m candles. For per-price volume, choose **Footprint (Cluster)** a
 zoom in, or enable **Layers → Volume Profile**. DOM and depth are unavailable.
 
 The demo writes identical CSV and Parquet files: **7,200 generated trades**, not
-market data, covering 7 September 2026, 00:00–01:59:59 UTC (287.94 BTC total).
+market data, covering 7 September 2026, 00:00 to 01:59:59 UTC (287.94 BTC total).
 The default 80% history split starts playback at 01:36 UTC; the rest takes about
 144 seconds at 10x. Source times stay unchanged even if the UI uses local time.
 The footer's live connection label does not mean the data is current.

@@ -5,6 +5,22 @@
 #include "core/analytics_manager.h"
 #include "pb/messages.pb.h"
 
+void AnalyticsManager::apply_iceberg(const std::string& symbol, const pb::IcebergStats& u, int64_t now) {
+    if (u.schema_version() != 1) return;
+    IcebergSnapshot incoming{u.timestamp_ms(), u.source_trade_ms(), u.window_start_ms(), u.window_end_ms(), u.detector_start_ms(),
+        u.buy_clusters(), u.sell_clusters(), u.buy_executed_usd(), u.sell_executed_usd(), u.history_limited(),
+        u.min_confidence(), u.min_bulk_usd(), u.min_refreshes()};
+    IcebergSnapshot validated;
+    if (!validated.apply(incoming, now)) return;
+    const auto key = lower(symbol);
+    if (icebergs_.size() >= 1024 && !icebergs_.contains(key)) return;
+    icebergs_[key].apply(validated, now);
+}
+const IcebergSnapshot* AnalyticsManager::get_iceberg(const std::string& symbol) const {
+    const auto it = icebergs_.find(lower(symbol));
+    return it == icebergs_.end() ? nullptr : &it->second;
+}
+
 void AnalyticsManager::apply_positioning(const std::string& symbol,
                                          const pb::PositioningStateUpdate& u) {
     SymbolState& st = symbols_[lower(symbol)];
@@ -96,6 +112,7 @@ void AnalyticsManager::apply_contagion(const pb::ContagionSnapshot& u) {
 }
 
 void AnalyticsManager::trim_after(int64_t cutoff_ms) {
+    icebergs_.clear(); // No historical contract: never carry live candidates into replay.
     // Replay rewind: points past the cutoff are the replay's future. Drop future
     // OI samples and invalidate a future 'latest' - the next drip refills it.
     for (auto& kv : symbols_) {

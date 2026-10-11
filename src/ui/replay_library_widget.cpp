@@ -11,6 +11,7 @@
 #include <cfloat>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <utility>
 
 #include "imgui.h"
@@ -159,6 +160,69 @@ EM_JS(char*, edrl_copy_error, (), {
     return p;
 });
 
+// At most one header request per widget. Exact range responses only, bounded
+// before body consumption. Closing/refreshing cancels ownership, including late
+// callbacks; no C++ pointer crosses an asynchronous JS callback.
+EM_JS(int, edrl_preview_begin, (const char* url_ptr), {
+    var jobs = Module['__edReplayPreviews'] || (Module['__edReplayPreviews'] = {next: 1, jobs: {}});
+    var id = jobs.next++;
+    var controller = new AbortController();
+    var job = {status: 0, data: null, controller: controller};
+    jobs.jobs[id] = job;
+    var url = UTF8ToString(url_ptr);
+    var timeout = setTimeout(function() { controller.abort(); }, 20000);
+    var range = async function(start, end) {
+        var response = await fetch(url, {headers: {'Range': 'bytes=' + start + '-' + end},
+            credentials: 'omit', signal: controller.signal});
+        var expected = end - start + 1;
+        var match = new RegExp('^bytes ([0-9]+)-([0-9]+)/([0-9]+)$').exec(response.headers.get('Content-Range') || String());
+        if (response.status !== 206 || !match || Number(match[1]) !== start || Number(match[2]) !== end) {
+            if (response.body) await response.body.cancel();
+            throw new Error('Range unavailable');
+        }
+        var reader = response.body.getReader();
+        var data = new Uint8Array(expected), offset = 0;
+        while (true) {
+            var part = await reader.read();
+            if (part.done) break;
+            if (offset + part.value.length > expected) { await reader.cancel(); throw new Error('Oversized range'); }
+            data.set(part.value, offset); offset += part.value.length;
+        }
+        if (offset !== expected) throw new Error('Truncated range');
+        return data;
+    };
+    (async function() {
+        try {
+            var prefix = await range(0, 8);
+            if (prefix[0] !== 69 || prefix[1] !== 68 || prefix[2] !== 80 || prefix[3] !== 75 ||
+                (prefix[4] !== 1 && prefix[4] !== 2)) throw new Error('Invalid pack');
+            var length = new DataView(prefix.buffer).getUint32(5, true);
+            if (!length || length > 4 * 1024 * 1024) throw new Error('Header too large');
+            var data = await range(9, length + 8);
+            if (jobs.jobs[id] === job) { job.data = data; job.status = 1; }
+        } catch (_) {
+            if (jobs.jobs[id] === job) job.status = -1;
+        } finally { clearTimeout(timeout); }
+    })();
+    return id;
+});
+EM_JS(int, edrl_preview_status, (int id), {
+    var state = Module['__edReplayPreviews']; var job = state && state.jobs[id];
+    return job ? job.status : -1;
+});
+EM_JS(void*, edrl_preview_take, (int id, int* size), {
+    var state = Module['__edReplayPreviews']; var job = state && state.jobs[id];
+    if (!job || !job.data) return 0;
+    var data = job.data, ptr = _malloc(data.length);
+    if (ptr) { HEAPU8.set(data, ptr); HEAP32[size >> 2] = data.length; }
+    delete state.jobs[id];
+    return ptr;
+});
+EM_JS(void, edrl_preview_cancel, (int id), {
+    var state = Module['__edReplayPreviews']; var job = state && state.jobs[id];
+    if (job) { delete state.jobs[id]; job.controller.abort(); }
+});
+
 EM_JS(void, edrl_copy_url, (const char* url_ptr), {
     var value = UTF8ToString(url_ptr);
     var fallback = function() {
@@ -191,6 +255,10 @@ static int edrl_loading() { return 0; }
 static int edrl_revision() { return 0; }
 static char* edrl_copy_payload() { return nullptr; }
 static char* edrl_copy_error() { return nullptr; }
+static int edrl_preview_begin(const char*) { return 0; }
+static int edrl_preview_status(int) { return -1; }
+static void* edrl_preview_take(int, int*) { return nullptr; }
+static void edrl_preview_cancel(int) {}
 static void edrl_copy_url(const char*) {}
 static void edrl_open_url(const char*) {}
 
@@ -216,10 +284,41 @@ ReplayLibraryWidget::ReplayLibraryWidget(const AppContext& ctx)
     begin_fetch(false);
 }
 
+ReplayLibraryWidget::~ReplayLibraryWidget() { edrl_preview_cancel(preview_request_); }
+
+void ReplayLibraryWidget::update_preview() {
+    if (!is_open) { edrl_preview_cancel(preview_request_); preview_request_ = 0; return; }
+    if (preview_request_) {
+        const int status = edrl_preview_status(preview_request_);
+        if (!status) return;
+        if (preview_pack_ >= 0 && preview_pack_ < static_cast<int>(packs_.size())) {
+            auto& pack = packs_[preview_pack_];
+            pack.preview_done = true;
+            int size = 0;
+            if (void* data = edrl_preview_take(preview_request_, &size)) {
+                pack.preview = PackPreview::decode(data, size, pack.exchange_id, pack.symbol, pack.event_id);
+                std::free(data);
+            }
+        }
+        edrl_preview_cancel(preview_request_);
+        preview_request_ = 0;
+    }
+    for (size_t i = 0; i < packs_.size(); ++i) {
+        auto& pack = packs_[i];
+        if (!pack.preview_requested || pack.preview_done) continue;
+        preview_pack_ = static_cast<int>(i);
+        preview_request_ = edrl_preview_begin(pack.pack_url.c_str());
+        if (!preview_request_) pack.preview_done = true;
+        break;
+    }
+}
+
 void ReplayLibraryWidget::begin_fetch(bool force) {
     error_.clear();
     edrl_fetch_begin(manifest_url_.c_str(), force ? 1 : 0);
     loading_ = true;
+    // Explicit refresh is also the retry action for failed previews.
+    if (force) for (auto& pack : packs_) if (pack.preview.bars.empty()) pack.preview_done = false;
 }
 
 bool ReplayLibraryWidget::is_http_url(const std::string& value) {
@@ -303,6 +402,9 @@ bool ReplayLibraryWidget::parse_manifest(
         pack.duration_seconds = item.value("duration_seconds", int64_t{0});
         pack.size_bytes = item.value("size_bytes", int64_t{0});
         pack.featured = item.value("featured", false);
+        pack.exchange_id = item.value("exchange_id", std::string());
+        pack.event_id = item.value("event_id", std::string());
+        pack.fingerprint = item.value("sha256", std::string());
 
         if (pack.id.empty() || pack.title.empty() || !is_http_url(pack.pack_url)) {
             continue;
@@ -315,7 +417,7 @@ bool ReplayLibraryWidget::parse_manifest(
         pack.metadata_line = pack.exchange;
         if (!date.empty()) pack.metadata_line += " | " + date;
         if (pack.duration_seconds > 0) {
-            pack.metadata_line += " | " + format_duration(pack.duration_seconds);
+            pack.metadata_line += " | " + format_duration(pack.duration_seconds) + " excerpt";
         }
         if (pack.size_bytes > 0) {
             pack.metadata_line += " | " + format_size(pack.size_bytes);
@@ -329,9 +431,22 @@ bool ReplayLibraryWidget::parse_manifest(
                 pack.tags_line += "#" + tag.get<std::string>();
             }
         }
+        // Preserve only previews of the exact same catalog object on refresh.
+        for (auto& old : packs_) {
+            if (old.id == pack.id && old.pack_url == pack.pack_url && old.fingerprint == pack.fingerprint &&
+                old.symbol == pack.symbol && old.exchange_id == pack.exchange_id && old.event_id == pack.event_id) {
+                pack.preview = old.preview;
+                pack.preview_done = old.preview_done;
+                pack.details_open = old.details_open;
+                break;
+            }
+        }
         parsed.push_back(std::move(pack));
     }
 
+    edrl_preview_cancel(preview_request_);
+    preview_request_ = 0;
+    pending_pack_ = -1;
     packs_ = std::move(parsed);
     catalog_ready_ = true;
     parse_error.clear();
@@ -343,6 +458,7 @@ bool ReplayLibraryWidget::parse_manifest(
 }
 
 void ReplayLibraryWidget::update() {
+    update_preview();
     loading_ = edrl_loading() != 0;
     const int revision = edrl_revision();
     if (revision != manifest_revision_ && revision > 0) {
@@ -369,60 +485,130 @@ void ReplayLibraryWidget::play_pack(const Pack& pack) {
     is_open = false;
 }
 
-void ReplayLibraryWidget::render_pack(const Pack& pack, int index) {
-    ImGui::PushID(pack.id.c_str());
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, Theme::Tokens::PANEL);
-    ImGui::PushStyleColor(ImGuiCol_Border, Theme::Tokens::BD1);
-    ImGui::BeginChild("##pack", ImVec2(0.0f, 164.0f), true,
-                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-
-    ImGui::PushFont(Theme::Fonts::ui_semibold());
-    ImGui::TextColored(Theme::Tokens::BRAND_TX, "%s", pack.display_symbol.c_str());
-    ImGui::SameLine(0.0f, 8.0f);
-    ImGui::TextUnformatted(pack.title.c_str());
-    ImGui::PopFont();
-    if (pack.featured) {
-        ImGui::SameLine(0.0f, 8.0f);
-        ImGui::TextColored(Theme::Tokens::WARN, "PICK");
-    }
-
-    ImGui::PushFont(Theme::Fonts::mono_sm());
-    ImGui::TextColored(Theme::Tokens::TX3, "%s", pack.metadata_line.c_str());
-    ImGui::PopFont();
-    ImGui::Spacing();
-    ImGui::PushTextWrapPos(0.0f);
-    ImGui::TextColored(Theme::Tokens::TX2, "%s", pack.summary.c_str());
-    ImGui::PopTextWrapPos();
-    if (!pack.tags_line.empty()) {
-        ImGui::TextColored(Theme::Tokens::TX3, "%s", pack.tags_line.c_str());
-    }
-
-    ImGui::SetCursorPosY(124.0f);
-    ImGui::PushStyleColor(ImGuiCol_Button, Theme::Tokens::BRAND);
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::Tokens::BRAND_TX);
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, Theme::Tokens::BRAND);
-    ImGui::PushStyleColor(ImGuiCol_Text, Theme::Tokens::BRAND_INK);
-    if (ImGui::Button("Replay", ImVec2(92.0f, 26.0f))) {
-        if (ctx_.replay_mgr().is_active()) {
-            pending_pack_ = index;
-            replace_popup_requested_ = true;
-        } else {
-            play_pack(pack);
+void ReplayLibraryWidget::render_preview(Pack& pack, ImVec2 size) {
+    using namespace Theme;
+    pack.preview_requested = true;
+    const ImVec2 a = ImGui::GetCursorScreenPos(), b(a.x + size.x, a.y + size.y);
+    auto* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(a, b, ImGui::GetColorU32(Tokens::BASE), 3.0f);
+    const auto& bars = pack.preview.bars;
+    ImGui::PushFont(Fonts::mono_sm());
+    dl->AddText(ImVec2(a.x + 10, a.y + 8), ImGui::GetColorU32(Tokens::TX3), "1m candles");
+    if (bars.empty()) {
+        dl->AddText(ImVec2(a.x + 10, a.y + size.y * .5f), ImGui::GetColorU32(Tokens::TX3),
+            pack.preview_done ? "Preview unavailable" : "Loading market preview...");
+    } else {
+        double lo = bars.front().low, hi = bars.front().high;
+        for (const auto& bar : bars) { lo = std::min(lo, bar.low); hi = std::max(hi, bar.high); }
+        const double pad = std::max((hi - lo) * .1, hi * .0001);
+        lo -= pad; hi += pad;
+        const float left = a.x + 10, right = b.x - 10, top = a.y + 29, bottom = b.y - 25;
+        auto y = [&](double price) { return bottom - static_cast<float>((price - lo) / (hi - lo)) * (bottom - top); };
+        auto x = [&](int64_t ts) { return left + static_cast<float>(double(ts - pack.preview.start_ms) /
+            double(pack.preview.end_ms - pack.preview.start_ms)) * (right - left); };
+        for (int i = 0; i <= 2; ++i) {
+            const float gy = top + (bottom - top) * i * .5f;
+            dl->AddLine(ImVec2(left, gy), ImVec2(right, gy), ImGui::GetColorU32(Tokens::BD1));
         }
+        const float half = std::clamp((x(pack.preview.start_ms + 60000) - left) * .3f, 1.0f, 5.0f);
+        for (const auto& bar : bars) {
+            const float cx = x(bar.time_ms + 30000);
+            const ImU32 color = ImGui::GetColorU32(bar.close >= bar.open ? Tokens::UP : Tokens::DOWN);
+            dl->AddLine(ImVec2(cx, y(bar.high)), ImVec2(cx, y(bar.low)), color);
+            const float yt = y(std::max(bar.open, bar.close)), yb = y(std::min(bar.open, bar.close));
+            dl->AddRectFilled(ImVec2(cx-half, yt), ImVec2(cx+half, std::max(yt + 1.0f, yb)), color);
+        }
+        char change[32];
+        snprintf(change, sizeof(change), "Clip net %+.1f%%", (bars.back().close / bars.front().open - 1) * 100);
+        dl->AddText(ImVec2(b.x - ImGui::CalcTextSize(change).x - 10, a.y + 8),
+            ImGui::GetColorU32(bars.back().close >= bars.front().open ? Tokens::UP : Tokens::DOWN), change);
+        auto utc = [](int64_t ms, char* out) {
+            const auto seconds = static_cast<std::time_t>(ms / 1000);
+            const auto* tm = std::gmtime(&seconds);
+            if (tm) std::strftime(out, 16, "%H:%M", tm); else snprintf(out, 16, "--:--");
+        };
+        char first[16], last[16], window[48];
+        utc(bars.front().time_ms, first); utc(bars.back().time_ms + 60000, last);
+        snprintf(window, sizeof(window), "%s - %s UTC", first, last);
+        dl->AddText(ImVec2(left, b.y - 17), ImGui::GetColorU32(Tokens::TX3), window);
     }
-    ImGui::PopStyleColor(4);
-    ImGui::SameLine();
-    if (ImGui::Button("Download .edpack", ImVec2(138.0f, 26.0f))) {
-        edrl_open_url(pack.pack_url.c_str());
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Copy URL", ImVec2(92.0f, 26.0f))) {
-        edrl_copy_url(pack.pack_url.c_str());
-        notice_ = "Pack URL copied";
-        notice_until_ = ImGui::GetTime() + 2.0;
-    }
+    ImGui::PopFont();
+    ImGui::Dummy(size);
+    if (ImGui::IsItemHovered()) Theme::tooltip("Actual complete 1-minute candles inside this recording.\nPre-roll and bars crossing the end are excluded. Gaps stay gaps.\nThe change is for the displayed bars, not the whole event.");
+}
 
+void ReplayLibraryWidget::render_pack(Pack& pack, int index) {
+    using namespace Theme;
+    ImGui::PushID(pack.id.c_str());
+    const float width = ImGui::GetContentRegionAvail().x;
+    const bool wide = width >= 660.0f;
+    const float preview_w = wide ? 250.0f : width - 24.0f;
+    const float text_w = wide ? width - preview_w - 40.0f : width - 24.0f;
+    std::string name = pack.title;
+    if (auto comma = name.find(','); comma != std::string::npos) name.resize(comma);
+    const auto base = pack.display_symbol.substr(0, pack.display_symbol.find('/')) + " ";
+    if (name.rfind(base, 0) == 0) name.erase(0, base.size());
+    if (!name.empty()) name[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(name[0])));
+    const float detail_h = pack.details_open ? ImGui::CalcTextSize(pack.summary.c_str(), nullptr, false, text_w).y + 10.0f : 0.0f;
+    ImGui::PushFont(Fonts::mono_sm());
+    const float small_line = ImGui::GetFontSize();
+    const float wrapped_extra = std::max(0.0f, ImGui::CalcTextSize(pack.metadata_line.c_str(), nullptr, false, text_w).y - small_line) +
+        std::max(0.0f, ImGui::CalcTextSize(pack.tags_line.c_str(), nullptr, false, text_w).y - small_line);
+    ImGui::PopFont();
+    const float height = (wide ? 154.0f : 288.0f) + detail_h + wrapped_extra;
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, Tokens::PANEL);
+    ImGui::PushStyleColor(ImGuiCol_Border, Tokens::BD1);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 10));
+    const bool visible = ImGui::BeginChild("##pack", ImVec2(0, height), true,
+        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    if (visible) {
+        const ImVec2 origin = ImGui::GetCursorPos();
+        render_preview(pack, ImVec2(preview_w, 132));
+        ImGui::SetCursorPos(wide ? ImVec2(origin.x + preview_w + 16, origin.y) : ImVec2(origin.x, origin.y + 142));
+        ImGui::BeginGroup();
+        ImGui::PushFont(Fonts::heading());
+        ImGui::TextUnformatted(pack.display_symbol.c_str());
+        ImGui::PopFont();
+        if (pack.featured) { ImGui::SameLine(); ImGui::TextColored(Tokens::TX3, "FEATURED"); }
+        ImGui::TextColored(Tokens::TX1, "%s", name.c_str());
+        ImGui::PushFont(Fonts::mono_sm());
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + text_w);
+        ImGui::TextColored(Tokens::TX3, "%s", pack.metadata_line.c_str());
+        ImGui::TextColored(Tokens::TX2, "%s", pack.tags_line.c_str());
+        ImGui::PopTextWrapPos();
+        ImGui::PopFont();
+        ImGui::Spacing();
+        ImGui::PushStyleColor(ImGuiCol_Button, Tokens::BRAND);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Tokens::BRAND_TX);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, Tokens::BRAND);
+        ImGui::PushStyleColor(ImGuiCol_Text, Tokens::BRAND_INK);
+        if (ImGui::Button("Replay", ImVec2(82, 26))) {
+            if (ctx_.replay_mgr().is_active()) { pending_pack_ = index; replace_popup_requested_ = true; }
+            else play_pack(pack);
+        }
+        ImGui::PopStyleColor(4);
+        ImGui::SameLine();
+        if (ImGui::Button(pack.details_open ? "Less" : "Details", ImVec2(68, 26))) pack.details_open = !pack.details_open;
+        ImGui::SameLine();
+        if (ImGui::Button("...", ImVec2(30, 26))) ImGui::OpenPopup("##pack_actions");
+        if (ImGui::BeginPopup("##pack_actions")) {
+            if (ImGui::MenuItem("Download .edpack")) edrl_open_url(pack.pack_url.c_str());
+            if (ImGui::MenuItem("Copy link")) {
+                edrl_copy_url(pack.pack_url.c_str());
+                notice_ = "Recording link copied"; notice_until_ = ImGui::GetTime() + 2.0;
+            }
+            ImGui::EndPopup();
+        }
+        if (pack.details_open) {
+            ImGui::Spacing();
+            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + text_w);
+            ImGui::TextColored(Tokens::TX2, "%s", pack.summary.c_str());
+            ImGui::PopTextWrapPos();
+        }
+        ImGui::EndGroup();
+    }
     ImGui::EndChild();
+    ImGui::PopStyleVar();
     ImGui::PopStyleColor(2);
     ImGui::PopID();
 }
@@ -459,7 +645,7 @@ void ReplayLibraryWidget::render() {
     if (!is_open) return;
 
     place_new_window();  // before our own size, so it wins
-    ImGui::SetNextWindowSize(ImVec2(610.0f, 560.0f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(850.0f, 850.0f), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSizeConstraints(ImVec2(420.0f, 360.0f), ImVec2(FLT_MAX, FLT_MAX));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 10.0f));
     if (!ImGui::Begin(title(), &is_open)) {
@@ -472,7 +658,7 @@ void ReplayLibraryWidget::render() {
     ImGui::TextUnformatted("Replay Library");
     ImGui::PopFont();
     ImGui::SameLine();
-    ImGui::TextColored(Theme::Tokens::TX3, "PUBLIC TEST DATA");
+    ImGui::TextColored(Theme::Tokens::TX3, "MARKET RECORDINGS");
     ImGui::SameLine(ImGui::GetWindowWidth() - 90.0f);
     if (ImGui::Button(loading_ ? "Loading" : "Refresh", ImVec2(72.0f, 24.0f)) && !loading_) {
         begin_fetch(true);
@@ -481,8 +667,7 @@ void ReplayLibraryWidget::render() {
     ImGui::PushTextWrapPos(0.0f);
     ImGui::TextColored(
         Theme::Tokens::TX2,
-        "Curated market recordings for deterministic local replay and testing. "
-        "Each pack runs client-side with no replay server or account.");
+        "Short excerpts of larger moves. Clip net shows the preview's change, not the full event's move.");
     ImGui::PopTextWrapPos();
     if (ImGui::IsItemHovered()) {
         Theme::tooltip("Manifest: %s", manifest_url_.c_str());
@@ -516,7 +701,7 @@ void ReplayLibraryWidget::render() {
                            packs_.size(), packs_.size() == 1 ? "" : "s",
                            loading_ ? " | refreshing" : "");
         ImGui::Spacing();
-        const float footer_height = 104.0f;
+        const float footer_height = Entitlements::is_pro() ? 48.0f : 76.0f;
         const float list_height = std::max(
             120.0f, ImGui::GetContentRegionAvail().y - footer_height);
         ImGui::BeginChild("##replay_library_list", ImVec2(0.0f, list_height), false);
@@ -533,31 +718,14 @@ void ReplayLibraryWidget::render() {
 
         ImGui::Separator();
         ImGui::PushTextWrapPos(0.0f);
-        ImGui::TextColored(
-            Theme::Tokens::TX2,
-            "Your local terminal starts recording today. EdgeDepth has already "
-            "been recording every supported Binance perp for months.");
+        ImGui::TextColored(Theme::Tokens::TX2, "Pause, slow down and scrub to inspect how the move unfolded.");
         ImGui::PopTextWrapPos();
-        char replay_offer[96];
-        snprintf(replay_offer, sizeof(replay_offer),
-                 "Pro lets you replay any moment from the last %d days.",
-                 Entitlements::pro_lookback_days());
-        ImGui::TextColored(
-            Theme::Tokens::TX3,
-            "%s", replay_offer);
-        ImGui::PushStyleColor(ImGuiCol_Button, Theme::Tokens::BRAND);
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::Tokens::BRAND_TX);
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, Theme::Tokens::BRAND);
-        ImGui::PushStyleColor(ImGuiCol_Text, Theme::Tokens::BRAND_INK);
-        char replay_cta[64];
-        snprintf(replay_cta, sizeof(replay_cta), "Unlock %d-day replay",
-                 Entitlements::pro_lookback_days());
-        if (ImGui::Button(replay_cta, ImVec2(176.0f, 28.0f))) {
-            edrl_open_url(
-                "https://edgedepth.com/pricing?utm_source=terminal&"
-                "utm_medium=replay_library&utm_campaign=oss_time_travel");
+        if (!Entitlements::is_pro()) {
+            ImGui::TextColored(Theme::Tokens::TX3, "These recordings are free. Explore more historical markets with Pro.");
+            if (ImGui::SmallButton("Explore replay plans"))
+                edrl_open_url("https://edgedepth.com/pricing?utm_source=terminal&utm_medium=replay_library");
         }
-        ImGui::PopStyleColor(4);
+
     }
 
     ImGui::End();

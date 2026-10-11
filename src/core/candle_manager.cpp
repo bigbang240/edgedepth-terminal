@@ -307,7 +307,9 @@ void CandleManager::reset_for_seek(int64_t seek_time_ms) {
 }
 
 void CandleManager::trim_candles_after(int64_t cutoff_ms) {
-    realtime_trades_.clear(); // The replay buffer re-delivers the traversed records.
+    clear_ticks(); // Future line points and prints belong to the old traversal.
+    carried_candle_valid_ = false;
+    replay_start_time_ms_ = cutoff_ms;
     // Remove the building candle if it's past the cutoff
     if (has_current_candle_ && current_candle_.timestamp_ms > cutoff_ms) {
         has_current_candle_ = false;
@@ -318,30 +320,16 @@ void CandleManager::trim_candles_after(int64_t cutoff_ms) {
         candles_.pop_back();
     }
 
-    // If the building candle survived (its bucket starts at or before the
-    // cutoff), truncate its OHLC. The candle may contain price data from
-    // AFTER the cutoff time (e.g., rewinding from 10:49:45 to 10:49:00 -
-    // the 10:49 candle's wick includes the spike at :45s). Reset to open
-    // so incoming replay data rebuilds the correct OHLC.
-    if (has_current_candle_ && current_candle_.timestamp_ms <= cutoff_ms) {
-        current_candle_.close = current_candle_.open;
-        current_candle_.high = current_candle_.open;
-        current_candle_.low = current_candle_.open;
-        current_candle_.volume = 0.0;
-        current_candle_.vbuy = 0.0;
-        current_candle_.vsell = 0.0;
-        current_candle_.tbuy = 0;
-        current_candle_.tsell = 0;
-    }
-
-    // If the building candle was removed, promote the last finalized candle
-    if (!has_current_candle_ && !candles_.empty()) {
+    // Promote only the period containing the cutoff. An earlier closed bar
+    // is already fully observed and must keep its OHLCV across a rewind gap.
+    const int64_t tf_ms = timeframe_seconds_ * 1000;
+    if (!has_current_candle_ && !candles_.empty() &&
+        candles_.back().timestamp_ms + tf_ms > cutoff_ms) {
         current_candle_ = candles_.back();
         candles_.pop_back();
         has_current_candle_ = true;
-
-        // Same OHLC reset - this candle's bucket is at or before the cutoff
-        // but it was finalized with a full minute of data.
+    }
+    if (has_current_candle_ && current_candle_.timestamp_ms + tf_ms > cutoff_ms) {
         current_candle_.close = current_candle_.open;
         current_candle_.high = current_candle_.open;
         current_candle_.low = current_candle_.open;
@@ -350,12 +338,12 @@ void CandleManager::trim_candles_after(int64_t cutoff_ms) {
         current_candle_.vsell = 0.0;
         current_candle_.tbuy = 0;
         current_candle_.tsell = 0;
+        current_candle_.final = false;
     }
 
     // Update tracking
-    if (!candles_.empty()) {
-        last_close_price_ = candles_.back().close;
-    }
+    last_close_price_ = !candles_.empty() ? candles_.back().close
+        : has_current_candle_ ? current_candle_.open : 0.0;
     replay_latest_time_ms_ = cutoff_ms;
     mark_dirty();
     follow_live_ = true;
@@ -624,6 +612,12 @@ void CandleManager::handle_candle(const Terminal::Candle& candle) {
         aligned.timestamp_ms = (candle.timestamp_ms / tf_ms) * tf_ms;
     }
 
+    // Trades drive the replay clock. After a boundary seek there may be no
+    // building candle yet; an ahead-of-clock server tick must not create one.
+    if (replay_start_time_ms_ > 0 && aligned.timestamp_ms > replay_playhead_ms()) {
+        return;
+    }
+
     // During replay, raw 15s candle ticks are ALL marked final=true (NATS stores
     // the final state of each 15s tick). But we're aggregating into 5m candles,
     // so treat them as partial updates. The candle only truly finalizes when the
@@ -826,6 +820,9 @@ void CandleManager::handle_candle_batch(std::span<const Terminal::Candle> batch)
     int64_t last_inserted_ts = std::numeric_limits<int64_t>::max();
     size_t inserted = 0;
     for (const auto& it : std::ranges::reverse_view(batch)) {
+        // A response requested before a rewind can arrive afterwards. Never
+        // let its future tail back into the replay, including secondary charts.
+        if (replay_start_time_ms_ > 0 && it.timestamp_ms > replay_playhead_ms()) continue;
         if (it.timestamp_ms >= prepend_before || it.timestamp_ms == last_inserted_ts) continue;
         candles_.push_front(it);
         last_inserted_ts = it.timestamp_ms;
@@ -844,7 +841,7 @@ void CandleManager::handle_candle_batch(std::span<const Terminal::Candle> batch)
     }
     oldest_candle_timestamp_ = candles_.front().timestamp_ms;
     if (!had_candles) {
-        last_close_price_ = batch.back().close;
+        last_close_price_ = candles_.back().close;
     }
     if (replay_start_time_ms_ > 0) {
         // REPLAY: runs for the initial load, TF switches AND seek batches

@@ -89,6 +89,22 @@ document.querySelector('#run').onclick=async()=>{
         check(a[1]===4050 && a[3]===1 && a[8]===8,
             'boundary retains the actual 50ms missing prefix, not a false 450ms gap');
         await send({type:'clear',id:'late-boundary'});
+        // Skipped 100ms bins are normal for sparse synchronized feeds. Their
+        // continuity must survive every archive zoom without black stripes.
+        await append('sparse', [...depth(1001,2,1), ...depth(1301,4), ...depth(1801,6),
+            3,1801,3, ...depth(4001,8,1), ...depth(4301,10)]);
+        for (const step of [100,500,1000]) {
+            messages=await query('sparse',1000,4500,step);
+            a=new Float64Array(messages.find(m=>m.type==='view').buffer);
+            const books=[];
+            for(let p=0;p<a.length;p+=a[p+2]) if(a[p]===1) books.push(Array.from(a.slice(p,p+a[p+2])));
+            const tail=books.filter(b=>b[1]>=4000);
+            check(tail.length>0 && tail[0][3]===1 && tail.slice(1).every(b=>b[3]===0),
+                'real interruption survives while sparse synchronized tail stays continuous at '+step);
+            if(step===100) check(books.find(b=>b[1]===1301)[3]===0,
+                'skipped time bins do not invent synchronization boundaries');
+        }
+        await send({type:'clear',id:'sparse'});
         const maximal=[];
         for(let i=0;i<181;i++) {
             maximal.push(1,i===0?10001:10000+i*500,2055,i===0?1:0,1000,1001,1024);

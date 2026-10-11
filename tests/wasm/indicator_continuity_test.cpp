@@ -17,7 +17,7 @@ namespace Theme {
 ImU32 get_buy_color_u32(uint8_t a) { return IM_COL32(0, 200, 160, a); }
 ImU32 get_sell_color_u32(uint8_t a) { return IM_COL32(240, 80, 120, a); }
 void tooltip(const char*, ...) {}
-void begin_tooltip() { ImGui::BeginTooltip(); }
+void begin_tooltip(bool) { ImGui::BeginTooltip(); }
 void end_tooltip() { ImGui::EndTooltip(); }
 namespace Fonts {
 ImFont* label() { return ImGui::GetFont(); }

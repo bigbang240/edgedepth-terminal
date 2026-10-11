@@ -52,11 +52,11 @@ inline void draw(ImDrawList& dl, ImVec2 center, float r, ImVec4 signed_color, Im
     const bool opaque = fill_style == Fill::Opaque;
     const ImU32 edge = opaque ? border : ImGui::GetColorU32(signed_color);
     // Translucent: small marks stay visible; large ones stay see-through.
-    const float fill_alpha = opaque ? 1.0f : r < 5.0f ? 0.55f : 0.30f;
+    const float fill_alpha = opaque ? 1.0f : r < 5.0f ? 0.38f : 0.18f;
     ImVec4 fill_color = signed_color;
     fill_color.w = fill_alpha;
     const ImU32 fill = ImGui::GetColorU32(fill_color);
-    const float r_fill = std::max(0.0f, r - (opaque ? 0.75f : 1.25f));
+    const float r_fill = std::max(0.0f, r - (opaque ? 0.6f : 0.8f));
     // Inner disc for the smaller side; below a pixel it would only dirty the centre.
     const float r_minor = minor > 0.0f ? r_fill * std::sqrt(std::min(minor, 0.5f)) : 0.0f;
     const bool mixed = r_minor >= 1.0f;

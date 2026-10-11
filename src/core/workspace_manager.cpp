@@ -12,6 +12,7 @@
 #include "ui/trades_widget.h"
 #include "ui/orderbook_widget.h"
 #include "ui/stats_widget.h"
+#include "ui/data_widget.h"
 #include "ui/watchlist_widget.h"
 #include "ui/replay_library_widget.h"
 #include "ui/positions_panel.h"
@@ -65,6 +66,7 @@ const AppContext* context = nullptr;
 Terminal::Pair active_pair;
 bool ready = false, enabled_now = false, was_enabled = false;
 bool save_requested = false, export_requested = false;
+bool focus_restored_market = false, focus_restored_data = false;
 int capture_after_frame = 0;
 double last_capture = -1;
 double last_library_write = -1;  // shared library autosave, spaced out to limit cross-window churn
@@ -76,29 +78,36 @@ const char* key(WidgetType type) {
     switch(type) {
     case WidgetType::Chart:return "chart"; case WidgetType::DOM:return "dom";
     case WidgetType::Trades:return "trades"; case WidgetType::Orderbook:return "depth";
-    case WidgetType::Stats:return "stats"; case WidgetType::Watchlist:return "watchlist";
+    case WidgetType::Data:return "data"; case WidgetType::Stats:return "stats"; case WidgetType::Watchlist:return "watchlist";
     case WidgetType::ReplayLibrary:return "library"; case WidgetType::PaperTrading:return "paper";
     default:return nullptr;
     }
 }
 Json capture() {
-    Json doc = {{"version",1},{"widgets",Json::array()},{"layout",ImGui::SaveIniSettingsToMemory()}};
-    std::set<std::string> seen;
+    Json doc = {{"version",1},{"widgets",Json::array()},{"layout",ImGui::SaveIniSettingsToMemory()},
+                {"market",{{"exchange",active_pair.exchange},{"symbol",active_pair.symbol}}}};
+
     for (const auto& w : *panels) {
         if (!w || !w->is_open || w->is_replay_widget) continue;
-        // Secondary charts are session-only for now: valid_document() holds
-        // one panel per type (workspace_document.h), so saving a second
-        // "chart" row would fail the whole capture and stall autosave while
-        // the second chart is open. Skip it so the primary keeps saving.
-        // TODO(workspace): persist secondary charts (instance, timeframe,
-        // rt_mode) once the document contract admits repeated chart rows.
-        if (w->type() == WidgetType::Chart &&
-            static_cast<const ChartWidget*>(w.get())->is_secondary()) continue;
         const auto* type = key(w->type()); if (!type) continue;
-        if (!seen.insert(type).second) {
-            notice = "Use one panel of each type before saving a workspace."; return {};
+        Json row = {{"type",type},{"title",w->title()},{"settings",w->save_settings()}};
+        const Terminal::Pair* pair = nullptr;
+        if (w->type() == WidgetType::Chart) {
+            const auto& chart = *static_cast<const ChartWidget*>(w.get());
+            row["instance"] = chart.chart_instance();
+            if (chart.is_secondary()) pair = &chart.pair();
+        } else if (w->type() == WidgetType::DOM && !w->follows_route) pair = &static_cast<const DOMWidget*>(w.get())->pair();
+        else if (w->type() == WidgetType::Trades && !w->follows_route) pair = &static_cast<const TradesWidget*>(w.get())->pair();
+        else if (w->type() == WidgetType::Orderbook) pair = &static_cast<const OrderbookWidget*>(w.get())->pair();
+        else if (w->type() == WidgetType::Stats) pair = &static_cast<const StatsWidget*>(w.get())->pair();
+        else if (w->type() == WidgetType::Data) pair = &static_cast<const DataWidget*>(w.get())->pair();
+        if (pair) row["pair"] = {{"exchange",pair->exchange},{"symbol",pair->symbol}};
+        if (w->follows_route && (w->type() == WidgetType::DOM || w->type() == WidgetType::Trades)) {
+            const auto& linked = w->type() == WidgetType::DOM ? static_cast<const DOMWidget*>(w.get())->pair()
+                                                            : static_cast<const TradesWidget*>(w.get())->pair();
+            row["route_pair"] = {{"exchange",linked.exchange},{"symbol",linked.symbol}};
         }
-        doc["widgets"].push_back({{"type",type},{"title",w->title()},{"settings",w->save_settings()}});
+        doc["widgets"].push_back(std::move(row));
     }
     return valid_document(doc) ? doc : Json{};
 }
@@ -138,55 +147,84 @@ bool persist() {
     last_written = bytes;
     return true;
 }
-void apply(const Json& doc) {
-    if (!valid_document(doc)) return;
-    const auto fmt = SymbolRegistry::instance().get_formatter(active_pair.exchange, active_pair.symbol);
-    const auto tick_size = SymbolRegistry::instance().tick_or_zero(active_pair.exchange, active_pair.symbol);
+void apply(const Json& saved) {
+    if (!valid_document(saved)) return;
+    const Json market = {{"exchange",active_pair.exchange},{"symbol",active_pair.symbol}};
+    const bool market_changed = document_market(saved) != market;
+    const auto doc = for_market(saved, market);
+    focus_restored_data = false;
+#ifdef __EMSCRIPTEN__
+    focus_restored_data = EM_ASM_INT({return new URLSearchParams(location.search).get('view') === 'data';});
+#endif
+    focus_restored_market = market_changed || focus_restored_data;
     // Retire subscribers before recreating the same keys. The context is still
     // live and stable here, and no widget iteration is in progress.
     panels->clear();
     std::string ini = doc["layout"].get<std::string>();
+    std::vector<Widget*> legacy_companions;
+    // Stage every old ID before assigning new market IDs. Otherwise switching
+    // A to B can overwrite the saved dock of a custom B chart already present.
+    size_t row_index = 0;
+    for (const auto& row : doc["widgets"])
+        remap_window_title(ini, row["title"].get<std::string>(),
+                           "###workspace_restore_" + std::to_string(row_index++));
+    row_index = 0;
     for (const auto& row : doc["widgets"]) {
+        const std::string staged_title = "###workspace_restore_" + std::to_string(row_index++);
         const auto type = row["type"].get<std::string>();
+        Terminal::Pair pair = active_pair;
+        if (row.contains("pair")) pair = {row["pair"]["exchange"].get<std::string>(), row["pair"]["symbol"].get<std::string>()};
+        const auto fmt = SymbolRegistry::instance().get_formatter(pair.exchange, pair.symbol);
+        const auto tick_size = SymbolRegistry::instance().tick_or_zero(pair.exchange, pair.symbol);
+        int instance = row.value("instance", 1);
         std::unique_ptr<Widget> w;
-        if (type == "chart") w = std::make_unique<ChartWidget>(active_pair,*context,tick_size);
-        else if (type == "dom") w = std::make_unique<DOMWidget>(active_pair,*context,tick_size,20);
-        else if (type == "trades") w = std::make_unique<TradesWidget>(active_pair,*context,fmt);
-        else if (type == "depth") w = std::make_unique<OrderbookWidget>(active_pair,*context,fmt);
-        else if (type == "stats") w = std::make_unique<StatsWidget>(active_pair,*context,fmt);
-        else if (type == "watchlist") w = std::make_unique<WatchlistWidget>(active_pair,*context);
+        if (type == "chart") w = std::make_unique<ChartWidget>(pair,*context,tick_size,instance);
+        else if (type == "dom") w = std::make_unique<DOMWidget>(pair,*context,tick_size,20);
+        else if (type == "trades") w = std::make_unique<TradesWidget>(pair,*context,fmt);
+        else if (type == "depth") w = std::make_unique<OrderbookWidget>(pair,*context,fmt);
+        else if (type == "data") w = std::make_unique<DataWidget>(pair,*context);
+        else if (type == "stats") w = std::make_unique<StatsWidget>(pair,*context,fmt);
+        else if (type == "watchlist") w = std::make_unique<WatchlistWidget>(pair,*context);
         else if (type == "library") w = std::make_unique<ReplayLibraryWidget>(*context);
         else if (type == "paper") w = std::make_unique<PositionsPanel>(*context);
         if (!w) continue;
+        w->follows_route = !row.contains("pair");
         w->load_settings(row["settings"]);
-        remap_window_title(ini, row["title"].get<std::string>(), w->title());
+        if ((type == "dom" || type == "trades") && !row.contains("pair") &&
+            !row["settings"].contains("mode_companion")) {
+            w->mode_companion = ini.empty(); // A preset uses the default dock tree.
+            legacy_companions.push_back(w.get());
+        }
+        remap_window_title(ini, staged_title, w->title());
         panels->push_back(std::move(w));
     }
     ImGui::ClearIniSettings();
     if (!ini.empty()) {
         ImGui::LoadIniSettingsFromMemory(ini.c_str(),ini.size());
-        // An INI can be syntactically valid while its main panels are floating
-        // (or its watchlist shares the chart tab). Never restore that at boot.
-        bool docked = true;
-        ImGuiID chart_dock = 0, watchlist_dock = 0;
-        for (const auto& w : *panels) {
-            if (w->type() != WidgetType::Chart && w->type() != WidgetType::DOM &&
-                w->type() != WidgetType::Watchlist) continue;
-            const auto* settings = ImGui::FindWindowSettingsByID(ImHashStr(w->title()));
-            const auto* node = settings ? ImGui::DockBuilderGetNode(settings->DockId) : nullptr;
-            const auto* root = node;
-            while (root && root->ParentNode) root = root->ParentNode;
-            docked &= root && root->IsDockSpace() && node->Size.x >= 200 && node->Size.y >= 160;
-            if (w->type() == WidgetType::Chart) chart_dock = settings ? settings->DockId : 0;
-            if (w->type() == WidgetType::Watchlist) watchlist_dock = settings ? settings->DockId : 0;
+        // Older workspaces have no ownership flag. Recognize only the default
+        // chart-left / DOM-over-tape-right split; retain arbitrary custom layouts.
+        const auto node_for = [](const Widget& widget) -> ImGuiDockNode* {
+            const auto* settings = ImGui::FindWindowSettingsByID(ImHashStr(widget.title()));
+            return settings ? ImGui::DockBuilderGetNode(settings->DockId) : nullptr;
+        };
+        ImGuiDockNode* chart_node = nullptr;
+        for (const auto& w : *panels)
+            if (w->type() == WidgetType::Chart && !static_cast<ChartWidget*>(w.get())->is_secondary())
+                chart_node = node_for(*w);
+        for (auto* w : legacy_companions) {
+            const auto* node = node_for(*w);
+            const auto* column = node ? node->ParentNode : nullptr;
+            const auto* split = column ? column->ParentNode : nullptr;
+            const int slot = w->type() == WidgetType::DOM ? 0 : 1;
+            w->mode_companion = chart_node && column && split &&
+                column->SplitAxis == ImGuiAxis_Y && column->ChildNodes[slot] == node &&
+                split->SplitAxis == ImGuiAxis_X && split->ChildNodes[0] == chart_node &&
+                split->ChildNodes[1] == column;
         }
-        if (docked && (!watchlist_dock || chart_dock != watchlist_dock)) {
-            LayoutManager::restore_layout_for(active_pair.exchange,active_pair.symbol);
-        } else {
-            ImGui::ClearIniSettings();
-            LayoutManager::reset_layout_for(active_pair.exchange,active_pair.symbol);
-            notice = "Panel layout repaired. Your chart settings are preserved.";
-        }
+        // Floating, tabbed and temporarily hidden windows are valid layouts.
+        // ImGui retains their DockId and split SizeRef while not submitted.
+        LayoutManager::restore_layout_for(active_pair.exchange,active_pair.symbol);
+
     }
     else LayoutManager::reset_layout_for(active_pair.exchange,active_pair.symbol);
 }
@@ -202,10 +240,17 @@ Json preset(int index) {
     Json d = {{"version",1},{"layout",""},{"widgets",Json::array()}};
     for (const auto* type : {"chart","dom","trades","watchlist"})
         d["widgets"].push_back({{"type",type},{"title",""},
-            {"settings",std::string(type)=="chart"?settings:Json::object()}});
+            {"settings",std::string(type)=="chart" ? settings :
+                (std::string(type)=="dom" || std::string(type)=="trades") ?
+                    Json{{"mode_companion",true}} : Json::object()}});
     if (index == 2) d["widgets"].push_back({{"type","library"},{"title",""},{"settings",Json::object()}});
     return d;
 }
+}
+void checkpoint_live() {
+    if (!ready || !enabled_now || !panels) return;
+    auto next = capture();
+    if (!next.is_null() && next.dump().size() <= max_bytes) current = std::move(next);
 }
 void flush() {
     if (!ready || !enabled_now || !panels || !context || context->replay_mgr().is_active() ||
@@ -280,6 +325,21 @@ void tick(std::vector<std::unique_ptr<Widget>>& widgets, const AppContext& ctx,
         // DockBuilder and new windows need a completed frame before capture.
         capture_after_frame = ImGui::GetFrameCount() + 1;
         return;
+    }
+    if (focus_restored_market) {
+        // Newly appearing comparison windows may take focus on their first
+        // Begin. Wait one frame so the requested market wins after all exist.
+        focus_restored_market = false;
+        for (const auto& w : widgets) {
+            if (focus_restored_data && w->type() == WidgetType::Data) {
+                const auto& target = static_cast<DataWidget*>(w.get())->pair();
+                if (target.exchange != pair.exchange || target.symbol != pair.symbol) continue;
+            } else if (!focus_restored_data && w->type() == WidgetType::Chart) {
+                if (static_cast<ChartWidget*>(w.get())->is_secondary()) continue;
+            } else continue;
+            ImGui::SetWindowFocus(w->title());
+            break;
+        }
     }
     if (ImGui::GetFrameCount() <= capture_after_frame) return;
     library["layout_revision"] = 2;

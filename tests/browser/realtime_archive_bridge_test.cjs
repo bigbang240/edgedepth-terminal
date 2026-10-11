@@ -17,7 +17,14 @@ assert.equal(bridge.append('one',new ArrayBuffer(2*1024*1024)),1);
 assert.equal(bridge.append('one',new ArrayBuffer(8)),0);
 assert.equal(worker.messages.length,2,'full queue must not enqueue');
 assert.equal(bridge.capacity('one',8),0,'reject before copying WASM bytes');
+let resumed=0;
+context.Module._capture_background_live=()=>{
+    ++resumed;
+    assert.equal(bridge.capacity('one',8),1,'background catch-up runs after transport capacity is released');
+};
 worker.emit({type:'ack',id:'one',bytes:2*1024*1024});
+assert.equal(resumed,1,'completed writes wake bounded background catch-up');
+delete context.Module._capture_background_live;
 assert.equal(bridge.append('one',new ArrayBuffer(8)),1);
 assert.equal(bridge.query('one',0,1000,1000,100,1),1);
 assert.equal(bridge.query('one',0,2000,2000,100,1),0,'one pending request per market');

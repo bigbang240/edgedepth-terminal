@@ -28,5 +28,21 @@ int main() {
     check(!levels(bars,t,t+60000,60000).complete);
     bars[0].volume=1; bars[0].high=std::numeric_limits<double>::infinity();
     vwap(bars,t,t+60000,60000,s); check(s.values.empty());
-    std::puts("UTC boundaries, weighted VWAP, anchor, rewind and missing-data checks passed");
+    {
+        // Quiet minutes (no trades, so no candle) inside loaded history: tolerated up to max_gap, a longer hole is
+        // missing data, and history that starts after the period start never completes it.
+        std::vector<Candle> q{{t,12,8,10,2},{t+180000,30,20,25,2},{t+240000,40,30,35,1}};
+        Series v;
+        vwap(q,t,t+300000,60000,v); check(!v.complete && v.values.size()==1);           // strict: the gap stops it
+        vwap(q,t,t+300000,60000,v,120000); check(v.complete && v.values.size()>=3);     // two quiet minutes pass
+        vwap(q,t,t+300000,60000,v,60000); check(!v.complete);                           // a 2-minute hole does not
+        auto lq=levels(q,t,t+300000,60000,120000); check(lq.complete && lq.high==40 && lq.low==8 && lq.close==35);
+        check(!levels(q,t,t+300000,60000).complete);
+        check(!levels(q,t,t+360000,60000,0).complete);
+        check(levels(q,t,t+360000,60000,120000).complete);                              // the last minute was quiet
+        std::vector<Candle> late{{t+60000,12,8,10,2},{t+120000,12,8,10,2}};
+        check(!levels(late,t,t+180000,60000,3600000).complete);                         // history starts after t
+        vwap(late,t,t+180000,60000,v,3600000); check(!v.complete && v.values.empty());
+    }
+    std::puts("UTC boundaries, weighted VWAP, anchor, rewind, missing-data and quiet-gap checks passed");
 }

@@ -69,6 +69,15 @@ enum Stream {
     // from receiving rollout-only geometry.
     STREAM_PATTERN_ADMIN = 35;
     STREAM_RT_HISTORY = 36;
+    STREAM_ICEBERG_STATE = 37;
+    // Live V2 modelled liquidation map (LiqMapV2Frame) and its get_historical_liqmap2 response
+    // (LiqMapV2History). Modelled from the venue's open interest, never observed positions (34).
+    STREAM_LIQMAP2 = 38;
+    STREAM_HISTORICAL_LIQMAP2 = 39;
+    // V2 rails admin preview (LiqMapV2Rails on liqmap2.<ex>.<sym>.rails) and its get_historical_liqmap2_rails
+    // response (LiqMapV2RailsHistory). Admin only until the rails forward check passes and James releases them.
+    STREAM_LIQMAP2_RAILS = 40;
+    STREAM_HISTORICAL_LIQMAP2_RAILS = 41;
 }
 
 message WSPayload {
@@ -169,6 +178,8 @@ message Liquidation {
     double avg_price = 3;
     double qty = 4;
     bool is_buy = 5;
+    int64 trade_timestamp_ms = 6;
+    double filled_qty = 7;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -866,4 +877,130 @@ message RealtimeTradeBin {
   uint32 count = 8;
   int64 first_id = 9;
   int64 last_id = 10;
+}
+
+// Live display snapshot, never a reconstruction or proof of hidden inventory.
+// Sides are taker sides. Volumes include only in-window bulks of qualifying
+// repeated-trade clusters; not the detector's projected total hidden size.
+message IcebergStats {
+  uint32 schema_version = 1;
+  int64 timestamp_ms = 2;
+  int64 source_trade_ms = 3;
+  int64 window_start_ms = 4;
+  int64 window_end_ms = 5;
+  int64 detector_start_ms = 6;
+  int32 buy_clusters = 7;
+  int32 sell_clusters = 8;
+  double buy_executed_usd = 9;
+  double sell_executed_usd = 10;
+  bool history_limited = 11;
+  double min_confidence = 12;
+  int32 min_refreshes = 13;
+  double min_bulk_usd = 14;
+}
+
+// V2 modelled liquidation map frame (backend proto/liqmap2.proto, cmd/liqmap2-publisher; hub task
+// liq-map-v2). One per market per minute: standing long liquidations below the mark and short ones
+// above it, ascending price on the 0.25% log grid, at most 256 within 20% of the mark, in USD after
+// the frozen per-class scale. An estimate from open interest, not observed positions.
+message LiqMapV2Frame {
+  Pair pair = 1;
+  int64 timestamp_ms = 2;
+  double mark_price = 3;
+  double band_width_pct = 4;
+  repeated double price_mid = 5;
+  repeated double long_usd = 6;
+  repeated double short_usd = 7;
+  double total_long_usd = 8;
+  double total_short_usd = 9;
+  string status = 10;            // ready | warming | stale
+  int64 warm_since_ms = 11;
+  int64 last_bar_ms = 12;
+  string model_class = 13;       // majors | mid | small
+  double usd_scale = 14;
+  string config_id = 15;
+  bool provisional = 16;         // no registered test covers this market
+  string version = 17;
+  uint32 dropped_levels = 18;
+  // V2.2 (backend proto/liqmap2.proto): expected liquidation USD if price reaches 0.5% band k = 1..40 from
+  // mark_price within 30 minutes (index k - 1; longs below, shorts above); empty when V2.2 has no value.
+  repeated double expected_long_usd = 19;
+  repeated double expected_short_usd = 20;
+  string regime = 21;            // calm | normal | active | extreme (24 h realized volatility)
+  bool hot = 22;                 // moved at least 30% either way over 24 h
+  double day_move = 23;          // ln(close / close 24 h earlier)
+  string v22_config_id = 24;
+}
+
+// get_historical_liqmap2 response: one market's stored frames, oldest first, at most six hours.
+message LiqMapV2History {
+  Pair pair = 1;
+  int64 start_ms = 2;
+  int64 end_ms = 3;
+  repeated LiqMapV2Frame frames = 4;
+}
+
+// V2 rails admin preview (backend proto/liqmap2.proto; hub task liq-map-v2, rails/PREREG_RAILS_FORWARD.md). A
+// rail is a fixed price picked from the modelled fuel; its numbers are calibrated against Bybit's liquidation
+// record and change at most hourly.
+message LiqMapV2Rail {
+  int64 id = 1;            // unique within the market and config_id
+  bool is_long = 2;        // long liquidations below the mark, or short above it
+  double price = 3;        // fixed for life
+  int64 born_ms = 4;
+  double zone_lo = 5;      // the price interval whose fuel the rail stands for
+  double zone_hi = 6;
+  double usd = 7;          // calibrated liquidation USD if price reaches the zone
+  double chance = 8;       // chance of reaching the zone within 24 h; -1 when unknown
+  double expected_usd = 9; // calibrated liquidations expected within 24 h; -1 when unknown
+  int64 step_ms = 10;      // when usd, chance and expected_usd were last set
+  // The same within 1 h and 4 h (hub rails/PREREG_RAILS_HORIZONS_FORWARD.md): chance from the touch model's own
+  // horizon, expected = usd x chance; -1 when unknown.
+  double chance_1h = 11;
+  double expected_usd_1h = 12;
+  double chance_4h = 13;
+  double expected_usd_4h = 14;
+}
+
+message LiqMapV2RailEnd {
+  int64 id = 1;
+  bool is_long = 2;
+  double price = 3;
+  int64 born_ms = 4;
+  int64 end_ms = 5;        // start of the bar that ended it
+  string end = 6;          // touched | closed
+}
+
+message LiqMapV2Rails {
+  Pair pair = 1;
+  int64 timestamp_ms = 2;
+  double mark_price = 3;
+  string status = 4;           // ready | warming | stale
+  string config_id = 5;
+  string version = 6;
+  string model_class = 7;
+  bool provisional = 8;
+  bool chance_ready = 9;
+  int64 warm_since_ms = 10;
+  int64 last_bar_ms = 11;
+  double fuel_long_usd = 12;
+  double fuel_short_usd = 13;
+  repeated LiqMapV2Rail rails = 14;      // ascending price
+  repeated LiqMapV2RailEnd ended = 15;   // since the previous message
+}
+
+message LiqMapV2RailRecord {
+  LiqMapV2Rail rail = 1;                 // its latest stored step
+  repeated LiqMapV2Rail steps = 2;       // every stored step, oldest first
+  int64 end_ms = 3;                      // 0 while live
+  string end = 4;
+  string config_id = 5;                  // the rails bundle its id belongs to
+}
+
+// get_historical_liqmap2_rails response: every stored rail of one market alive within [start, end].
+message LiqMapV2RailsHistory {
+  Pair pair = 1;
+  int64 start_ms = 2;
+  int64 end_ms = 3;
+  repeated LiqMapV2RailRecord rails = 4;
 }

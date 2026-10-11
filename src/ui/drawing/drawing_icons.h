@@ -55,6 +55,15 @@ enum class UiIcon : uint8_t {
     Check,          // selected / on
     ChevronDown,    // an open menu group
     Refresh,        // recalibrate
+    // Card controls (design v3, 2026-10-10).
+    Info,           // what this is (hover)
+    Expand,         // enlarge a card
+    Collapse,       // back to the grid
+    ArrowUpRight,   // opens elsewhere (research, the web)
+    ChevronUp,
+    Rows,           // row density
+    Grid,           // categories
+    Target,         // centre on price (DOM)
 };
 
 void draw_tool_icon(ImDrawList* dl, Tool t, ImVec2 c, float s, ImU32 col,

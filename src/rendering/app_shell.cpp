@@ -25,10 +25,13 @@
 #include "ui/chart_widget.h"
 #include "ui/upsell_modal.h"
 #include "core/entitlements.h"
+#include "core/realtime_preview.h"
 #include "core/heatmap_colormap.h"
+#include "core/ui_test_marks.h"
 #include "core/display_time_zone.h"
 #include "core/drawing_manager.h"
 #include "ui/drawing/drawing_toolbar.h"
+#include "ui/drawing/drawing_icons.h"
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -364,8 +367,7 @@ namespace {
                 const std::string& renewal = Entitlements::renews_label();
                 if (!renewal.empty()) ImGui::Text("Renews %s", renewal.c_str());
             } else {
-                ImGui::Text("Free replay day: %s", Entitlements::free_window_day_label());
-                ImGui::TextUnformatted("6 major replay symbols");
+                ImGui::TextUnformatted("Replay: BTCUSDT, past 3 days");
                 ImGui::TextUnformatted("Recent and public events");
                 ImGui::TextUnformatted("Free and public lessons");
                 ImGui::TextUnformatted("Live real-time and sub-minute: Pro / Research");
@@ -523,7 +525,17 @@ namespace {
 
     const char* tf_label(int sec) {
         for (const auto& t : TF_CATALOG) if (t.sec == sec) return t.label;
-        return "?";
+        // A custom timeframe (7m, 90s, 3h): its own short label, from a few rotating buffers so two in one
+        // expression never share one.
+        static char bufs[4][12];
+        static int next = 0;
+        char* b = bufs[next++ & 3];
+        if (sec % 604800 == 0) snprintf(b, 12, "%dW", sec / 604800);
+        else if (sec % 86400 == 0) snprintf(b, 12, "%dD", sec / 86400);
+        else if (sec % 3600 == 0) snprintf(b, 12, "%dh", sec / 3600);
+        else if (sec % 60 == 0) snprintf(b, 12, "%dm", sec / 60);
+        else snprintf(b, 12, "%ds", sec);
+        return b;
     }
     bool tf_is_fav(int sec) {
         for (int s : g_tf_favs) if (s == sec) return true;
@@ -560,81 +572,84 @@ namespace {
         ImGui::CloseCurrentPopup();
     }
 
-    // One timeframe pill in the dropdown (2c). Left-click selects (closes the
-    // menu), right-click toggles favourite; Pro-locked pills open the upsell.
-    // Active duration uses an underline and stronger text;
-    // the favourite star affordance sits on the pill's top-right corner (accent).
-    void tf_pill(ChartWidget* chart, const TFItem& t, int64_t cur, bool pro, ImDrawList* dl) {
+    // One timeframe chip in the dropdown (design v3, 2026-10-11): a soft rounded chip in a grid, the current one
+    // solid; a star at its top-right corner pins it to the bar (click the star; right-click anywhere also toggles);
+    // Pro-locked chips carry a lock and open the upsell.
+    void tf_pill(ChartWidget* chart, const TFItem& t, int64_t cur, bool pro, ImDrawList* dl, float w) {
         using namespace Theme;
         const bool on     = (t.sec == cur);
         const bool locked = (t.pro && !pro);
         const bool fav    = tf_is_fav(t.sec);
-        const float h = 26.0f, padx = 9.0f, lockpad = locked ? 11.0f : 0.0f;
-        ImGui::PushFont(Fonts::mono_sm());
-        const ImVec2 ts = ImGui::CalcTextSize(t.label);
-        ImGui::PopFont();
-        float w = ts.x + padx * 2.0f + lockpad;
-        if (w < 40.0f) w = 40.0f;
+        const float h = 32.0f;
         const ImVec2 p = ImGui::GetCursorScreenPos();
         ImGui::PushID(t.sec);
         const bool clicked = ImGui::InvisibleButton("##tfp", ImVec2(w, h));
         const bool hov     = ImGui::IsItemHovered();
         const bool rclick  = ImGui::IsItemClicked(ImGuiMouseButton_Right);
         ImGui::PopID();
-        if (hov) dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), u32(Tokens::HOVER));
-        if (on) dl->AddLine(ImVec2(p.x + 8, p.y + h - 1),
-                            ImVec2(p.x + w - 8, p.y + h - 1), u32(Tokens::TX1), 2);
-        const ImVec4 tcol = locked ? Tokens::TX4 : (on ? Tokens::TX1 : (hov ? Tokens::TX1 : Tokens::TX2));
+        const ImVec2 m = ImGui::GetIO().MousePos;
+        const ImVec2 star_c(p.x + w - 8.0f, p.y + 8.0f);
+        const bool on_star = !locked && hov && m.x >= p.x + w - 17.0f && m.y <= p.y + 17.0f;
+        const ImVec2 q(p.x + w, p.y + h);
+        if (on) dl->AddRectFilled(p, q, u32(Tokens::TX1), Radius::R2);
+        else dl->AddRectFilled(p, q, u32(hov && !locked ? Tokens::CONTROL_HOVER : Tokens::CONTROL), Radius::R2);
+        const ImVec4 tcol = on ? Tokens::BRAND_INK : locked ? Tokens::TX4 : hov ? Tokens::TX1 : Tokens::TX2;
         ImGui::PushFont(Fonts::mono_sm());
-        dl->AddText(ImVec2(p.x + (w - ts.x - lockpad) * 0.5f, p.y + (h - ts.y) * 0.5f), u32(tcol), t.label);
+        const ImVec2 ts = ImGui::CalcTextSize(t.label);
+        const float lockpad = locked ? 10.0f : 0.0f;
+        dl->AddText(ImVec2(std::round(p.x + (w - ts.x - lockpad) * 0.5f), std::round(p.y + (h - ts.y) * 0.5f)), u32(tcol), t.label);
         ImGui::PopFont();
-        if (locked)     ac_ic_lock(dl, ImVec2(p.x + w - 9.0f, p.y + h * 0.5f), 10.0f, u32(Tokens::TX4), 1.2f);
-        else if (fav)   ac_ic_star(dl, ImVec2(p.x + w - 1.0f, p.y), 4.0f, u32(Tokens::TX3));
-        else if (hov)   ac_ic_star(dl, ImVec2(p.x + w - 1.0f, p.y), 4.0f, u32(Tokens::TX4));
+        if (locked) ac_ic_lock(dl, ImVec2(p.x + (w + ts.x) * 0.5f + 2.0f, p.y + h * 0.5f), 9.0f, u32(Tokens::TX4), 1.2f);
+        else if (fav) ac_ic_star(dl, star_c, 4.0f, u32(on ? Tokens::BRAND_INK : on_star ? Tokens::TX1 : Tokens::WARN));
+        else if (hov) {
+            // An outline star: pin me.
+            ImVec2 pts[10];
+            for (int i = 0; i < 10; ++i) {
+                const float a = -1.5708f + i * 0.628318f, rr = (i & 1) ? 4.0f * 0.42f : 4.0f;
+                pts[i] = ImVec2(star_c.x + cosf(a) * rr, star_c.y + sinf(a) * rr);
+            }
+            dl->AddPolyline(pts, 10, u32(on ? Tokens::BRAND_INK : on_star ? Tokens::TX1 : Tokens::TX3), ImDrawFlags_Closed, 1.0f);
+        }
         if (clicked) {
             if (locked) open_subminute_upsell();
+            else if (on_star) tf_toggle_fav(t.sec);
             else if (chart) { chart->change_timeframe(t.sec); ImGui::CloseCurrentPopup(); }
         }
         if (rclick && !locked) tf_toggle_fav(t.sec);
         if (hov) Theme::tooltip(locked ? "Sub-minute candles are a Pro timeframe"
-                                          : (fav ? "Right-click to unfavourite" : "Right-click to favourite"));
+                                : on_star ? (fav ? "Unpin from the bar" : (g_tf_favs.size() < 6 ? "Pin to the bar" : "The bar holds 6: unpin one first"))
+                                : (fav ? "Pinned to the bar" : "Click to open. The star pins it to the bar."));
     }
 
-    // The dropdown - grouped catalogue, favourites counter, custom field. Same
-    // chrome, section headers and PRO tag as the other chart menus.
+    // The dropdown: a header with the pinned count, grouped chips in a grid, then a custom timeframe field.
     void render_tf_menu(ChartWidget* chart) {
         using namespace Theme;
         const int64_t cur = chart ? chart->timeframe_seconds() : 0;
         const bool pro = Entitlements::is_pro();
-        if (Theme::begin_menu("##tf_menu", 360.0f)) {
+        if (Theme::begin_menu("##tf_menu", 372.0f)) {
             ImDrawList* dl = ImGui::GetWindowDrawList();
             const float menu_w = ImGui::GetContentRegionAvail().x;
+            const float pad = 10.0f, gap = 6.0f;
+            constexpr int kCols = 5;
+            const float cell_w = std::floor((menu_w - pad * 2.0f - gap * (kCols - 1)) / kCols);
 
-            // TIMEFRAME ........................ * FAVOURITES N/6 (FULL BAR)
+            // Header: "Timeframe" and, at the right, the pinned count.
             {
                 const ImVec2 p = ImGui::GetCursorScreenPos();
-                Theme::menu_section("TIMEFRAME");
-                char fc[40];
-                const int nfav = static_cast<int>(g_tf_favs.size());
-                if (nfav >= 6) snprintf(fc, sizeof(fc), "FAVOURITES %d/6 \xC2\xB7 FULL BAR", nfav);
-                else           snprintf(fc, sizeof(fc), "FAVOURITES %d/6", nfav);
-                ImGui::PushFont(Fonts::label());
-                const float fcw = ImGui::CalcTextSize(fc).x;
-                const float fx = p.x + menu_w - 10.0f - fcw;
-                dl->AddText(ImVec2(fx, p.y + 8.0f), u32(Tokens::TX3), fc);
-                ac_ic_star(dl, ImVec2(fx - 8.0f, p.y + 8.0f + ImGui::GetFontSize() * 0.5f), 4.0f,
-                           u32(Tokens::TX3));
-                ImGui::PopFont();
+                const float hh = 34.0f;
+                dl->AddText(Fonts::ui_semibold(), 14.0f, ImVec2(p.x + pad, p.y + (hh - 14.0f * 1.17f) * 0.5f), u32(Tokens::TX1), "Timeframe");
+                char fc[32];
+                snprintf(fc, sizeof(fc), "%d / 6 pinned", static_cast<int>(g_tf_favs.size()));
+                const float fw = Fonts::ui()->CalcTextSizeA(12.5f, FLT_MAX, 0.0f, fc).x;
+                const float fx = p.x + menu_w - pad - fw;
+                dl->AddText(Fonts::ui(), 12.5f, ImVec2(fx, p.y + (hh - 12.5f * 1.17f) * 0.5f), u32(Tokens::TX3), fc);
+                ac_ic_star(dl, ImVec2(fx - 9.0f, p.y + hh * 0.5f), 4.0f, u32(Tokens::WARN));
+                ImGui::Dummy(ImVec2(menu_w, hh));
             }
             Theme::menu_separator();
 
-            // Real-time mode is NOT in this menu any more. It used to be a bare
-            // "RT" pill in here, with no Pro badge for Free viewers, and Search
-            // Console showed people googling "enable bubbles on edgedepth" after
-            // seeing them in the welcome replay: the toggle was invisible until
-            // the caret was opened. It is now a labelled pill drawn BESIDE this
-            // control (render_tf_control), locked for Free on hosted live.
-
+            // Real-time mode is NOT in this menu: it is the labelled pill beside the bar (render_tf_control),
+            // locked for Free on hosted live.
             auto draw_group = [&](const char* label, int lo, int hi, bool gated) {
                 const ImVec2 p = ImGui::GetCursorScreenPos();
                 Theme::menu_section(label);
@@ -645,55 +660,58 @@ namespace {
                     const ImVec2 tag = Theme::pro_tag_size();
                     Theme::draw_pro_tag(dl, ImVec2(p.x + 10.0f + lw + 8.0f, p.y + 8.0f - (tag.y - 11.5f) * 0.5f - 1.0f));
                 }
-                ImGui::Indent(4.0f);
+                const float x0 = ImGui::GetCursorScreenPos().x + pad;
                 for (int i = lo; i <= hi; ++i) {
-                    if (i > lo) ImGui::SameLine(0.0f, 4.0f);
-                    tf_pill(chart, TF_CATALOG[i], cur, pro, dl);
+                    const int k = i - lo;
+                    if (k % kCols == 0) {
+                        if (k) ImGui::Dummy(ImVec2(0, gap - ImGui::GetStyle().ItemSpacing.y));
+                        ImGui::SetCursorScreenPos(ImVec2(x0, ImGui::GetCursorScreenPos().y));
+                    } else {
+                        ImGui::SameLine(0.0f, gap);
+                    }
+                    tf_pill(chart, TF_CATALOG[i], cur, pro, dl, cell_w);
                 }
-                ImGui::Unindent(4.0f);
+                ImGui::Dummy(ImVec2(0, 4));
             };
             draw_group("SECONDS", 0, 3, true);
             draw_group("MINUTES", 4, 8, false);
             draw_group("HOURS", 9, 13, false);
             draw_group("DAYS", 14, 15, false);
 
-            ImGui::Dummy(ImVec2(0, 4));
             Theme::menu_separator();
-            Theme::menu_note("Click sets the chart. Right-click pins it to the bar (max 6).");
-            ImGui::Dummy(ImVec2(0, 4));
-
-            // Custom field + Add.
-            ImGui::Indent(10.0f);
-            ImGui::PushFont(Fonts::ui());
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextColored(Tokens::TX3, "Custom");
-            ImGui::SameLine(0.0f, 10.0f);
-            ImGui::PushStyleColor(ImGuiCol_FrameBg, Tokens::INPUT);
-            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 0.0f);
-            ImGui::SetNextItemWidth(std::max(120.0f, menu_w - 140.0f));
-            const bool entered = ImGui::InputTextWithHint("##tf_custom", "e.g. 7m, 90s, 3h",
-                                     g_tf_custom, sizeof(g_tf_custom), ImGuiInputTextFlags_EnterReturnsTrue);
-            ImGui::SameLine(0.0f, 6.0f);
-            ImGui::PushStyleColor(ImGuiCol_Button, Tokens::ELEV);
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Tokens::BD2);
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, Tokens::ELEV);
-            ImGui::PushStyleColor(ImGuiCol_Text, Tokens::TX1);
-            const bool add = ImGui::Button("Add") || entered;
-            ImGui::PopStyleColor(5);
-            ImGui::PopStyleVar();
-            ImGui::PopFont();
-            ImGui::Unindent(10.0f);
-            ImGui::Dummy(ImVec2(0, 4));
-            if (add) {
-                const int sec = tf_parse(g_tf_custom);
-                if (sec <= 0) {
-                    // ignore empty / unparseable input
-                } else if (sec < 60 && !pro) {
-                    open_subminute_upsell();
-                } else if (chart) {
-                    chart->change_timeframe(sec);
-                    g_tf_custom[0] = '\0';
-                    ImGui::CloseCurrentPopup();
+            // Custom: a rounded field and a soft Add.
+            {
+                ImGui::Dummy(ImVec2(0, 2));
+                ImGui::SetCursorScreenPos(ImVec2(ImGui::GetCursorScreenPos().x + pad, ImGui::GetCursorScreenPos().y));
+                ImGui::PushFont(Fonts::ui());
+                const float fh = 32.0f;
+                const float add_w = Theme::button_width("Add", fh);
+                ImGui::PushStyleColor(ImGuiCol_FrameBg, Tokens::CONTROL);
+                ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, Tokens::CONTROL_HOVER);
+                ImGui::PushStyleColor(ImGuiCol_FrameBgActive, Tokens::CONTROL_HOVER);
+                ImGui::PushStyleColor(ImGuiCol_TextDisabled, Tokens::TX3);
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, Radius::R2);
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f, (fh - ImGui::GetFontSize()) * 0.5f));
+                ImGui::SetNextItemWidth(menu_w - pad * 2.0f - add_w - gap);
+                const bool entered = ImGui::InputTextWithHint("##tf_custom", "Custom timeframe, e.g. 7m, 90s, 3h",
+                                         g_tf_custom, sizeof(g_tf_custom), ImGuiInputTextFlags_EnterReturnsTrue);
+                ImGui::PopStyleVar(2);
+                ImGui::PopStyleColor(4);
+                ImGui::SameLine(0.0f, gap);
+                const bool add = Theme::button("Add", ButtonKind::Soft, ImVec2(add_w, fh)) || entered;
+                ImGui::PopFont();
+                ImGui::Dummy(ImVec2(0, 4));
+                if (add) {
+                    const int sec = tf_parse(g_tf_custom);
+                    if (sec <= 0) {
+                        // ignore empty / unparseable input
+                    } else if (sec < 60 && !pro) {
+                        open_subminute_upsell();
+                    } else if (chart) {
+                        chart->change_timeframe(sec);
+                        g_tf_custom[0] = '\0';
+                        ImGui::CloseCurrentPopup();
+                    }
                 }
             }
             ImGui::EndPopup();
@@ -719,6 +737,15 @@ namespace {
         const int current_tf = static_cast<int>(cur);
         const bool realtime = chart && chart->rt_mode();
         const bool rt_locked = chart && chart->rt_mode_locked();
+        // A Pro market on the free daily preview (core/realtime_preview.h): the
+        // time left sits where the PRO tag would, counting down while it runs.
+        const bool rt_preview = chart && !rt_locked && chart->rt_mode_gated();
+        const int64_t rt_left_ms = rt_preview ? chart->rt_preview_remaining_ms() : 0;
+        char rt_tag[24] = "";
+        if (rt_preview) {
+            std::snprintf(rt_tag, sizeof(rt_tag), realtime ? "%s left" : "%s free",
+                          rt_preview::format_left(rt_left_ms).c_str());
+        }
         const bool compact = ImGui::GetContentRegionAvail().x < 760.0f;
         const std::span<const int> visible_favs = compact
             ? std::span<const int>(&current_tf, 1) : std::span<const int>(g_tf_favs);
@@ -730,7 +757,9 @@ namespace {
         // while on), inset 3px inside the 30px band like the "on" favourite chip.
         const float rt_gap = 10.0f, rt_padx = 10.0f, rt_dot = 6.0f, rt_dot_gap = 7.0f;
         const float rt_label_w = ImGui::CalcTextSize(kRtLabel).x;
-        const float rt_trail_w = rt_locked ? Theme::pro_tag_size().x + 8.0f : realtime ? 16.0f : 0.0f;
+        const float rt_tag_w = rt_preview ? ImGui::CalcTextSize(rt_tag).x + 8.0f : 0.0f;
+        const float rt_trail_w = rt_locked ? Theme::pro_tag_size().x + 8.0f
+                               : rt_tag_w + (realtime ? 16.0f : 0.0f);
         const float rt_w = rt_padx + rt_dot + rt_dot_gap + rt_label_w + rt_trail_w + rt_padx;
         float total = caretw + 1.0f;
         for (int sec : visible_favs) total += ImGui::CalcTextSize(tf_label(sec)).x + padx * 2.0f;
@@ -750,16 +779,14 @@ namespace {
             ImGui::PopID();
             if (clk && chart) chart->change_timeframe(sec);
             if (hov && realtime) Theme::tooltip("Leave real-time mode and show %s candles", lbl);
-            // The active duration is a text tab, never a filled tile.
-            if (on) dl->AddLine(ImVec2(x + padx, p0.y + h - 1),
-                                ImVec2(x + w - padx, p0.y + h - 1), u32(Tokens::TX1), 2);
-            if (hov) {
-                dl->AddRectFilled(ImVec2(x + 1, p0.y + 1), ImVec2(x + w - 1, p0.y + h - 1), u32(Tokens::HOVER));
-            }
+            // Design v3 (2026-10-11): the active duration is a soft raised chip, hover a quieter one.
+            if (on || hov)
+                dl->AddRectFilled(ImVec2(x + 2, p0.y + 3), ImVec2(x + w - 2, p0.y + h - 3),
+                                  u32(on ? Tokens::CONTROL_ACTIVE : Tokens::CONTROL), Radius::R2);
             const ImVec2 ts = ImGui::CalcTextSize(lbl);
             // In real-time the timeframes do not apply (RT is a trade-driven
             // view), so the row dims to TX3 instead of pretending one is active.
-            const ImVec4 fav_col = on ? Tokens::BRAND_TX
+            const ImVec4 fav_col = on ? Tokens::TX1
                                  : hov ? Tokens::TX1
                                  : realtime ? Tokens::TX3 : Tokens::TX2;
             dl->AddText(ImVec2(x + (w - ts.x) * 0.5f, p0.y + (h - ts.y) * 0.5f), u32(fav_col), lbl);
@@ -773,14 +800,11 @@ namespace {
         if (chov) Theme::tooltip(realtime
             ? "All timeframes and favourites. Picking one leaves real-time mode and shows candles."
             : "All timeframes and favourites.");
-        if (chov) dl->AddRectFilled(ImVec2(x + 1, p0.y + 1),
-            ImVec2(x + caretw - 1, p0.y + h - 1), u32(Tokens::HOVER));
-        {
-            const float cx = x + caretw * 0.5f, cy = p0.y + h * 0.5f;
-            const ImU32 cc = u32(Tokens::TX2);
-            if (menu_open) dl->AddTriangleFilled(ImVec2(cx - 4, cy + 2), ImVec2(cx + 4, cy + 2), ImVec2(cx, cy - 3), cc);
-            else           dl->AddTriangleFilled(ImVec2(cx - 4, cy - 2), ImVec2(cx + 4, cy - 2), ImVec2(cx, cy + 3), cc);
-        }
+        if (chov || menu_open) dl->AddRectFilled(ImVec2(x + 2, p0.y + 3),
+            ImVec2(x + caretw - 2, p0.y + h - 3), u32(Tokens::CONTROL), Radius::R2);
+        drawing::draw_ui_icon(dl, menu_open ? drawing::UiIcon::ChevronUp : drawing::UiIcon::ChevronDown,
+                              ImVec2(x + caretw * 0.5f, p0.y + h * 0.5f + (menu_open ? -0.5f : 0.5f)), 4.0f,
+                              u32(chov || menu_open ? Tokens::TX1 : Tokens::TX2), 1.5f);
         x += caretw + 1.0f;
 
         // ── Real-time pill ────────────────────────────────────────────────
@@ -817,6 +841,13 @@ namespace {
             dl->AddText(ImVec2(gx, rt_mid - ts.y * 0.5f), rt_ink, kRtLabel);
             gx += rt_label_w;
         }
+        if (rt_preview) {
+            // Mint while time remains; warning colour for the last 30 seconds.
+            const ImVec2 ts = ImGui::CalcTextSize(rt_tag);
+            const ImVec4 tag_col = rt_left_ms <= 30000 ? Tokens::WARN : Tokens::BRAND_TX;
+            dl->AddText(ImVec2(gx + 8.0f, rt_mid - ts.y * 0.5f), u32(tag_col), rt_tag);
+            gx += rt_tag_w;
+        }
         const float trail_x0 = gx;                     // caret hit zone starts here
         if (rt_locked) {
             const ImVec2 tag = Theme::pro_tag_size();
@@ -828,8 +859,17 @@ namespace {
             else               dl->AddTriangleFilled(ImVec2(cx - 4, rt_mid - 2), ImVec2(cx + 4, rt_mid - 2), ImVec2(cx, rt_mid + 3), cc);
         }
         if (rt_hov) {
-            if (rt_locked)     Theme::tooltip("Real-time mode: observed depth, every trade as a bubble, and the spread on one axis.\nLive real-time is a Pro view. Recorded replays open it for everyone.");
-            else if (realtime) Theme::tooltip("Real-time mode is on. Click to return to candles, or use the caret for real-time settings (trade bubbles, 1s candles, depth).");
+            if (rt_locked)     Theme::tooltip("Real-time mode: observed depth, every trade as a bubble, and the spread on one axis.\n"
+                                              "Today's free 3 minutes are used; they reset at 00:00 UTC. Live depth is always free\n"
+                                              "on Binance BTC, and Pro unlocks every other market.");
+            else if (rt_preview && realtime)
+                               Theme::tooltip("Free preview: %s left today. Click to return to candles. The arrow opens view controls.",
+                                              rt_preview::format_left(rt_left_ms).c_str());
+            else if (rt_preview)
+                               Theme::tooltip("Real-time mode: observed depth, every trade as a bubble, and the spread on one axis.\n"
+                                              "Free preview: 3 minutes a day on any market, %s left today. Binance BTC is always free.",
+                                              rt_preview::format_left(rt_left_ms).c_str());
+            else if (realtime) Theme::tooltip("Click to return to candles. The arrow opens view controls.");
             else               Theme::tooltip("Switch to real-time mode: observed depth, every trade as a bubble, and the spread on one axis.");
         }
         if (rt_clicked && chart) {
@@ -848,10 +888,7 @@ namespace {
         render_tf_menu(chart);
         // RT settings, pinned under the pill
         ImGui::SetNextWindowPos(ImVec2(rx, p0.y + h + 5.0f), ImGuiCond_Appearing);
-        ImGui::SetNextWindowSizeConstraints(ImVec2(300, 0), ImVec2(340, ImGui::GetMainViewport()->WorkSize.y - 80));
-        if (Theme::begin_popup("##rt_settings")) {
-            ImGui::TextColored(Tokens::TX2, "REAL-TIME SETTINGS");
-            ImGui::Separator();
+        if (Theme::begin_menu("##rt_settings", 260.0f, ImGui::GetMainViewport()->WorkSize.y - 80)) {
             if (chart && realtime) chart->render_realtime_settings();
             ImGui::EndPopup();
         }
@@ -1018,6 +1055,7 @@ namespace {
         // theme icon → Tweaks panel (accent · candles · density · heat)
         rx -= ico; ImGui::SetCursorScreenPos(ImVec2(rx, icy));
         if (ico_btn("##tb_theme", ico)) g_tweaks_open = !g_tweaks_open;
+        ui_test::mark("topbar.appearance");
         {
             const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
             const ImVec2 c((a.x+b.x)*0.5f, (a.y+b.y)*0.5f); const ImU32 col = u32(Tokens::TX2);
@@ -1064,6 +1102,11 @@ namespace {
                     Menu::SymbolPickerState::PendingWidget::ReplayLibrary;
                 Menu::g_widget_add_request.pending = true;
             }
+#ifdef __EMSCRIPTEN__
+            if (Entitlements::hosted() && ImGui::MenuItem("Replay tools and help")) {
+                EM_ASM({ window.dispatchEvent(new CustomEvent('edgedepth:terminal-guide-open')); });
+            }
+#endif
             ImGui::EndPopup();
         }
 
@@ -1150,12 +1193,13 @@ namespace {
         // mark/OI/funding via g_stats, 24h change/vol via ticker.
         const PositioningState* pos = ctx.analytics_mgr().get_positioning(Terminal::pair_key(g_pair.exchange, g_pair.symbol));
         const TickerEntry* tick = TickerManager::instance().get(g_pair.exchange, g_pair.symbol);
-        char v[80], sm[64];
+        char v[80];
 
         // A single reading line. Secondary context remains one action away.
-        char last[80] = "Unavailable", change[32] = "Unavailable";
-        char oi[32] = "Unavailable", funding[32] = "Unavailable";
-        char volume[32] = "Unavailable", mark[80] = "Unavailable";
+        // A reading not in yet is a quiet dash (the strip used to say "Unavailable" in bold five times over).
+        char last[80] = "", change[32] = "";
+        char oi[32] = "", funding[32] = "";
+        char volume[32] = "", mark[80] = "Unavailable";
         if (tick && tick->last_price > 0) {
             g_fmt.format_price(last, sizeof(last), tick->last_price);
             snprintf(change, sizeof(change), "%+.2f%%", tick->change_pct_24h);
@@ -1170,13 +1214,24 @@ namespace {
         }
         const float y = vp->Pos.y + Layout::topbar_h() + 9;
         float x = vp->Pos.x + 14;
-        auto metric = [&](const char* label, const char* value, const ImVec4& color) {
+        // Data and Market details at the right: the chrome's text buttons (no idle tile, hover shows the hit
+        // area), sized to their labels as the chart toolbar's Indicators.
+        const char* details_label = vp->Size.x < 700 ? "Details" : "Market details";
+        ImGui::PushFont(Fonts::ui());
+        const float data_w = 10.0f + 12.0f + 7.0f + ImGui::CalcTextSize("Data").x + 11.0f;
+        const float details_w = 11.0f + ImGui::CalcTextSize(details_label).x + 7.0f + 8.0f + 10.0f;
+        ImGui::PopFont();
+        const float actions_x = vp->Pos.x + vp->Size.x - 12 - details_w - 4 - data_w;
+        auto metric = [&](const char* label, const char* value, const ImVec4& color_in) {
+            const bool missing = !value[0];
+            const ImVec4& color = missing ? Tokens::TX4 : color_in;
+            if (missing) value = "-";  // the atlas carries Latin-1 only: no en dash
             ImGui::PushFont(Fonts::ui());
             const float label_w = ImGui::CalcTextSize(label).x;
             ImGui::PushFont(Fonts::ui_semibold());
             const float value_w = ImGui::CalcTextSize(value).x;
             ImGui::PopFont();
-            if (x + label_w + 8 + value_w > vp->Pos.x + vp->Size.x - 148) {
+            if (x + label_w + 8 + value_w > actions_x - 16) {
                 ImGui::PopFont();
                 return;
             }
@@ -1190,52 +1245,165 @@ namespace {
         };
         metric("Last", last, Tokens::TX1);
         metric("24h", change, tick ? (tick->change_pct_24h >= 0 ? Tokens::UP : Tokens::DOWN) : Tokens::TX3);
-        if (vp->Size.x >= 850) metric("Funding", funding, Tokens::TX2);
-        if (vp->Size.x >= 1150) metric("Open interest", oi, Tokens::TX2);
-        if (vp->Size.x >= 1500) metric("Volume 24h", volume, Tokens::TX2);
-        ImGui::SetCursorScreenPos(ImVec2(vp->Pos.x + vp->Size.x - 132, y - 5));
-        if (ImGui::Button("Market details", ImVec2(120, 28))) ImGui::OpenPopup("##market_details");
-        ImGui::SetNextWindowPos(ImVec2(vp->Pos.x + vp->Size.x - 368,
-            vp->Pos.y + Layout::topbar_h() + Layout::STATSBAR_H));
-        ImGui::SetNextWindowSize(ImVec2(360, 0));
-        if (Theme::begin_popup("##market_details")) {
-            Theme::section_label("Market context");
-            auto row = [&](const char* label, const char* value) {
-                ImGui::TableNextRow();
-                ImGui::TableNextColumn();
-                ImGui::TextColored(Tokens::TX2, "%s", label);
-                ImGui::TableNextColumn();
-                ImGui::TextUnformatted(value);
-            };
-            if (ImGui::BeginTable("##market_values", 2, ImGuiTableFlags_SizingStretchProp)) {
-                row("Last traded price", last);
-                row("Mark price", mark);
-                row("Change / 24h", change);
-                if (tick) {
-                    const double denom = 1 + tick->change_pct_24h / 100;
-                    const double delta = denom != 0 ? tick->last_price *
-                        (tick->change_pct_24h / 100) / denom : 0;
-                    g_fmt.format_price(v, sizeof(v), delta);
-                    row("Price change / 24h", v);
-                }
-                row("Volume / 24h", volume);
-                row("Open interest / USD", oi);
-                row("Funding rate", funding);
-                if (g_stats.has_data && g_stats.next_funding_time > 0) {
-                    fmt_funding_countdown(sm, sizeof(sm), g_stats.next_funding_time);
-                    row("Next funding in", sm);
-                }
-                ImGui::EndTable();
+        // Funding is signed data (design system: up/down are for signed data): positive green (longs pay shorts),
+        // negative red, zero and unavailable neutral (James 2026-10-11).
+        const ImVec4& funding_col = !g_stats.has_data || g_stats.funding == 0.0 ? Tokens::TX2
+                                  : g_stats.funding > 0.0 ? Tokens::UP : Tokens::DOWN;
+        if (vp->Size.x >= 850) metric("Funding", funding, funding_col);
+        if (vp->Size.x >= 1150) {
+            const float left=x; metric("Open interest", oi, Tokens::TX2);
+            if (x>left) {
+                ImGui::SetCursorScreenPos(ImVec2(left,y-5));
+                if (ImGui::InvisibleButton("oi_history",ImVec2(x-left-16,28))) Menu::request_market_data(g_pair);
+                if (ImGui::IsItemHovered()) Theme::tooltip("Open Data: price, open interest, account history and current research.");
             }
-            ImGui::Separator();
-            Theme::section_label("Long / short accounts");
+        }
+        if (vp->Size.x >= 1500) metric("Volume 24h", volume, Tokens::TX2);
+        // The Market details popover names a missing reading in words.
+        for (char* b : {last, change, oi, funding, volume}) if (!b[0]) std::snprintf(b, 32, "Unavailable");
+        // Data is a primary destination, reachable without opening a popup: brighter label, a chart glyph.
+        // Market details opens a popover, so it carries a chevron. A hairline sets them apart from the readings.
+        const auto header_button = [&](const char* id, const char* label, drawing::UiIcon icon, bool primary,
+                                       float bx, float bw, bool open) {
+            constexpr float bh = 28.0f;
+            const float by = y - 5;
+            ImGui::SetCursorScreenPos(ImVec2(bx, by));
+            const bool clicked = ImGui::InvisibleButton(id, ImVec2(bw, bh));
+            const bool hot = ImGui::IsItemHovered() || open;
+            // The chart toolbar's trigger hover: a rounded soft fill, a step brighter while open or pressed.
+            if (hot) dl->AddRectFilled(ImVec2(bx, by), ImVec2(bx + bw, by + bh),
+                                       u32(open || ImGui::IsItemActive() ? Tokens::CONTROL_HOVER : Tokens::CONTROL), Radius::R2);
+            const ImU32 col = u32(hot ? Tokens::BRAND_TX : primary ? Tokens::TX1 : Tokens::TX2);
+            ImGui::PushFont(primary ? Fonts::ui_semibold() : Fonts::ui());
+            const ImVec2 ts = ImGui::CalcTextSize(label);
+            const float ty = by + (bh - ts.y)*0.5f;
+            if (primary) {
+                drawing::draw_ui_icon(dl, icon, ImVec2(bx + 10.0f + 6.0f, by + bh*0.5f), 6.0f, col, 1.4f);
+                dl->AddText(ImVec2(bx + 10.0f + 12.0f + 7.0f, ty), col, label);
+            } else {
+                dl->AddText(ImVec2(bx + 11.0f, ty), col, label);
+                drawing::draw_ui_icon(dl, icon, ImVec2(bx + 11.0f + ts.x + 7.0f + 4.0f, by + bh*0.5f + 0.5f), 4.0f, col, 1.4f);
+            }
+            ImGui::PopFont();
+            return clicked;
+        };
+        dl->AddLine(ImVec2(actions_x - 10.0f, y - 1), ImVec2(actions_x - 10.0f, y + 17), u32(Tokens::BD1), 1.0f);
+        if (header_button("##market_data", "Data", drawing::UiIcon::Bars, true, actions_x, data_w, false))
+            Menu::request_market_data(g_pair);
+        if (ImGui::IsItemHovered()) Theme::tooltip("Open market history and current research");
+        if (header_button("##market_details_btn", details_label, drawing::UiIcon::ChevronDown, false, actions_x + data_w + 4,
+                          details_w, ImGui::IsPopupOpen("##market_details")))
+            ImGui::OpenPopup("##market_details");
+
+        // Market details popover (design v3): identity and price up top, the readings as a two-column grid,
+        // account share and reported liquidations as split bars, one action. Sizes scale with the UI font.
+        const float popup_w = std::min(372.0f, vp->Size.x - 24.0f);
+        const float popup_y = vp->Pos.y + Layout::topbar_h() + Layout::STATSBAR_H - 2.0f;
+        ImGui::SetNextWindowPos(ImVec2(vp->Pos.x + vp->Size.x - popup_w - 12, popup_y));
+        ImGui::SetNextWindowSize(ImVec2(popup_w, 0));
+        ImGui::SetNextWindowSizeConstraints(ImVec2(0,0), ImVec2(popup_w,std::max(120.0f,vp->Pos.y + vp->Size.y - popup_y - 12)));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(18, 16));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8, 0));
+        ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, Radius::R3);
+        ImGui::PushStyleColor(ImGuiCol_PopupBg, Tokens::ELEV);
+        ImGui::PushStyleColor(ImGuiCol_Border, Tokens::BD2);
+        const bool details_open = ImGui::BeginPopup("##market_details");
+        ImGui::PopStyleColor(2);
+        ImGui::PopStyleVar(3);
+        if (details_open) {
+            const float k = ImGui::GetFontSize() / 18.4f;
+            const float W = ImGui::GetContentRegionAvail().x;
+            ImDrawList* d = ImGui::GetWindowDrawList();
+            auto tw = [&](ImFont* f, float px, const char* t) { return f->CalcTextSizeA(px * k, FLT_MAX, 0, t).x; };
+            auto put = [&](ImFont* f, float px, ImVec2 at, const ImVec4& c, const char* t) { d->AddText(f, px * k, at, u32(c), t); };
+            auto gap = [&](float px) { ImGui::Dummy(ImVec2(W, px * k)); };
+            auto divider = [&] { gap(14); Theme::hairline(W, 1); gap(14); };
+            // Identity: coin, pair, venue chip.
+            {
+                const ImVec2 p = ImGui::GetCursorScreenPos();
+                const float logo = 28 * k;
+                LogoManager::instance().draw_coin(d, g_base_asset, p, logo);
+                put(Fonts::ui_semibold(), 16, ImVec2(p.x + logo + 10 * k, p.y + 1 * k), Tokens::TX1, g_display_name.c_str());
+                char venue[48]; snprintf(venue, sizeof(venue), "%s / %s", widget_venue_label(g_pair.exchange), g_perpetual ? "Perpetual" : "Dated");
+                put(Fonts::ui(), 12.5f, ImVec2(p.x + logo + 10 * k, p.y + 17 * k), Tokens::TX3, venue);
+                ImGui::Dummy(ImVec2(W, logo));
+            }
+            gap(14);
+            // Price and 24h change.
+            {
+                const ImVec2 p = ImGui::GetCursorScreenPos();
+                const float price_px = 28;
+                put(Fonts::mono_lg(), price_px, p, Tokens::TX1, last);
+                const float px_w = tw(Fonts::mono_lg(), price_px, last);
+                if (tick) {
+                    const bool up = tick->change_pct_24h >= 0;
+                    const float cw = tw(Fonts::mono(), 13, change) + 16 * k, ch = 22 * k;
+                    const ImVec2 a(p.x + px_w + 12 * k, p.y + (price_px * k * 1.17f - ch) * 0.5f);
+                    d->AddRectFilled(a, ImVec2(a.x + cw, a.y + ch), u32(up ? Tokens::UP_SOFT : Tokens::DOWN_SOFT), ch * 0.5f);
+                    put(Fonts::mono(), 13, ImVec2(a.x + 8 * k, a.y + (ch - 13 * k * 1.17f) * 0.5f), up ? Tokens::UP : Tokens::DOWN, change);
+                    put(Fonts::ui(), 12.5f, ImVec2(a.x + cw + 8 * k, a.y + (ch - 12.5f * k * 1.17f) * 0.5f), Tokens::TX3, "24h");
+                    ImGui::Dummy(ImVec2(W, price_px * k * 1.17f));
+                    if (ImGui::IsMouseHoveringRect(a, ImVec2(a.x + cw, a.y + ch))) {
+                        const double denom = 1 + tick->change_pct_24h / 100;
+                        const double delta = denom != 0 ? tick->last_price * (tick->change_pct_24h / 100) / denom : 0;
+                        g_fmt.format_price(v,sizeof(v),delta);
+                        Theme::tooltip("24h price change: %s",v);
+                    }
+                } else ImGui::Dummy(ImVec2(W, price_px * k * 1.17f));
+            }
+            divider();
+            // Readings: two columns of label over value.
+            {
+                char next[64] = "Unavailable";
+                if (g_stats.has_data && g_stats.next_funding_time > 0) fmt_funding_countdown(next, sizeof(next), g_stats.next_funding_time);
+                struct Tile { const char* label; const char* value; const char* sub; ImVec4 col; };
+                char funding_sub[80]; snprintf(funding_sub, sizeof(funding_sub), "Next in %s", next);
+                const ImVec4 fcol = !g_stats.has_data || g_stats.funding == 0.0 ? Tokens::TX1
+                                  : g_stats.funding > 0.0 ? Tokens::UP : Tokens::DOWN;
+                const Tile tiles[4] = {{"Mark price", mark, nullptr, Tokens::TX1},
+                                       {"Funding", funding, g_stats.has_data && g_stats.next_funding_time > 0 ? funding_sub : nullptr, fcol},
+                                       {"Volume 24h", volume, nullptr, Tokens::TX1}, {"Open interest", oi, nullptr, Tokens::TX1}};
+                const float cw = (W - 16 * k) * 0.5f, row_h = 46 * k;
+                const ImVec2 p = ImGui::GetCursorScreenPos();
+                for (int i = 0; i < 4; ++i) {
+                    const ImVec2 a(p.x + (i % 2) * (cw + 16 * k), p.y + (i / 2) * (row_h + 10 * k));
+                    put(Fonts::ui(), 12.5f, a, Tokens::TX3, tiles[i].label);
+                    put(Fonts::mono(), 15, ImVec2(a.x, a.y + 18 * k), tiles[i].col, tiles[i].value);
+                    if (tiles[i].sub) put(Fonts::ui(), 12, ImVec2(a.x + tw(Fonts::mono(), 15, tiles[i].value) + 8 * k, a.y + 20 * k), Tokens::TX3, tiles[i].sub);
+                }
+                ImGui::Dummy(ImVec2(W, row_h * 2 + 10 * k));
+            }
+            // A split bar: left share in one colour, the rest in the other, a 2px gap between.
+            auto split_bar = [&](double left, const ImVec4& lc, const ImVec4& rc) {
+                const ImVec2 p = ImGui::GetCursorScreenPos();
+                const float h = 6 * k, x = p.x + std::round(W * static_cast<float>(std::clamp(left, 0.0, 1.0)));
+                if (left > 0) d->AddRectFilled(p, ImVec2(std::max(p.x + h, x - 1), p.y + h), u32(lc), h * 0.5f);
+                if (left < 1) d->AddRectFilled(ImVec2(std::min(p.x + W - h, x + 1), p.y), ImVec2(p.x + W, p.y + h), u32(rc), h * 0.5f);
+                ImGui::Dummy(ImVec2(W, h));
+            };
+            auto section = [&](const char* title, const char* help) {
+                Theme::push_font(Fonts::ui_semibold(), 13 * k);
+                ImGui::TextColored(Tokens::TX2, "%s", title);
+                ImGui::SameLine(0, 6 * k);
+                Theme::info_hint(help);
+                ImGui::PopFont();
+                gap(8);
+            };
+            divider();
+            section("Account share", "Share of long and short accounts, not position size or open-interest share.");
             if (pos && pos->global_long_account > 0) {
-                const double lg = std::clamp(pos->global_long_account, 0.0, 1.0);
-                ImGui::Text("Long %.0f%%   /   Short %.0f%%", lg * 100, (1 - lg) * 100);
+                const double lg = std::clamp(pos->global_long_account,0.0,1.0);
+                const ImVec2 p = ImGui::GetCursorScreenPos();
+                char l[24], r[24]; snprintf(l, sizeof(l), "Long %.0f%%", lg * 100); snprintf(r, sizeof(r), "Short %.0f%%", (1 - lg) * 100);
+                put(Fonts::mono(), 13.5f, p, Tokens::UP, l);
+                put(Fonts::mono(), 13.5f, ImVec2(p.x + W - tw(Fonts::mono(), 13.5f, r), p.y), Tokens::DOWN, r);
+                ImGui::Dummy(ImVec2(W, 22 * k));
+                split_bar(lg, Tokens::UP, Tokens::DOWN);
             } else ImGui::TextDisabled("Unavailable");
-            ImGui::TextWrapped("Share of accounts on each side. This is not position size or open-interest share.");
-            ImGui::Separator();
-            Theme::section_label("Reported liquidations / 24h");
+            divider();
+            section("Liquidations 24h", g_pair.exchange == "binancef" ? "As Binance reports them: at most one per second per market, so a floor."
+                                     : g_pair.exchange == "bybit" ? "Every liquidation Bybit reported, at bankruptcy prices."
+                                     : "As the venue reports them.");
             double longs = pos ? pos->long_liq_usd : 0;
             double shorts = pos ? pos->short_liq_usd : 0;
             if (longs <= 0 && shorts <= 0 && g_stats.has_data) {
@@ -1243,14 +1411,31 @@ namespace {
                 shorts = g_stats.liq_short_usd;
             }
             if (longs + shorts > 0) {
-                fmt_compact_usd(v, sizeof(v), longs + shorts);
-                ImGui::Text("Total %s", v);
-                fmt_compact_usd(v, sizeof(v), longs);
-                fmt_compact_usd(sm, sizeof(sm), shorts);
-                ImGui::Text("Long %s   /   Short %s", v, sm);
-            } else ImGui::TextDisabled("Unavailable");
-            ImGui::Separator();
-            if (ImGui::MenuItem("Hide market strip")) g_market_header_open = false;
+                const char* labels[] = {"Longs", "Shorts", "Total"};
+                const double amounts[] = {longs, shorts, longs + shorts};
+                const ImVec4 tones[] = {Tokens::DOWN, Tokens::UP, Tokens::TX1};
+                const float cw = W / 3.0f;
+                const ImVec2 p = ImGui::GetCursorScreenPos();
+                for (int n = 0; n < 3; ++n) {
+                    fmt_compact_usd(v, sizeof(v), amounts[n]);
+                    const float x = n == 2 ? p.x + W - std::max(tw(Fonts::ui(), 12.5f, labels[n]), tw(Fonts::mono(), 15, v)) : p.x + n * cw;
+                    put(Fonts::ui(), 12.5f, ImVec2(x, p.y), Tokens::TX3, labels[n]);
+                    put(Fonts::mono(), 15, ImVec2(x, p.y + 18 * k), tones[n], v);
+                }
+                ImGui::Dummy(ImVec2(W, 42 * k));
+                split_bar(longs / (longs + shorts), Tokens::DOWN, Tokens::UP);
+            } else ImGui::TextDisabled("No reports in 24h");
+            gap(20);
+            if (Theme::button("Open Data", Theme::ButtonKind::Soft, ImVec2(W, 36 * k), drawing::UiIcon::ArrowUpRight, true)) {
+                Menu::request_market_data(g_pair); ImGui::CloseCurrentPopup();
+            }
+            if (ImGui::IsItemHovered()) Theme::tooltip("Price, open interest, positioning and research history");
+            gap(6);
+            Theme::push_font(Fonts::ui(), 13 * k);
+            const float hide_w = ImGui::CalcTextSize("Hide market strip").x + 24 * k;
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (W - hide_w) * 0.5f);
+            if (Theme::button("Hide market strip", Theme::ButtonKind::Ghost, ImVec2(hide_w, 28 * k))) { g_market_header_open=false; ImGui::CloseCurrentPopup(); }
+            ImGui::PopFont();
             ImGui::EndPopup();
         }
 
@@ -1311,6 +1496,7 @@ namespace {
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive, Tokens::ACTIVE);
                 ImGui::PushStyleColor(ImGuiCol_Text, on ? Tokens::BRAND : Tokens::TX2);
                 if (ImGui::Button(label)) { HeatmapColormap::set_liq_map(m); Theme::save_preferences(); }
+                if (ui_test::enabled()) ui_test::mark(std::string("appearance.liq.") + label);
                 ImGui::PopStyleColor(4);
             };
             lmap_btn("Ember",   HeatmapColormap::LiqMap::Ember);
@@ -1372,8 +1558,6 @@ namespace {
         const float ty = bar_y + (Layout::STATUSBAR_H - th) * 0.5f;
 
         // left - connection + market context
-        std::string sym = symbol_lc;
-        for (char& c : sym) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 32);
         if (ctx.replay_mgr().is_active() && !local_pack)
             transport = ctx.replay_mgr().active_socket();
         const bool ws_ok = local_pack || (transport && transport->is_connected());
@@ -1384,11 +1568,16 @@ namespace {
             ctx.replay_mgr().is_active() ? "Replay" :
             ctx.stream_mgr().live_subscriptions_paused() ? "Paused" : "Live";
         char left[192];
-        snprintf(left, sizeof(left), "%s  ·  %s  ·  %s", sym.c_str(), mode, local_pack ? "Local recording" : ws_ok ? "Connected" : "Disconnected");
+        // The pair as the tabs name it (W/USDT), from the symbol this bar is given: embedded mounts never initialise
+        // the header's own pair, so its name could belong to another market.
+        const std::string pair_name = widget_symbol_label(symbol_lc);
+        snprintf(left, sizeof(left), "%s  ·  %s  ·  %s", pair_name.c_str(), mode, local_pack ? "Local recording" : ws_ok ? "Connected" : "Disconnected");
         const float dot_x = vp->Pos.x + 14.0f;
         // coin logo at the far left (monogram fallback while loading / if missing)
         const float sb_logo = 13.0f;
-        LogoManager::instance().draw_coin(dl, g_base_asset,
+        // The coin of the symbol this bar is given (embedded mounts keep the header's BTC default).
+        const std::string sb_base = pair_name.substr(0, pair_name.find('/'));
+        LogoManager::instance().draw_coin(dl, sb_base,
             ImVec2(dot_x, bar_y + (Layout::STATUSBAR_H - sb_logo) * 0.5f), sb_logo);
         const float sb_x = dot_x + sb_logo + 8.0f;
         dl->AddCircleFilled(ImVec2(sb_x + 3.0f, bar_y + Layout::STATUSBAR_H * 0.5f), 3.0f,

@@ -103,7 +103,8 @@ public:
     // Uses the strict RT chain under its owning write lock, never legacy DOM IDs.
     bool realtime_ready(const Terminal::Pair& pair, int64_t clock_ms, int64_t required_ms = 0) const;
     bool copy_realtime_since(const Terminal::Pair& pair, uint64_t serial,
-        std::vector<RealtimeDepthHistory::SamplePtr>& out) const;
+        std::vector<RealtimeDepthHistory::SamplePtr>& out,
+    RealtimeDepthHistory::SyncFailure* failure = nullptr) const;
     void interrupt_realtime() { realtime_epoch_.fetch_add(1); }
     // Replay priming applies recorded depth from a seed up to the held clock:
     // the book must absorb it, but it is not real-time history AT that clock

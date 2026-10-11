@@ -6,7 +6,7 @@
 #include <cassert>
 #include <emscripten.h>
 namespace Theme {
-void begin_tooltip(){ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(8,8));ImGui::BeginTooltip();}
+void begin_tooltip(bool){ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(8,8));ImGui::BeginTooltip();}
 void end_tooltip(){ImGui::EndTooltip();ImGui::PopStyleVar();}
 }
 using Frame=Terminal::LiquidationHeatmapSnapshot;

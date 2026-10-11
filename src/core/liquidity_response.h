@@ -11,6 +11,9 @@
 
 namespace liquidity_response {
 using Json=nlohmann::json;
+inline bool supported(const std::string& venue,const std::string& symbol){
+    return venue=="binancef"&&(symbol=="btcusdt"||symbol=="solusdt");
+}
 struct Episode {
     std::string id,side,status;
     int64_t start=0,known=0,updated=0;
@@ -70,7 +73,7 @@ public:
         if(history!=continuous||tf!=timeframe||venue!=exchange||symbol!=market||replay!=in_replay||to<end||(to==end&&from!=begin)||from>end||tick!=grid){
             reset();continuous=history;timeframe=tf;exchange=venue;market=symbol;in_replay=replay;begin=from;end=to;grid=tick;
         }
-        if(venue!="binancef"||(symbol!="btcusdt"&&symbol!="solusdt")){status="Pilot: Binance BTC and SOL only";return {};}
+        if(!supported(venue,symbol)){status="Pilot: Binance BTC and SOL only";return {};}
         if(!std::isfinite(tick)||tick<=0||from<=0||to<=from||to-from>(history?86400000:120000)){status=history?"Select up to 24 hours with a known tick size":"Select up to two minutes with a known tick size";return {};}
         if(history&&(tf<60000||tf>86400000||tf%60000!=0)){status="Use one-minute candles or above";return {};}
         if(!id.empty()&&steady-sent>10000){reset("No response; server may not support this layer");next=steady+15000;}
@@ -96,7 +99,7 @@ private:
     static bool text(const Json& j,const char* k){return j.contains(k)&&j[k].is_string();}
     void accept(const Json& j){
         pending.erase(id);id.clear();ready=false;episodes.clear();bars.clear();source={};through=0;next=sent+5000;revision++;
-        if(text(j,"error")){selected.clear();status=j["error"].get<std::string>();if(continuous)status=status.find("history_unavailable")!=std::string::npos?"No stored absorption history for this window":"Absorption history unavailable";return;}
+        if(text(j,"error")){selected.clear();status=j["error"].get<std::string>();if(continuous)status=status.find("history_unavailable")!=std::string::npos?"No stored history in this window":"Absorption history unavailable";return;}
         status="Invalid or mismatched evidence response";
         if(!text(j,"exchange")||j["exchange"]!=exchange||!text(j,"symbol")||j["symbol"]!=market||!text(j,"mode")||j["mode"]!=(in_replay?"replay":"live")||!j.contains("result")||!j["result"].is_object())return;
         const auto& r=j["result"];

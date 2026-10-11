@@ -12,6 +12,7 @@
 // VPIN (STREAM_VPIN_STATE=15) is NOT stored here - its latest point is read from
 // the IndicatorSeriesManager SeriesCache via ctx.series_mgr().
 //
+// IcebergStats (37) is a dedicated live-only summary of qualifying trade clusters.
 // The multiplexed STREAM_ANALYTICS=14 sub-types (orderbook regime / smart money /
 // liquidation-cascade windows) are Tier 2 - deferred until that stream carries a
 // message-type discriminator.
@@ -21,13 +22,14 @@
 // as the VPIN SeriesCache. No mutex.
 // ═══════════════════════════════════════════════════════════════════════════════
 
+#include "core/iceberg_snapshot.h"
 #include <string>
 #include <unordered_map>
 #include <deque>
 #include <cstdint>
 #include <cctype>
 
-namespace pb { class PositioningStateUpdate; class ContagionSnapshot; }
+namespace pb { class PositioningStateUpdate; class ContagionSnapshot; class IcebergStats; }
 
 // Latest positioning snapshot for one symbol (the fields the panel/header read).
 struct PositioningState {
@@ -60,6 +62,8 @@ struct ContagionState {
 
 class AnalyticsManager {
 public:
+    void apply_iceberg(const std::string& symbol, const pb::IcebergStats& update, int64_t now);
+    const IcebergSnapshot* get_iceberg(const std::string& symbol) const;
     // -- Positioning (STREAM_POSITIONING_STATE=16) --
     void apply_positioning(const std::string& symbol, const pb::PositioningStateUpdate& u);
     const PositioningState* get_positioning(const std::string& symbol) const;
@@ -81,6 +85,7 @@ public:
     bool    has_data()       const { return !symbols_.empty() || contagion_.valid; }
 
 private:
+    std::unordered_map<std::string, IcebergSnapshot> icebergs_;
     struct OISample { int64_t ts_ms; double oi; };
     struct SymbolState {
         PositioningState     latest;

@@ -18,6 +18,7 @@ public:
     ~RealtimeArchive();
     static bool prepare_replay(CandleManager*, int64_t clock);
     void update(int64_t clock);
+    static void update_live(OrderbookManager&, StreamManager&, int64_t clock);
     void request_startup(StreamManager&);
     static void receive_startup(const nlohmann::json&);
     static void receive_startup(const pb::RealtimeHistory&, const Terminal::Pair&);
@@ -37,7 +38,8 @@ public:
     int64_t first = 0, last = 0;
     double bytes = 0, total_bytes = 0;
     bool loading = false, view_trades_grouped = false;
-    uint64_t generation = 0;
+    // A source reset discards displayed history; additive backfills only refresh it.
+    uint64_t generation = 0, view_revision = 0;
     size_t dropped = 0, view_trade_count = 0;
     std::string error;
 private:

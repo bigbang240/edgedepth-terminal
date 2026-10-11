@@ -1,4 +1,5 @@
 #include "ui/chart_widget.h"
+#include "ui/drawing/drawing_icons.h"
 #include "core/candle_bubble_display.h"
 #include "ui/realtime_navigation.h"
 #include "core/candle_manager.h"
@@ -6,7 +7,10 @@
 #include "core/trade_at_price.h"
 #include "core/orderbook_manager.h"
 #include "core/entitlements.h"
+#include "core/realtime_preview.h"
+#include "core/usage_emit.h"
 #include "replayer/replay_manager.h"
+#include <nlohmann/json.hpp>
 #include "core/education_boot.h"
 #include "ui/upsell_modal.h"
 #include "rendering/theme.h"
@@ -20,25 +24,106 @@
 #include "ui/indicators/volume_indicator.h"
 #include "types/frame_profiler.h"
 
-bool ChartWidget::rt_mode_locked() const {
+bool ChartWidget::rt_mode_gated() const {
     return Entitlements::hosted() && !Entitlements::is_pro() &&
-        !ctx_.replay_mgr().is_active() && !EducationBoot::instance().is_pack();
+        !ctx_.replay_mgr().is_active() && !EducationBoot::instance().is_pack() &&
+        !Entitlements::btc_preview_market(pair_.exchange, pair_.symbol);
+}
+
+bool ChartWidget::rt_mode_locked() const {
+    return rt_mode_gated() && !rt_preview::Store::instance().available();
+}
+
+int64_t ChartWidget::rt_preview_remaining_ms() const {
+    return rt_preview::Store::instance().remaining();
+}
+
+// The market as the upsell names it: "OGN", or "Bybit BTC" for a BTC that is
+// not the free Binance one.
+static std::string rt_subject(const Terminal::Pair& pair) {
+    std::string subject = Entitlements::coin_label(pair.symbol);
+    if (subject == "BTC") {
+        subject = (pair.exchange == "bybit" ? "Bybit " : pair.exchange == "hl" ? "Hyperliquid " : "") + subject;
+    }
+    return subject;
+}
+
+bool ChartWidget::tick_rt_preview() {
+    if (!rt_mode_gated()) return false;
+    auto& budget = rt_preview::Store::instance();
+    budget.bill_frame(ImGui::GetFrameCount(), ImGui::GetIO().DeltaTime);
+    if (budget.available()) return false;
+
+    // Spent: back to candles, then the upsell for the market they were watching.
+    const std::string subject = rt_subject(pair_);
+    usage::dispatch_detail(nlohmann::json{
+        {"event", "rt_preview_end"}, {"mode", "terminal"}, {"symbol", pair_.symbol},
+        {"props", {{"venue", pair_.exchange}, {"reason", "exhausted"}}}}.dump());
+    set_rt_mode(false);
+    const std::string detail = "That was today's free 3 minutes of real-time. Pro unlocks live depth on " +
+        subject + " and every other market, all day. The free preview resets at 00:00 UTC.";
+    auto& modal = ui::UpsellModal::instance();
+    modal.open(ui::UpsellModal::Trigger::Layer, detail.c_str(), "realtime_depth", "preview_end");
+    modal.set_subject(subject.c_str());
+    return true;
+}
+
+// True only inside toggle_rt_mode: the viewer clicked the pill. A ?realtime=1
+// link, a restored workspace, a recorder view or a context swap re-arming it all
+// reach set_rt_mode without a click. Those automatic openings may be what sold
+// user 291 (2026-10-10, locks on page load), so they are labelled, not suppressed.
+static bool g_rt_toggle_by_viewer = false;
+
+void ChartWidget::toggle_rt_mode() {
+    g_rt_toggle_by_viewer = true;
+    set_rt_mode(!rt_mode_);
+    g_rt_toggle_by_viewer = false;
 }
 
 void ChartWidget::set_rt_mode(bool on) {
     if (on && rt_mode_locked()) {
-        ui::UpsellModal::instance().open(ui::UpsellModal::Trigger::Layer,
-            "Live real-time mode (observed depth, every trade as a bubble, the spread) is a Pro view. Large prints still show as bubbles on your candles.", "realtime_depth");
+        // Today's preview is spent. Name the market they are on; only Binance BTC
+        // is free, so a locked BTC (Bybit, Hyperliquid) is named with its venue,
+        // never "free on BTC" beside a lock on BTC.
+        const std::string subject = rt_subject(pair_);
+        const std::string detail = "You've used today's free 3 minutes of real-time. Live depth is always free on "
+            "Binance BTC; Pro unlocks it on " + subject + " and every other market. The free preview resets at 00:00 UTC.";
+        auto& modal = ui::UpsellModal::instance();
+        modal.open(ui::UpsellModal::Trigger::Layer, detail.c_str(), "realtime_depth",
+                   g_rt_toggle_by_viewer ? "click" : "auto");
+        modal.set_subject(subject.c_str());
         return;
+    }
+    if (on && !rt_mode_ && rt_mode_gated()) {
+        // A Pro market on the free daily preview: it runs, the pill counts down,
+        // and the upsell waits until the time is used (tick_rt_preview).
+        const int64_t left = rt_preview::Store::instance().remaining();
+        usage::dispatch_detail(nlohmann::json{
+            {"event", "rt_preview_start"}, {"mode", "terminal"}, {"symbol", pair_.symbol},
+            {"props", {{"venue", pair_.exchange}, {"remaining_ms", left},
+                       {"cause", g_rt_toggle_by_viewer ? "click" : "auto"}}}}.dump());
+        const std::string msg = "Free real-time preview on " + rt_subject(pair_) + ": " +
+            rt_preview::format_left(left) + " left today. Binance BTC is always free.";
+        ui::UpsellModal::instance().toast(msg.c_str());
     }
     // heatmap_enabled_ (candle depth heatmap) is left alone in both directions:
     // real-time depth has its own flag, so a round trip keeps the candle choice.
     // The chart type is not: real-time draws Line / 1s candles, so the type the
     // user had is captured on the rising edge and put back on exit (a re-arm
     // while already on, e.g. a replay context swap, keeps the captured type).
+    if (on && !rt_mode_ && !ctx_.replay_mgr().is_active() && !EducationBoot::instance().is_embedded() && !EducationBoot::instance().is_pack()) {
+        rt_usage_emit_s_ = -1;
+        EM_ASM({
+            window.dispatchEvent(new CustomEvent('edgedepth:depth-frame', {detail: {
+                symbol: UTF8ToString($0), venue: UTF8ToString($1), instance: $2, requested: true, valid: false
+            }}));
+        }, pair_.symbol.c_str(), pair_.exchange.c_str(), chart_instance_);
+    }
     if (on && !rt_mode_) rt_prev_chart_type_ = chart_type_;
     const bool leaving = !on && rt_mode_;
-    if (leaving) liq_dense_field_ = true;
+    // Replay, packs and lessons put the scenario map back on leaving real-time, as before; live charts keep
+    // the viewer's own liquidation map switch.
+    if (leaving && !live_chart()) liq_dense_field_ = true;
     rt_mode_ = on;
     if (leaving) apply_chart_type(rt_prev_chart_type_);
     if (on && !rt_archive_) rt_archive_ = RealtimeArchive::acquire(candles(), ctx_.ob_mgr(), pair_);
@@ -70,153 +155,70 @@ void ChartWidget::set_rt_mode(bool on) {
     }
 }
 
-// Every control and disclosure the panel had is still here; the prose moved
-// into hover tooltips, so the panel reads as controls first. Missing-data
-// states (capture overload, records not plotted, archive errors) stay visible
-// as one line each, and only when they apply.
+// Navigation and panel visibility only. Overlay switches belong in Layers;
+// recording diagnostics stay available without filling the everyday menu.
 void ChartWidget::render_realtime_settings() {
-    auto tip = [](const char* text) {
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            Theme::begin_tooltip();
-            ImGui::PushTextWrapPos(ImGui::GetFontSize() * 24.0f);
-            ImGui::TextUnformatted(text);
-            ImGui::PopTextWrapPos();
-            Theme::end_tooltip();
-        }
-    };
-    auto return_live = [this]() {
-        rt_span_ms_ = realtime_default_span_ms; rt_auto_price_ = true;
-        rt_price_window_ = {}; rt_auto_fit_ = {};
-        candles().set_follow_live(true);
-    };
-
-    Theme::section_label("VIEW");
-    if (!ctx_.replay_mgr().is_active() && ImGui::Checkbox("Pause display", &rt_paused_)) {
+    using drawing::UiIcon;
+    if (!ctx_.replay_mgr().is_active() && Theme::menu_toggle("Pause display", rt_paused_)) {
+        rt_paused_ = !rt_paused_;
         if (rt_paused_) {
             rt_paused_trades_ = candles().realtime_trades().trades();
             rt_paused_liquidations_ = ctx_.liq_heatmap_mgr().observed_events(pair_);
             if (rt_archive_) rt_archive_->cancel_view();
             rt_query_from_ = 0; // A cancelled request is not loaded coverage.
-        }
-        else { rt_paused_trades_.clear(); rt_paused_liquidations_.clear(); }
+        } else { rt_paused_trades_.clear(); rt_paused_liquidations_.clear(); }
     }
-    ImGui::Checkbox("1s candles", &rt_candles_);
-    tip("One-second candles built from observed trades, in place of the trade-price line.");
-    ImGui::Checkbox("Trade-price line", &rt_trade_line_);
-    chart_type_ = rt_candles_ ? ChartType::Candles : ChartType::Line;
-    ImGui::Checkbox("Depth ladder", &rt_dom_shown_);
-    tip("Order book ladder attached to the right of the chart: resting depth and traded volume on the chart's own price rows and clock.");
-    ImGui::Checkbox(rt_dom_linked_ ? "Follow price" : "Auto-fit price", &rt_auto_price_);
-    tip(rt_dom_linked_
-        ? rt_auto_fit_history_ ? "Fits observed price history with readable grouped rows. Drag or zoom the price axis to inspect manually; Follow price resumes fitting." : "Keeps the market in the central half of a readable price window. Drag vertically to stop following. Zoom out stops before numbers overlap; choose coarser fidelity for a wider price range."
-        : "Turn off to zoom or drag the price axis. Turn on to fit observed prices again.");
-    if (ImGui::Checkbox("Auto-fit visible history", &rt_auto_fit_history_)) {
-        rt_auto_fit_ = {}; rt_price_window_ = {}; rt_auto_price_ = true;
-        rt_effective_multiplier_ = rt_bucket_multiplier_;
+    if (Theme::menu_toggle("Follow price", rt_auto_price_)) rt_auto_price_ = !rt_auto_price_;
+    if (ImGui::IsItemHovered()) Theme::tooltip("Keep price in view. Drag the price axis to inspect manually.");
+    if (Theme::menu_item(UiIcon::Play, "Return live")) {
+        rt_paused_ = false;
+        rt_paused_trades_.clear(); rt_paused_liquidations_.clear();
+        rt_span_ms_ = realtime_default_span_ms; rt_auto_price_ = true;
+        rt_price_window_ = {}; rt_auto_fit_ = {};
+        candles().set_follow_live(true);
     }
-    tip("Fits observed trades and quotes in the visible time window, grouping price rows to keep the depth ladder readable. Turn off for fixed-fidelity price following.");
-    if (ImGui::Button("Return live")) return_live();
-    tip("Back to the most recent 30 seconds, following price. Zoom out or drag left for older retained context; the view never changes recorded detail.");
-    if (rt_archive_) {
-        ImGui::SameLine();
-        if (ImGui::Button("Whole session")) { rt_span_ms_ = double(RealtimeArchive::target_ms) / 0.88; candles().set_follow_live(true); }
-        tip("Zoom out to everything retained this session.");
+    if (rt_archive_ && Theme::menu_item(UiIcon::Range, "Whole session")) {
+        rt_span_ms_ = double(RealtimeArchive::target_ms) / 0.88;
+        candles().set_follow_live(true);
     }
-
-    Theme::section_label("DEPTH");
-    ImGui::Checkbox("Extend current depth", &rt_extend_depth_);
-    tip("Projects the last synchronized sampled book into the right margin. This is a held current book, not future orders or recorded history.");
-    ImGui::TextDisabled("%s: %d native ticks per row",
-        rt_auto_fit_history_ && rt_dom_linked_ ? "Automatic grouping" : "Fixed grouping", rt_effective_multiplier_);
-    tip("Brightness is mean quantity per native tick; wider rows keep their totals in the DOM, and thin walls may fade on zoom-out. Time bins average received samples. Set the minimum fidelity in Layers > Depth settings.");
-
-    Theme::section_label("TRADES");
-    ImGui::Checkbox("Trade bubbles", &rt_bubbles_);
-    tip("Fixed 100ms groups at each exact price, with 100ms of delivery settling. The eight busiest prices per window are selected once and frozen for 30 minutes; zoom never regroups them. Changing size or filter redraws the layer.");
-    ImGui::Checkbox("Auto size", &rt_auto_bubbles_);
-    tip("Uses the 75th percentile of received trade values over the last 60 seconds. Settles after 32 records or five seconds, then stays fixed until Recalibrate; independent of zoom.");
-    if (rt_auto_bubbles_) {
-        ImGui::SameLine();
-        ImGui::TextDisabled("min %.4g%s", rt_bubble_scale_.minimum(),
-            rt_bubble_scale_.settled() ? "" : " (warming up)");
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Recalibrate")) rt_bubble_scale_ = {};
-    } else {
-        ImGui::SetNextItemWidth(130);
-        ImGui::InputFloat("Minimum value", &rt_min_notional_, 1000, 10000, "%.0f");
-        if (!std::isfinite(rt_min_notional_)) rt_min_notional_ = 10000;
-        rt_min_notional_ = std::max(1.0f, rt_min_notional_);
-        tip("Price x quantity in quote units, summed over one 100ms window at one exact price; the exchange may aggregate fills. Two-sided takers show the smaller side as an inner disc. Radius runs 3 to 12px; sizes above 16x the minimum share the cap.");
-    }
-    if (rt_archive_) {
-        const auto& b = rt_archive_->bubbles();
-        const unsigned long long skipped = b.approximate_records + b.late_records + b.overflow_records;
-        if (skipped) {
-            ImGui::TextDisabled("Not plotted as bubbles: %llu records", skipped);
-            char why[320];
-            snprintf(why, sizeof(why),
-                "%llu in multi-price history summaries, %llu late for already closed groups, %llu over the pending capture budget. Original records remain in session history when storage is available.",
-                (unsigned long long)b.approximate_records, (unsigned long long)b.late_records,
-                (unsigned long long)b.overflow_records);
-            tip(why);
-        }
-    }
-
-    Theme::section_label("LIQUIDATIONS");
-    ImGui::Checkbox("Reported liquidations", &liq_observed_enabled_);
-    tip("Diamonds at reported liquidations. Binance reports are censored; missing liquidations are not estimated.");
-    if (liq_observed_enabled_) {
-        ImGui::SetNextItemWidth(130);
-        ImGui::InputFloat("Minimum notional", &liq_obs_min_usd_, 100, 1000, "%.0f");
-        if (!std::isfinite(liq_obs_min_usd_)) liq_obs_min_usd_ = 0;
-        liq_obs_min_usd_ = std::clamp(liq_obs_min_usd_, 0.0f, 1e15f);
-        tip("Filters the diamonds only; the activity strip includes all retained reports in view.");
-    }
-    ImGui::Checkbox("Activity strip", &rt_liq_strip_);
+    Theme::menu_separator();
+    if (Theme::menu_toggle("Depth ladder", rt_dom_shown_)) rt_dom_shown_ = !rt_dom_shown_;
+    if (Theme::menu_toggle("Side panels", rt_show_standalone_)) rt_show_standalone_ = !rt_show_standalone_;
+    if (ImGui::IsItemHovered()) Theme::tooltip("Show the separate DOM and trade panels beside this view.");
 
     if (!rt_archive_) return;
     const auto& a = *rt_archive_;
-    Theme::section_label("SESSION");
-    ImGui::TextDisabled("Recorded %.1f min \xc2\xb7 %.2f MiB",
-        double(std::max(int64_t(0), a.last - a.first)) / 60000, a.bytes / 1048576);
-    {
-        std::string detail = "Local session history, 30-minute target, browser storage permitting. "
-                             "Switching to candles keeps recording; closing the chart clears it. Storage may be evicted.";
-        char line[160];
-        snprintf(line, sizeof(line), "\nOrigin storage %.2f / 256 MiB.", a.total_bytes / 1048576);
-        detail += line;
-        if (a.first) {
-            char first[64] = {}, last[64] = {};
-            DisplayTimeZone::instance().format(a.first, TimeZoneFormat::DateTimeSeconds, first, sizeof(first));
-            DisplayTimeZone::instance().format(a.last, TimeZoneFormat::DateTimeSeconds, last, sizeof(last));
-            snprintf(line, sizeof(line), "\n%s to %s", first, last);
-            detail += line;
+    Theme::menu_separator();
+    if (Theme::begin_menu_group("Session history")) {
+        ImGui::TextDisabled("Recorded %.1f min", double(std::max(int64_t(0), a.last - a.first)) / 60000);
+        if (ImGui::IsItemHovered()) Theme::tooltip("Up to 30 minutes in browser storage. Closing the chart clears this history.");
+        if (!a.startup_status.empty()) ImGui::TextWrapped("%s", a.startup_status.c_str());
+        const auto& b = a.bubbles();
+        const unsigned long long skipped = b.approximate_records + b.late_records + b.overflow_records;
+        if (skipped) {
+            ImGui::TextDisabled("Bubbles omitted: %llu records", skipped);
+            if (ImGui::IsItemHovered())
+                Theme::tooltip("%llu multi-price summaries, %llu late records, %llu over capture capacity.\nOriginal records remain in session history where storage is available.",
+                    (unsigned long long)b.approximate_records, (unsigned long long)b.late_records,
+                    (unsigned long long)b.overflow_records);
         }
-        snprintf(line, sizeof(line), "\nBubble groups retained: %zu; filtered before display: %zu.",
-                 a.bubbles().size(), a.bubbles().filtered_groups);
-        detail += line;
-        if (rt_history_view_) {
-            snprintf(line, sizeof(line), "\nHistory: %.1fs depth bins; %zu markers from %zu trades.",
-                     double(rt_loaded_step_) / 1000, rt_archive_trades_.size(), a.view_trade_count);
-            detail += line;
-        }
-        if (!a.startup_status.empty()) {
-            detail += "\n\n" + a.startup_status;
-            snprintf(line, sizeof(line), "\nStartup received up to %d price levels per side.", a.startup_max_levels_per_side);
-            detail += line;
-            detail += "\nStartup depth: 500ms observations, up to 512 native levels per side on supported feeds. "
-                      "Busy-market prefixes group observed trades by side over 100ms, preserving quantity and price range; "
-                      "zoom cannot recover individual trades there. Current DOM uses live depth. Startup trades do not enter CVD or alerts.";
-        }
-        tip(detail.c_str());
+        if (rt_trade_tail_waiting_) ImGui::TextWrapped("Loading older trades...");
+        if (ImGui::SmallButton("Clear history")) rt_archive_->reset();
+        Theme::end_menu_group();
     }
-    if (!a.error.empty()) ImGui::TextColored(Theme::Tokens::WARN, "%s", a.error.c_str());
-    if (a.dropped) ImGui::TextColored(Theme::Tokens::WARN, "Capture overload: %zu records missed; depth gaps kept", a.dropped);
-    if (rt_trade_tail_waiting_) ImGui::TextDisabled("Refreshing older trades; current trades continue");
-    if (ImGui::SmallButton("Clear history")) rt_archive_->reset();
+    // Actual capture failures must remain visible even with details collapsed.
+    if (!a.error.empty() || a.dropped) {
+        ImGui::PushStyleColor(ImGuiCol_Text, Theme::Tokens::WARN);
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 250.0f);
+        if (!a.error.empty()) ImGui::TextWrapped("%s", a.error.c_str());
+        if (a.dropped) ImGui::TextWrapped("Capture overload: %zu records missed; depth gaps kept", a.dropped);
+        ImGui::PopTextWrapPos();
+        ImGui::PopStyleColor();
+    }
 }
 
 void ChartWidget::on_rewind(int64_t) {
+    liq_obs_size_reference_ = {};
     // The replay owner restores/replays depth separately. Never keep future
     // samples or GPU cells from the preceding traversal.
     rt_dom_frame_ = {};
@@ -229,6 +231,9 @@ void ChartWidget::on_rewind(int64_t) {
     rt_unhealthy_since_ms_ = 0;
     rt_renderer_.reset();
     rt_latest_.reset();
+    rt_last_good_.reset();
+    rt_reported_failure_ = 0;
+    rt_was_healthy_ = false;
     rt_pending_.clear();
     rt_samples_.clear();
     rt_serial_ = 0;
@@ -246,12 +251,15 @@ void ChartWidget::on_rewind(int64_t) {
 }
 
 void ChartWidget::update_realtime() {
+    // First, before any real-time state is advanced: a spent preview leaves
+    // real-time here, and the rest of this frame renders candles.
+    if (tick_rt_preview()) return;
     if (rt_generation_ != ctx_.ob_mgr().realtime_generation()) {
         on_rewind(0);
         rt_generation_ = ctx_.ob_mgr().realtime_generation();
     }
-    update_realtime_archive_view();
-    if (!(tick_size_ > 0) || rt_paused_) return;
+    if (rt_paused_) { update_realtime_archive_view(); return; }
+    if (!(tick_size_ > 0)) return;
     if (!rt_renderer_) {
         rt_renderer_ = std::make_unique<ShaderHeatmapRenderer>();
         rt_renderer_->configure_realtime(tick_size_);
@@ -273,8 +281,10 @@ void ChartWidget::update_realtime() {
         rt_quote_ask_since_ms_ = quote.ask_since_ms;
     }
     rt_clock_ms_ = clock;
+    update_realtime_archive_view();
     rt_renderer_->set_observation_clock_ms(clock);
-    rt_book_valid_ = ctx_.ob_mgr().copy_realtime_since(pair_, rt_serial_, rt_pending_);
+    RealtimeDepthHistory::SyncFailure failure;
+    rt_book_valid_ = ctx_.ob_mgr().copy_realtime_since(pair_, rt_serial_, rt_pending_, &failure);
     // Samples past the as-of clock stay pending.
     for (const auto& sample : rt_pending_) {
         if (sample->timestamp_ms > clock) break;
@@ -285,7 +295,8 @@ void ChartWidget::update_realtime() {
         if (!rt_history_view_ || realtime_live_edge()) rt_renderer_->finalize_column(sample->timestamp_ms, rt_prices_, sample->segment_start, (sample->bid + sample->ask) * 0.5, sample->source_bucket_ticks);
         rt_latest_ = sample;
         rt_samples_.push_back(sample);
-        if (rt_history_view_ && realtime_live_edge() && sample->timestamp_ms > rt_loaded_to_)
+        if (rt_history_view_ && realtime_live_edge() &&
+            (rt_archive_samples_.empty() || sample->timestamp_ms > rt_archive_samples_.back()->timestamp_ms))
             append_realtime_depth_sample(rt_archive_samples_, sample, rt_loaded_step_);
         while (rt_samples_.size() > RealtimeDepthHistory::max_samples || rt_samples_.front()->timestamp_ms <= clock - RealtimeDepthHistory::retention_ms)
             rt_samples_.pop_front();
@@ -299,11 +310,39 @@ void ChartWidget::update_realtime() {
             rt_archive_samples_.pop_back();
         rt_latest_.reset();
     }
-    const bool healthy = rt_book_valid_ && rt_latest_ && clock - rt_latest_->timestamp_ms <= 15000;
+    const bool healthy = rt_book_valid_ && rt_latest_ && rt_latest_->timestamp_ms <= clock &&
+        clock - rt_latest_->timestamp_ms <= 15000;
+    if (healthy) rt_last_good_ = rt_latest_;
+    if (!ctx_.replay_mgr().is_active() &&
+        (failure.count != rt_reported_failure_ || (rt_was_healthy_ && !healthy))) {
+        const char* reason = failure.count != rt_reported_failure_ || !rt_book_valid_
+            ? failure.reason : "Depth observation stale";
+        // A bounded, local diagnostic survives recoveries too brief to capture.
+        // Sequence IDs are strings so browser tooling cannot round int64 IDs.
+        char ids[192];
+        snprintf(ids, sizeof(ids), "%lld/%lld/%lld/%lld", (long long)failure.prior,
+            (long long)failure.first, (long long)failure.last, (long long)failure.previous);
+        EM_ASM({
+            const event = ({symbol: UTF8ToString($0), venue: UTF8ToString($1),
+                reason: UTF8ToString($2), observedAt: $3, sourceAt: $4,
+                sequencePriorFirstLastPrevious: UTF8ToString($5), bid: $6, ask: $7,
+                lastGoodAt: $8, recovered: !!$9});
+            const events = Module['depthRecoveryEvents'] || (Module['depthRecoveryEvents'] = []);
+            events.push(event);
+            if (events.length > 20) events.shift();
+            console.warn('Depth recovery', event);
+        }, pair_.symbol.c_str(), pair_.exchange.c_str(), reason, double(clock),
+            double(failure.timestamp_ms), ids, failure.bid, failure.ask,
+            rt_last_good_ ? double(rt_last_good_->timestamp_ms) : 0, healthy);
+    }
+    rt_reported_failure_ = failure.count;
+    rt_was_healthy_ = healthy;
     if (healthy || ctx_.replay_mgr().is_active()) rt_unhealthy_since_ms_ = 0;
     else {
         if (!rt_unhealthy_since_ms_) rt_unhealthy_since_ms_ = clock;
-        if (clock - rt_unhealthy_since_ms_ >= 3000)
+        // A known break needs a seed immediately. The shared stream owner
+        // coalesces requests across charts/archive and enforces its cooldown.
+        if ((!rt_book_valid_ && rt_last_good_) || clock - rt_unhealthy_since_ms_ >= 3000)
             ctx_.stream_mgr().refresh_orderbook({pair_, Terminal::Stream::Orderbook, 0}, clock);
     }
     rt_renderer_->set_observation_hold((!rt_history_view_ || realtime_live_edge()) && rt_book_valid_ && rt_latest_ &&
@@ -319,19 +358,103 @@ const std::deque<Terminal::Trade>& ChartWidget::realtime_trades() const {
 
 void ChartWidget::render_realtime() {
     ProfileScope profile("RT overlays");
+    // Only the visible chart's render path, at most once per second. A valid
+    // book reaches the renderer; this is not a GPU pixel-readback assertion.
+    const double usage_now = ImGui::GetTime();
+    if (!ctx_.replay_mgr().is_active() && !EducationBoot::instance().is_embedded() && !EducationBoot::instance().is_pack() && usage_now - rt_usage_emit_s_ >= 1.0) {
+        rt_usage_emit_s_ = usage_now;
+        const bool observing = rt_depth_enabled_ && (!rt_history_view_ || realtime_live_edge()) && !rt_paused_;
+        const bool valid = observing &&
+            rt_book_valid_ && rt_latest_ && rt_latest_->timestamp_ms <= rt_clock_ms_ &&
+            rt_clock_ms_ - rt_latest_->timestamp_ms <= 15000;
+        EM_ASM({
+            window.dispatchEvent(new CustomEvent('edgedepth:depth-frame', {detail: {
+                symbol: UTF8ToString($0), venue: UTF8ToString($1), instance: $2, valid: !!$3, observing: !!$4
+            }}));
+        }, pair_.symbol.c_str(), pair_.exchange.c_str(), chart_instance_, valid, observing);
+    }
     const auto limits = ImPlot::GetPlotLimits();
     if (!candles().follow_live()) rt_span_ms_ = std::clamp(limits.X.Size(), 5000.0, (double(RealtimeArchive::target_ms) / 0.88));
     ImDrawList* dl = ImPlot::GetPlotDrawList();
     ImPlot::PushPlotClipRect();
     const auto& trades = realtime_trades();
-    if (rt_depth_enabled_ && rt_extend_depth_ && (!rt_history_view_ || realtime_live_edge()) && rt_book_valid_ && rt_latest_ &&
-        rt_latest_->timestamp_ms <= rt_clock_ms_ && rt_clock_ms_ - rt_latest_->timestamp_ms <= 15000 &&
+    const bool fresh = rt_book_valid_ && rt_latest_ &&
+        rt_latest_->timestamp_ms <= rt_clock_ms_ && rt_clock_ms_ - rt_latest_->timestamp_ms <= 15000;
+    rt_dom_frame_.book = fresh ? rt_latest_ : rt_last_good_;
+    rt_dom_frame_.quote = rt_quote_;
+    rt_dom_frame_.frame = ImGui::GetFrameCount();
+    rt_dom_frame_.clock_ms = rt_clock_ms_;
+    rt_dom_frame_.native_tick = rt_renderer_ ? rt_renderer_->get_native_bucket_size() : 0;
+    rt_dom_frame_.automatic_grouping = rt_auto_fit_history_ && rt_dom_linked_;
+    rt_dom_frame_.bucket_ticks = rt_renderer_ ? rt_renderer_->get_bucket_multiplier() : rt_bucket_multiplier_;
+    rt_dom_frame_.price_min = limits.Y.Min;
+    rt_dom_frame_.price_max = limits.Y.Max;
+    rt_dom_frame_.top = ImPlot::GetPlotPos().y;
+    rt_dom_frame_.bottom = rt_dom_frame_.top + ImPlot::GetPlotSize().y;
+    rt_dom_frame_.synchronized = rt_book_valid_;
+    rt_dom_frame_.recovery_enabled = rt_bridge_gaps_;
+    rt_dom_frame_.replay = ctx_.replay_mgr().is_active();
+    rt_dom_frame_.flow = rt_flow_.get();
+    rt_dom_frame_.paused = rt_paused_ || ctx_.replay_mgr().is_paused();
+    const bool recovering = rt_dom_frame_.recovery_visible();
+    if (recovering && rt_renderer_ && rt_depth_enabled_ && (!rt_history_view_ || realtime_live_edge())) {
+        rt_prices_.clear();
+        for (const auto& level : rt_last_good_->levels) rt_prices_[level.price] += float(level.size);
+        rt_renderer_->render_recovery_preview(rt_prices_, (rt_last_good_->bid + rt_last_good_->ask) * 0.5,
+            heatmap_sensitivity_, rt_last_good_->timestamp_ms,
+            rt_extend_depth_ ? realtime_projection_until(rt_clock_ms_, rt_span_ms_) : double(rt_clock_ms_));
+    }
+    if (rt_depth_enabled_ && rt_extend_depth_ && (!rt_history_view_ || realtime_live_edge()) && (fresh || recovering) &&
         limits.X.Max > rt_clock_ms_) {
         const float edge = std::max(ImPlot::GetPlotPos().x,
             ImPlot::PlotToPixels(double(rt_clock_ms_), 0).x);
         dl->AddLine(ImVec2(edge, ImPlot::GetPlotPos().y),
             ImVec2(edge, ImPlot::GetPlotPos().y + ImPlot::GetPlotSize().y), Theme::u32(Theme::Tokens::TX2, 0.35f));
-        dl->AddText(ImVec2(edge + 5, ImPlot::GetPlotPos().y + 5), Theme::u32(Theme::Tokens::TX2), "Current depth");
+        const float room = ImPlot::GetPlotPos().x + ImPlot::GetPlotSize().x - edge - 10;
+        const char* full_label = recovering ? "Last known depth" : "Current depth";
+        const char* label = room >= ImGui::CalcTextSize(full_label).x ? full_label : recovering ? "Held" : "Now";
+        if (room >= ImGui::CalcTextSize(label).x)
+            dl->AddText(ImVec2(edge + 5, ImPlot::GetPlotPos().y + 5), Theme::u32(Theme::Tokens::TX2), label);
+    }
+
+    // Display bridges get a small marker, not a black stripe through
+    // the book. Original source boundaries remain available underneath.
+    if (rt_depth_enabled_) {
+        const auto& samples = realtime_samples();
+        const auto pos = ImPlot::GetPlotPos(), size = ImPlot::GetPlotSize();
+        for (size_t i = 1; i < samples.size(); ++i) {
+            const auto& before = samples[i - 1];
+            const auto& after = samples[i];
+            if (!after->segment_start || after->timestamp_ms > rt_clock_ms_ ||
+                after->timestamp_ms < limits.X.Min || before->timestamp_ms > limits.X.Max) continue;
+            const float left = std::max(pos.x, ImPlot::PlotToPixels(double(before->timestamp_ms), 0).x);
+            const float right = std::min(pos.x + size.x, ImPlot::PlotToPixels(double(after->timestamp_ms), 0).x);
+            if (right <= left) continue;
+            if (rt_renderer_ && rt_renderer_->bridges_observation(after->timestamp_ms)) {
+                dl->AddLine(ImVec2(left, pos.y + size.y - 3), ImVec2(right, pos.y + size.y - 3),
+                    Theme::u32(Theme::Tokens::WARN, 0.7f), 2.0f);
+                if (ImPlot::IsPlotHovered() && ImGui::IsMouseHoveringRect(
+                    ImVec2(left - 3, pos.y + size.y - 12), ImVec2(right + 3, pos.y + size.y)))
+                    Theme::tooltip("Display bridge: %.1fs held from the last confirmed book. No depth was recorded in the gap.",
+                        double(after->timestamp_ms - before->timestamp_ms) / 1000);
+                continue;
+            }
+            if (right - left < 24) continue;
+            dl->AddRectFilled(ImVec2(left, pos.y), ImVec2(right, pos.y + size.y),
+                Theme::u32(Theme::Tokens::TX2, 0.035f));
+            const char* label = "Depth unavailable";
+            const auto text = ImGui::CalcTextSize(label);
+            if (right - left > text.x + 16)
+                dl->AddText(ImVec2((left + right - text.x) * 0.5f, pos.y + size.y - text.y - 10),
+                    Theme::u32(Theme::Tokens::TX2), label);
+            if (ImPlot::IsPlotHovered() && ImGui::GetIO().MousePos.x >= left &&
+                ImGui::GetIO().MousePos.x < right) {
+                Theme::begin_tooltip();
+                ImGui::TextUnformatted("No continuous depth recorded in this interval");
+                ImGui::TextUnformatted("Trades may still be available. Missing orders are not reconstructed.");
+                Theme::end_tooltip();
+            }
+        }
     }
 
     ImVec2 previous{};
@@ -434,23 +557,6 @@ void ChartWidget::render_realtime() {
                     RealtimeBubble::Fill::Opaque, float(m.minor()), minor);
             });
     }
-    const bool fresh = rt_book_valid_ && rt_latest_ &&
-        rt_latest_->timestamp_ms <= rt_clock_ms_ && rt_clock_ms_ - rt_latest_->timestamp_ms <= 15000;
-    rt_dom_frame_.book = rt_latest_;
-    rt_dom_frame_.quote = rt_quote_;
-    rt_dom_frame_.frame = ImGui::GetFrameCount();
-    rt_dom_frame_.clock_ms = rt_clock_ms_;
-    rt_dom_frame_.native_tick = rt_renderer_ ? rt_renderer_->get_native_bucket_size() : 0;
-    rt_dom_frame_.automatic_grouping = rt_auto_fit_history_ && rt_dom_linked_;
-    rt_dom_frame_.bucket_ticks = rt_renderer_ ? rt_renderer_->get_bucket_multiplier() : rt_bucket_multiplier_;
-    rt_dom_frame_.price_min = limits.Y.Min;
-    rt_dom_frame_.price_max = limits.Y.Max;
-    rt_dom_frame_.top = ImPlot::GetPlotPos().y;
-    rt_dom_frame_.bottom = rt_dom_frame_.top + ImPlot::GetPlotSize().y;
-    rt_dom_frame_.synchronized = rt_book_valid_;
-    rt_dom_frame_.replay = ctx_.replay_mgr().is_active();
-    rt_dom_frame_.flow = rt_flow_.get();
-    rt_dom_frame_.paused = rt_paused_ || ctx_.replay_mgr().is_paused();
     if (fresh && limits.X.Max > rt_clock_ms_) {
         const auto& book = *rt_latest_;
         // The dashed quotes stop where the current-depth projection stops.
@@ -485,48 +591,72 @@ void ChartWidget::render_realtime() {
                 dl->AddLine(ImVec2(x, y), ImVec2(std::min(x + 5, right), y), color, pass ? 1.0f : 3.0f);
         }
     }
-    const char* note = rt_archive_ && rt_archive_->loading ? "Loading RT history..." : rt_archive_ && !rt_archive_->error.empty() ? "RT archive stopped: open RT settings for storage status" : rt_history_view_ ? (rt_archive_ && rt_archive_->loading ?
-        "RT history loading / recording continues" : "RT history: mean depth bins / fixed 100ms trade bubbles") : rt_paused_ ? "RT paused / session recording continues" : !fresh ? "RT: waiting for fresh synchronized depth" :
-        "RT: sampled book held between updates / fixed 100ms trade bubbles";
+    const bool archive_error = rt_archive_ && !rt_archive_->error.empty();
+    char recovery_note[80];
+    snprintf(recovery_note, sizeof(recovery_note), "Recovering depth / last book %.1fs old",
+        recovering ? double(rt_clock_ms_ - rt_last_good_->timestamp_ms) / 1000 : 0);
+    const char* note = archive_error ? "History recording unavailable" : rt_paused_ ? "Display paused" :
+        recovering ? recovery_note : !fresh ? "Waiting for synchronized depth" : rt_archive_ && rt_archive_->loading ? "Loading history" :
+        rt_history_view_ ? "Live depth / session history" : "Live depth";
+    if (ctx_.replay_mgr().is_active() && fresh && !rt_paused_ && !archive_error)
+        note = "Recorded depth";
     const ImVec2 pos = ImPlot::GetPlotPos();
-    const float note_y = pos.y + (ctx_.replay_mgr().is_active() ? 60.0f : 34.0f);
-    if (!realtime_samples().empty() && realtime_samples().front()->timestamp_ms >= limits.X.Min &&
-        realtime_samples().front()->timestamp_ms <= std::min(limits.X.Max, double(rt_clock_ms_))) {
-        const float start = ImPlot::PlotToPixels(double(realtime_samples().front()->timestamp_ms), 0).x;
-        dl->AddLine(ImVec2(start, note_y + 26), ImVec2(start, pos.y + ImPlot::GetPlotSize().y),
-            Theme::u32(Theme::Tokens::TX2, 0.45f));
-        dl->AddText(ImVec2(start + 6, note_y + 18), Theme::u32(Theme::Tokens::TX2), "Observed depth starts here");
-        // Trade bubbles keep their own 30-minute history, so zooming out can show
-        // trades where this session never recorded depth. Say so, rather than
-        // leaving an unexplained black stretch beside the bubbles.
-        const char* before = "Trades only: no depth recorded";
-        const float width = ImGui::CalcTextSize(before).x;
-        if (start - pos.x > width + 24)
-            dl->AddText(ImVec2(start - width - 6, note_y + 18), Theme::u32(Theme::Tokens::TX2, 0.8f), before);
-    }
-    char density_note[384];
-    if (rt_bubbles_ && rt_archive_ && rt_archive_->bubbles().filtered_groups > 0) {
-        std::snprintf(density_note, sizeof(density_note), "%s / up to 8 prices per 100ms, selected once", note);
-        note = density_note;
-    }
+    // One of the chart chips (status, rails key): a rounded chip with a dot, amber while depth is not in hand.
+    const bool depth_warn = archive_error || !fresh;
+    ImGui::PushFont(Theme::Fonts::mono_sm());
+    const float chip_px = ImGui::GetFontSize();
+    ImGui::PopFont();
+    Theme::push_font(Theme::Fonts::ui(), chip_px);
     const ImVec2 note_size = ImGui::CalcTextSize(note);
-    dl->AddRectFilled(ImVec2(pos.x + 8, note_y - 3),
-        ImVec2(pos.x + 16 + note_size.x, note_y + note_size.y + 3),
-        Theme::u32(Theme::Tokens::BASE, 0.9f), 3);
-    dl->AddText(ImVec2(pos.x + 12, note_y), Theme::u32(Theme::Tokens::TX1), note);
-    if(rt_archive_ && !rt_archive_->startup_status.empty() && !rt_paused_ && fresh && rt_archive_->error.empty())
-        dl->AddText(ImVec2(pos.x+12,note_y+36),Theme::u32(Theme::Tokens::TX2),rt_archive_->startup_status.c_str());
+    const ImVec2 note_min(pos.x + 10, pos.y + (ctx_.replay_mgr().is_active() ? 58.0f : 10.0f));
+    const ImVec2 note_max(std::round(note_min.x + 9 + 6 + 7 + note_size.x + 9), note_min.y + 22);
+    dl->AddRectFilled(note_min, note_max, Theme::u32(Theme::Tokens::PANEL, 0.92f), Theme::Radius::R2);
+    dl->AddRect(note_min, note_max, Theme::u32(Theme::Tokens::BD2), Theme::Radius::R2, 0, 1.0f);
+    dl->AddCircleFilled(ImVec2(note_min.x + 12, note_min.y + 11), 3.0f,
+        Theme::u32(depth_warn ? Theme::Tokens::WARN : fresh && !rt_paused_ ? Theme::Tokens::UP : Theme::Tokens::TX3), 12);
+    dl->AddText(ImVec2(note_min.x + 22, std::round(note_min.y + 11 - note_size.y * 0.5f)),
+        Theme::u32(depth_warn ? Theme::Tokens::WARN : Theme::Tokens::TX2), note);
+    ImGui::PopFont();
+    Theme::chart_chip(note_min, note_max);
+    if (ImGui::IsMouseHoveringRect(note_min, note_max) && ImPlot::IsPlotHovered()) {
+        Theme::begin_tooltip();
+        ImGui::TextUnformatted("Depth averages received samples; the right margin holds the current book.");
+        ImGui::TextUnformatted("During resync, the last confirmed book stays visible with its age until fresh depth arrives.");
+        ImGui::TextUnformatted("Amber marks below the chart identify display bridges; recorded data stays unchanged.");
+        ImGui::TextUnformatted("Trade bubbles use fixed 100ms groups, up to eight prices selected once.");
+        if (rt_archive_ && !rt_archive_->startup_status.empty())
+            ImGui::TextUnformatted(rt_archive_->startup_status.c_str());
+        if (archive_error) ImGui::TextUnformatted(rt_archive_->error.c_str());
+        ImGui::TextUnformatted("Open Session history in the Real-time menu for recording details.");
+        Theme::end_tooltip();
+    }
+    if (!realtime_samples().empty()) {
+        const auto first = realtime_samples().front()->timestamp_ms;
+        if (first > limits.X.Min && first <= std::min(limits.X.Max, double(rt_clock_ms_))) {
+            const float start = ImPlot::PlotToPixels(double(first), 0).x;
+            const char* label = "No earlier depth";
+            const auto text = ImGui::CalcTextSize(label);
+            if (start - pos.x > text.x + 20) {
+                dl->AddLine(ImVec2(start, pos.y), ImVec2(start, pos.y + ImPlot::GetPlotSize().y),
+                    Theme::u32(Theme::Tokens::TX2, 0.3f));
+                dl->AddText(ImVec2(start - text.x - 8, pos.y + ImPlot::GetPlotSize().y - text.y - 10),
+                    Theme::u32(Theme::Tokens::TX2), label);
+            }
+        }
+    }
+    // Replay priming. Embedded replays (events, lessons, /demo) cover the whole canvas with their own scrim and
+    // spinner (main.cpp render_lesson_loading_overlay); a second one here showed through it, off centre.
     if (ctx_.replay_mgr().is_loading()) {
         const ImVec2 size = ImPlot::GetPlotSize();
         dl->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), Theme::u32(Theme::Tokens::BASE));
-        const ImVec2 center(pos.x + size.x * 0.5f, pos.y + size.y * 0.5f);
-        const float angle = float(ImGui::GetTime() * 4.0);
-        dl->PathArcTo(center, 12.0f, angle, angle + 4.5f, 24);
-        dl->PathStroke(Theme::u32(Theme::Tokens::BRAND_TX), 0, 2.5f);
-        const char* label = "Loading replay...";
-        const ImVec2 text_size = ImGui::CalcTextSize(label);
-        dl->AddText(ImVec2(center.x - text_size.x * 0.5f, center.y + 24),
-                    Theme::u32(Theme::Tokens::TX1), label);
+        if (!EducationBoot::instance().is_embedded()) {
+            const ImVec2 center(pos.x + size.x * 0.5f, pos.y + size.y * 0.5f);
+            Theme::spinner(dl, center, 18.0f);
+            const char* label = "Loading replay";
+            const ImVec2 text_size = ImGui::CalcTextSize(label);
+            dl->AddText(ImVec2(std::round(center.x - text_size.x * 0.5f), center.y + 32),
+                        Theme::u32(Theme::Tokens::TX2), label);
+        }
     }
     ImPlot::PopPlotClipRect();
 }
@@ -585,6 +715,13 @@ void ChartWidget::update_realtime_archive_view() {
         rt_archive_generation_ = rt_archive_->generation;
         rt_archive_samples_.clear(); rt_archive_trades_.clear(); rt_query_from_ = rt_query_to_ = rt_loaded_to_ = 0;
         if (rt_history_view_) rebuild_realtime_view();
+    }
+    if (rt_archive_view_revision_ != rt_archive_->view_revision) {
+        rt_archive_view_revision_ = rt_archive_->view_revision;
+        // Startup/recovery added observations to this same source. Its old
+        // query was cancelled; retain the displayed snapshot and live tail
+        // until a complete replacement arrives, including while paused.
+        rt_query_from_ = rt_query_to_ = 0;
     }
     const bool follow = candles().follow_live();
     const int64_t from = follow ? rt_clock_ms_ - int64_t(rt_span_ms_ * 0.88) : int64_t(last_visible_range_.X.Min);
@@ -660,58 +797,6 @@ void ChartWidget::update_realtime_archive_view() {
 
 const std::vector<Terminal::Liquidation>& ChartWidget::realtime_liquidations() const {
     return rt_mode_ && rt_paused_ ? rt_paused_liquidations_ : ctx_.liq_heatmap_mgr().observed_events(pair_);
-}
-
-void ChartWidget::render_realtime_liquidation_strip() {
-    const auto& events = realtime_liquidations();
-    const auto view = observed_liquidations::aggregate(events, int64_t(last_visible_range_.X.Min),
-        int64_t(last_visible_range_.X.Max), rt_clock_ms_);
-    char shorts[32] = {}, longs[32] = {};
-    Indicators::format_volume_usdt(view.shorts, shorts, sizeof(shorts), nullptr);
-    Indicators::format_volume_usdt(view.longs, longs, sizeof(longs), nullptr);
-    ImGui::Text("Reported notional | shorts +%s / longs -%s | %.3gs bins",
-        shorts + std::strspn(shorts, " "), longs + std::strspn(longs, " "), double(view.step_ms)/1000);
-    ImGui::TextColored(Theme::Tokens::TX2, "%s", view.count == 0 ? "No reports in this retained window; completeness unknown"
-        : pair_.exchange == "binancef" ? "Binance reports are censored; received notional only"
-        : "Received notional only; feed coverage may be incomplete");
-    if (!ImPlot::BeginPlot("##RTLiqActivity", ImVec2(-1, 90),
-            ImPlotFlags_NoTitle | ImPlotFlags_NoLegend | ImPlotFlags_NoMouseText | ImPlotFlags_NoInputs)) return;
-    // Real-time has no indicator pane below, so this strip owns the time axis.
-    ImPlot::SetupAxis(ImAxis_X1, nullptr, ImPlotAxisFlags_None);
-    ImPlot::SetupAxis(ImAxis_Y1, nullptr, ImPlotAxisFlags_Opposite | ImPlotAxisFlags_NoTickLabels);
-    ImPlot::SetupAxisLimits(ImAxis_X1, last_visible_range_.X.Min, last_visible_range_.X.Max, ImGuiCond_Always);
-    const double scale = std::max(1.0, view.peak) * 1.1;
-    ImPlot::SetupAxisLimits(ImAxis_Y1, -scale, scale, ImGuiCond_Always);
-    ImPlot::SetupAxisFormat(ImAxis_X1, [](double value, char* out, int size, void*) {
-        DisplayTimeZone::instance().format(int64_t(value), TimeZoneFormat::TimeSeconds, out, size);
-        return int(std::strlen(out));
-    });
-    ImPlot::SetupFinish();
-    auto* draw = ImPlot::GetPlotDrawList();
-    const auto pos = ImPlot::GetPlotPos(), size = ImPlot::GetPlotSize();
-    const float zero = ImPlot::PlotToPixels(0, 0).y;
-    ImPlot::PushPlotClipRect();
-    draw->AddLine(ImVec2(pos.x, zero), ImVec2(pos.x+size.x, zero), Theme::u32(Theme::Tokens::BD1));
-    const observed_liquidations::Bin* hovered = nullptr;
-    const double mouse_time = ImPlot::GetPlotMousePos().x;
-    for (size_t i = 0; i < view.size; ++i) {
-        const auto& bin = view.bins[i];
-        if (!bin.count) continue;
-        const int64_t end = std::min(bin.start_ms + view.step_ms, rt_clock_ms_);
-        const float left = ImPlot::PlotToPixels(double(bin.start_ms), 0).x;
-        const float right = std::max(left+1, ImPlot::PlotToPixels(double(end), 0).x);
-        if (bin.shorts > 0) draw->AddRectFilled(ImVec2(left, ImPlot::PlotToPixels(0,bin.shorts).y), ImVec2(right,zero), Theme::u32(Theme::Tokens::UP));
-        if (bin.longs > 0) draw->AddRectFilled(ImVec2(left,zero), ImVec2(right,ImPlot::PlotToPixels(0,-bin.longs).y), Theme::u32(Theme::Tokens::DOWN));
-        if (mouse_time >= bin.start_ms && mouse_time < bin.start_ms + view.step_ms) hovered = &bin;
-    }
-    ImPlot::PopPlotClipRect();
-    if (hovered && ImPlot::IsPlotHovered()) {
-        ImGui::BeginTooltip();
-        ImGui::Text("%u reports | shorts +%.2f | longs -%.2f", hovered->count, hovered->shorts, hovered->longs);
-        ImGui::TextUnformatted("Reported notional; no estimate of unreported liquidations.");
-        ImGui::EndTooltip();
-    }
-    ImPlot::EndPlot();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -914,20 +999,23 @@ void ChartWidget::render_candle_bubbles() {
         DisplayTimeZone::instance().format(hovered->timestamp_ms, TimeZoneFormat::DateTimeSeconds, time, sizeof(time));
         snprintf(price, sizeof(price), fmt_.price_fmt, hovered->price);
         Theme::begin_tooltip();
-        if (hovered->buy > 0 && hovered->sell > 0)
-            ImGui::Text("Large prints, both takers: %.0f%% bought / %.0f%% sold",
-                100.0 * hovered->buy / hovered->value(), 100.0 * hovered->sell / hovered->value());
-        else ImGui::TextUnformatted(hovered->buy_led() ? "Large buy (taker bought)" : "Large sell (taker sold)");
-        ImGui::Text("%s | %s %s", time, pair_.exchange.c_str(), pair_.symbol.c_str());
-        ImGui::Text("Price %s | value %.0f (bought %.0f, sold %.0f) | %u record%s", price, hovered->value(),
-            hovered->buy, hovered->sell, hovered->count, hovered->count == 1 ? "" : "s");
-        ImGui::Text("%.1fx display reference (%.0f quote value)", hovered->value()/reference,reference);
-        ImGui::Text("Showing %zu bubbles from %zu qualifying records; zoom for detail",selected.size(),qualifying_count);
-        if (candle_bubble_history_.size_reference>0)
-            ImGui::TextUnformatted("Reference: initial history selection P90, held while panning.");
-        else ImGui::TextUnformatted("Reference: warmed live trade-size threshold.");
-        ImGui::TextUnformatted("Log-compressed sizes. Price guide starts at this level.");
-        ImGui::TextUnformatted("Records sharing this bar and price are one bubble; the exchange may aggregate fills.");
+        ImGui::TextColored(hovered->buy_led()?Theme::Tokens::UP:Theme::Tokens::DOWN,
+            "%s | %.2f", hovered->buy>0 && hovered->sell>0 ? "Buy / sell prints" : hovered->buy_led()?"Buy prints":"Sell prints",hovered->value());
+        ImGui::Text("Price %s | %u record%s",price,hovered->count,hovered->count==1?"":"s");
+        ImGui::TextUnformatted(time);
+        if(hovered->buy>0 && hovered->sell>0)
+            ImGui::Text("Bought %.2f | sold %.2f",hovered->buy,hovered->sell);
+        if(ImGui::GetIO().KeyAlt) {
+            ImGui::Separator();
+            ImGui::Text("%s %s | quote notional",pair_.exchange.c_str(),pair_.symbol.c_str());
+            ImGui::Text("%.1fx size reference (%.0f)",hovered->value()/reference,reference);
+            ImGui::Text("%zu bubbles / %zu qualifying records",selected.size(),qualifying_count);
+            ImGui::TextUnformatted(candle_bubble_history_.size_reference>0
+                ? "Reference: initial selection P90, fixed while panning."
+                : "Reference: warmed live trade-size threshold.");
+            ImGui::TextUnformatted("Log-scaled sizes; zoom reveals hidden prints.");
+            ImGui::TextUnformatted("Same bar and price grouped; exchange records may combine fills.");
+        } else ImGui::TextDisabled("Quote notional | Alt for details");
         Theme::end_tooltip();
     }
 }

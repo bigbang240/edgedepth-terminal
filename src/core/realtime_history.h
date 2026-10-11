@@ -28,7 +28,25 @@ public:
     using SamplePtr = std::shared_ptr<const Sample>;
 
     void seed() { if (!valid_) segment_start_ = true; valid_ = true; first_delta_ = true; }
-    void interrupt() { valid_ = false; }
+    struct SyncFailure {
+        uint64_t count = 0;
+        const char* reason = "Waiting for first depth";
+        int64_t timestamp_ms = 0;
+        int64_t prior = 0, first = 0, last = 0, previous = 0;
+        double bid = 0, ask = 0;
+    };
+    // Retain the cause across a fast re-seed, even between two UI frames.
+    const SyncFailure& failure() const { return failure_; }
+    void interrupt(const char* reason = "Depth interrupted", int64_t timestamp_ms = 0) {
+        if (valid_) {
+            const auto count = failure_.count + 1;
+            failure_ = {};
+            failure_.count = count;
+            failure_.reason = reason;
+            failure_.timestamp_ms = timestamp_ms;
+        }
+        valid_ = false;
+    }
     // Observations resume after a deliberate pause in recording (replay priming
     // traverses depth the chart must not show as history at the held clock).
     void mark_segment() { segment_start_ = true; }
@@ -39,16 +57,24 @@ public:
         return valid_ && end != samples_.begin() &&
             clock_ms - (*std::prev(end))->timestamp_ms <= 15000;
     }
-    void check_delta(int64_t prior, int64_t first, int64_t last, int64_t previous) {
+    void check_delta(int64_t prior, int64_t first, int64_t last, int64_t previous, int64_t timestamp_ms = 0) {
         if (!valid_ || last <= prior) return;
         const bool bridge = first_delta_ && first > 0 && first <= prior + 1 && last >= prior;
-        if (prior == 0 || (previous != prior && !bridge)) valid_ = false;
+        if (prior == 0 || (previous != prior && !bridge)) {
+            interrupt("Depth sequence gap", timestamp_ms);
+            failure_.prior = prior; failure_.first = first;
+            failure_.last = last; failure_.previous = previous;
+        }
         first_delta_ = false;
     }
     void observe(const Terminal::Orderbook& book, int64_t timestamp_ms) {
         if (!valid_ || timestamp_ms <= 0 || !book.is_synchronized()) return;
         const double bid = book.bids.begin()->first, ask = book.asks.begin()->first;
-        if (!(bid > 0 && ask > bid) || !std::isfinite(bid) || !std::isfinite(ask)) { valid_ = false; return; }
+        if (!(bid > 0 && ask > bid) || !std::isfinite(bid) || !std::isfinite(ask)) {
+            interrupt("Invalid or crossed depth", timestamp_ms);
+            failure_.bid = bid; failure_.ask = ask;
+            return;
+        }
         if (!samples_.empty() && timestamp_ms / interval_ms <=
             samples_.back()->timestamp_ms / interval_ms) return;
         auto sample = std::make_shared<Sample>();
@@ -85,6 +111,7 @@ public:
 private:
     bool valid_ = false, first_delta_ = false, segment_start_ = true;
     uint64_t serial_ = 0;
+    SyncFailure failure_;
     std::deque<SamplePtr> samples_;
 };
 
@@ -107,8 +134,11 @@ inline void append_realtime_depth_tail(
     std::deque<RealtimeDepthHistory::SamplePtr>& displayed,
     const std::deque<RealtimeDepthHistory::SamplePtr>& recent,
     int64_t cutoff, int64_t clock, int64_t step) {
-    int64_t through = displayed.empty() ? cutoff : std::max(cutoff, displayed.back()->timestamp_ms);
-    bool missing = !recent.empty() && recent.front()->timestamp_ms > through &&
+    // The query cutoff is a wall clock, not a depth receipt watermark. Depth
+    // arriving while the query runs can be older than that clock and still be
+    // newer than its snapshot. Join at the last returned observation instead.
+    const int64_t through = displayed.empty() ? 0 : displayed.back()->timestamp_ms;
+    bool missing = !recent.empty() && recent.front()->timestamp_ms > std::max(cutoff, through) &&
         recent.front()->serial > 1;
     for (const auto& sample : recent) {
         if (sample->timestamp_ms <= through) continue;

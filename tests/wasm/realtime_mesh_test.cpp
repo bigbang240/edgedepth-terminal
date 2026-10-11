@@ -80,7 +80,7 @@ int main() {
     assert(draw.VtxBuffer[25].col == IM_COL32(255,0,0,255));   // ring start: major side
     assert(draw.VtxBuffer[73].col == IM_COL32(0,0,0,255));     // separator edge
     // Inner area is the minor share of the fill disc: r_in = r_fill * sqrt(0.25).
-    const float r_fill = 12 - 0.75f, r_in = r_fill * 0.5f;
+    const float r_fill = 12 - 0.6f, r_in = r_fill * 0.5f;
     assert(std::abs(draw.VtxBuffer[1].pos.x - (50 + r_in - 0.5f)) < 0.01f);
     assert(std::abs(draw.VtxBuffer[25].pos.x - (50 + r_in + 0.5f)) < 0.01f);
     // A minor share too small for a pixel keeps the plain mesh.

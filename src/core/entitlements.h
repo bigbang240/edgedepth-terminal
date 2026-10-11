@@ -41,21 +41,13 @@ namespace Entitlements {
 enum class Tier : uint8_t { Free, Trader, Pro, Research, Admin };
 
 // ── Free-tier replay limits (tunable in ONE place - MIRROR the backend's
-//    replay-session TierConfigs["free"]) ───────────────────────────────────
-// D6 (amended 2026-07-11): the free replay window is the most recent fully-
-// archived UTC CALENDAR DAY (e.g. [9 Jul 00:00, 10 Jul 00:00) UTC), which only
-// advances when a new day's parquet archive lands on the box. The backend is the
-// single source of truth: /replay/availability injects the exact bounds via
-// window.__EDGEDEPTH_FREE_WINDOW__ (read in detect()), and free_window_range()
-// prefers them. When the fetch fails, the client computes the SAME day itself
-// (today-2, mirroring freeFloorDays/coldFloorDays) - see free_window_range.
-//
-// This REPLACES the older rolling [72h,48h]-ago band. The AGE constants below are
-// retained only as documentation of that band + the 2-day-back intuition; they
-// are NO LONGER the enforced window (a fixed offset can't equal a calendar day).
-inline constexpr int64_t FREE_WINDOW_START_AGE_MS = 72LL * 3600LL * 1000LL;         // legacy band: earliest start
-inline constexpr int64_t FREE_WINDOW_END_AGE_MS   = 48LL * 3600LL * 1000LL;         // legacy band: latest end
-inline constexpr int64_t FREE_WINDOW_MAX_SPAN_MS  = 24LL * 3600LL * 1000LL;         // one day
+//    replay_session free_window.go + TierConfigs["free"]) ─────────────────────
+// Since 2026-10-04 free replay is one market: Binance Futures BTCUSDT over the
+// last 72 hours, ending at the live edge. The archived UTC day on six majors it
+// replaced is retired. The window rolls with the wall clock, so it is computed
+// here (free_window_range) rather than read from the host.
+inline constexpr int64_t FREE_WINDOW_MS       = 72LL * 3600LL * 1000LL;  // mirror FreeReplayWindow
+inline constexpr int64_t FREE_WINDOW_INSET_MS = 60LL * 1000LL;           // clock-drift margin at the start
 inline constexpr int64_t PRO_REPLAY_LOOKBACK_MS   = 90LL * 24LL * 3600LL * 1000LL;  // 90d (DEFAULT, not a ceiling)
 
 // Pro lookback is a DEFAULT the backend can raise. Accounts whose replay token
@@ -66,26 +58,25 @@ inline constexpr int64_t PRO_REPLAY_LOOKBACK_MS   = 90LL * 24LL * 3600LL * 1000L
 //
 // The host injects window.__EDGEDEPTH_REPLAY_LOOKBACK_DAYS__ from the SAME number
 // it mints into the token, so the client affordance and server enforcement cannot
-// disagree - exactly how the free window is already resolved. Absent or invalid
+// disagree, the same way the order-book floor is injected. Absent or invalid
 // leaves 90d, so an ordinary Pro user sees their real reach and never fires a
 // doomed POST.
 inline int64_t& pro_lookback_ms()   { static int64_t v = PRO_REPLAY_LOOKBACK_MS; return v; }
 inline int      pro_lookback_days() { return static_cast<int>(pro_lookback_ms() / (24LL * 3600LL * 1000LL)); }
 
 // Free replay speed cap. The server CLAMPS silently to this (never errors, D7); the
-// client locks the >2× buttons and funnels a tap into the upsell modal.
-inline constexpr double  FREE_MAX_SPEED = 2.0;
+// client locks the >1× buttons and funnels a tap into the upsell modal.
+inline constexpr double  FREE_MAX_SPEED = 1.0;
 
 // Free replay sessions per UTC day (server enforces via TIER_DAILY → 429; the client
 // mirrors it as a "N of 6 today" chip). Design P2.
 inline constexpr int     FREE_MAX_SESSIONS_PER_DAY = 6;
 
-// Symbols a non-Pro user may REPLAY (live data stays all-symbols for everyone).
-// The 6 most liquid majors - MIRROR handler.go FreeReplaySymbols (design P1: +DOGE,
-// whose constant liquidation action makes the free Liq Field demo dramatic).
-inline constexpr std::array<const char*, 6> FREE_REPLAY_SYMBOLS = {
-    "btcusdt", "ethusdt", "solusdt", "xrpusdt", "bnbusdt", "dogeusdt"
-};
+// The one market a non-Pro user may REPLAY (live data stays all-symbols for
+// everyone): Binance Futures BTCUSDT. MIRROR handler.go FreeReplaySymbols and
+// free_window.go FreeReplayExchange.
+inline constexpr const char* FREE_REPLAY_EXCHANGE = "binancef";
+inline constexpr std::array<const char*, 1> FREE_REPLAY_SYMBOLS = { "btcusdt" };
 
 // Sanity bound on the host-supplied replay reach. MIRRORS the backend SAFETY
 // ceiling (handler.go defaultMaxReplayLookbackDays, env REPLAY_MAX_LOOKBACK_DAYS),
@@ -158,22 +149,9 @@ inline std::string& user_email() { static std::string e; return e; }
 // in standalone/dev (the menu then just shows "Active", no date). Display-only.
 inline std::string& renews_label() { static std::string s; return s; }
 
-// ── Dynamic free-replay window (backend-authoritative) ───────────────────────
-// The host injects window.__EDGEDEPTH_FREE_WINDOW__ (from GET /replay/availability,
-// which the Go backend also ENFORCES) BEFORE the glue loads. When present it is the
-// most recent fully-archived UTC calendar day as absolute epoch-ms bounds - the REAL
-// replayable day, not the client's static [72h,48h] guess. detect() caches it here;
-// the window helpers below PREFER these values and fall back to the static band when
-// the fetch failed (or for Pro). free_window_dynamic() gates the override.
-inline bool&        free_window_dynamic()  { static bool b = false;    return b; }
-inline int64_t&     free_window_start_ms() { static int64_t v = 0;     return v; }
-inline int64_t&     free_window_end_ms()   { static int64_t v = 0;     return v; }
-inline std::string& free_window_day_utc()  { static std::string s;     return s; }
-
-// Forward decl: the window helpers below (replay_start_floor_ms, range_replayable)
+// Forward decl: the window helpers below (replay_start_floor_ms, replay_end_ceil_ms)
 // resolve the free window through this single function. Defined lower, once the
-// constants are in scope. Keeping ONE resolver means client display and backend
-// enforcement can't disagree about the day.
+// constants are in scope.
 inline void free_window_range(int64_t now_ms, int64_t& start_ms, int64_t& end_ms);
 
 inline const char* tier_label() {
@@ -259,40 +237,9 @@ inline void detect() {
         }
     }
 
-    // Dynamic free-replay window (window.__EDGEDEPTH_FREE_WINDOW__). Absolute
-    // epoch-ms bounds cross as doubles via HEAPF64 (exact for ms timestamps up to
-    // 2^53) to dodge the fragile i64 EM_ASM marshal; the day string comes back in
-    // dbuf. ok=1 only when the global is present AND start<end.
-    {
-        double sd = 0.0, ed = 0.0;
-        char dbuf[24] = {0};
-        const int ok = EM_ASM_INT({
-            try {
-                var w = window.__EDGEDEPTH_FREE_WINDOW__;
-                if (!w) return 0;
-                var s = Number(w.startMs);
-                var e = Number(w.endMs);
-                if (!(s < e)) return 0;
-                HEAPF64[$0 >> 3] = s;
-                HEAPF64[$1 >> 3] = e;
-                var d = (w.dayUtc || "").toString();
-                stringToUTF8(d.slice(0, 20), $2, 24);
-                return 1;
-            } catch (err) { return 0; }
-        }, &sd, &ed, dbuf);
-        if (ok) {
-            free_window_dynamic()  = true;
-            free_window_start_ms() = static_cast<int64_t>(sd);
-            free_window_end_ms()   = static_cast<int64_t>(ed);
-            free_window_day_utc()  = dbuf;
-        } else {
-            free_window_dynamic() = false;
-        }
-    }
-
     // Order-book replay floor (window.__EDGEDEPTH_BOOK_REPLAY_FROM_MS__): the
     // backend's measured first book day, injected by the host for every tier.
-    // Same HEAPF64 marshal as the free window. Absent or absurd leaves the
+    // Doubles cross via HEAPF64 (exact for ms timestamps). Absent or absurd leaves the
     // compiled fallback (BOOK_REPLAY_FROM_MS) rather than dropping the floor,
     // because a missing floor means a replay that hangs, not a wider offer.
     {
@@ -323,8 +270,7 @@ inline bool is_authenticated() { return is_pro() || !user_email().empty(); }
 // ── Replay window for the current tier ───────────────────────────────────────
 // Earliest replayable START: the LATER of the tier floor and the order-book
 // floor. Tier floor: Pro = now−90d by default (deeper on a signed claim); Free =
-// the resolved free-window start (backend archived-day when known, else the
-// client's own today-2 calendar day). Book floor: book_replay_from_ms(), the
+// the start of the 72h BTCUSDT window. Book floor: book_replay_from_ms(), the
 // first day the archive has a book - a Research claim reaches the whole record,
 // but the record has no depth before it and replay cannot open without one.
 inline int64_t replay_start_floor_ms(int64_t now_ms) {
@@ -355,7 +301,7 @@ inline std::string book_replay_from_label() {
     snprintf(buf, sizeof(buf), "%d %s %d", tmv.tm_mday, MON[tmv.tm_mon], tmv.tm_year + 1900);
     return std::string(buf);
 }
-// Latest replayable END. Pro = the live edge. Free = the resolved free-window end.
+// Latest replayable END. Both tiers end at the live edge.
 inline int64_t replay_end_ceil_ms(int64_t now_ms) {
     if (is_pro()) return now_ms;
     int64_t s, e; free_window_range(now_ms, s, e); return e;
@@ -365,19 +311,26 @@ inline int64_t replay_floor_ms(int64_t now_ms) { return replay_start_floor_ms(no
 
 // Is a single timestamp replayable for the current tier? (used by the chart
 // right-click "Replay from here" gate - a point must sit inside the window).
-inline bool time_replayable(int64_t ts_ms, int64_t now_ms) {
-    return ts_ms >= replay_start_floor_ms(now_ms) && ts_ms <= replay_end_ceil_ms(now_ms);
+inline bool btc_preview_market(const std::string& exchange, const std::string& symbol) {
+    return exchange == "binancef" && symbol == "btcusdt";
 }
-// Is a whole [start,end] range replayable for the current tier? (mirrors the
-// backend validateNATSRequest window check so the client never fires a doomed POST).
+// The free replay market's window: BTCUSDT on Binance Futures, starting inside
+// the last 72h and ending by now (mirrors the backend's free-tier check).
+inline bool btc_preview_range(const std::string& exchange, const std::string& symbol,
+                              int64_t start_ms, int64_t end_ms, int64_t now_ms) {
+    return btc_preview_market(exchange, symbol) && start_ms >= now_ms - FREE_WINDOW_MS &&
+           start_ms >= book_replay_from_ms() && start_ms < end_ms && end_ms <= now_ms;
+}
+inline bool time_replayable(int64_t ts_ms, int64_t now_ms,
+                            const std::string& exchange = "", const std::string& symbol = "") {
+    if (is_pro()) return ts_ms >= replay_start_floor_ms(now_ms) && ts_ms <= now_ms;
+    return btc_preview_range(exchange, symbol, ts_ms, ts_ms + 1, now_ms);
+}
+// Is a whole [start,end] range replayable for the current tier, without naming
+// the market? Pro only: a free range is replayable only on the free market,
+// which callers check with btc_preview_range (it needs exchange and symbol).
 inline bool range_replayable(int64_t start_ms, int64_t end_ms, int64_t now_ms) {
-    if (is_pro()) return start_ms >= replay_start_floor_ms(now_ms) && end_ms <= now_ms;
-    // Free: the whole [start,end] must sit inside the resolved free window (the
-    // backend's archived day when known, else the client's today-2 calendar day).
-    // Mirrors the backend's [dayStart,dayEnd] ±tol check on the exact bounds the
-    // modal requests, so no separate client-clock span check is needed.
-    int64_t s, e; free_window_range(now_ms, s, e);
-    return start_ms >= s && end_ms <= e;
+    return is_pro() && start_ms >= replay_start_floor_ms(now_ms) && end_ms <= now_ms;
 }
 
 // ── Speed ────────────────────────────────────────────────────────────────────
@@ -386,28 +339,10 @@ inline double clamp_speed_for_tier(double s)  { return is_pro() ? s : (s > FREE_
 
 // Short human label for the advertised archive depth (scrubber caption).
 inline const char* archive_label() {
-    if (!is_pro()) return "free window";
+    if (!is_pro()) return "free replay";
     static char buf[24];
     snprintf(buf, sizeof(buf), "%dd archive", pro_lookback_days());
     return buf;
-}
-
-// Free replay symbols, uppercased + de-suffixed + space-joined for the picker
-// header ("BTC ETH SOL XRP BNB DOGE"). Cached on first use.
-inline const char* free_symbols_label() {
-    static std::string s;
-    if (s.empty()) {
-        for (const char* a : FREE_REPLAY_SYMBOLS) {
-            std::string base(a);
-            if (base.size() > 4 && base.compare(base.size() - 4, 4, "usdt") == 0)
-                base.resize(base.size() - 4);
-            std::transform(base.begin(), base.end(), base.begin(),
-                           [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
-            if (!s.empty()) s += " ";
-            s += base;
-        }
-    }
-    return s.c_str();
 }
 
 // Wall-clock now (ms).
@@ -416,95 +351,16 @@ inline int64_t wall_now_ms() {
         std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
-// The exact [start,end] the free-window replay requests. Dynamic: the backend's
-// absolute archived-day bounds (server-authoritative, no client-clock inset needed
-// - the backend enforces the same day ±5min). Static fallback: inset a few minutes
-// inside the [72h,48h] band so a boundary request survives client/server clock drift.
+// The free replay window at now_ms: the last 72h, its start inset a minute so
+// a boundary request survives client/server clock drift, ending at the live edge.
 inline void free_window_range(int64_t now_ms, int64_t& start_ms, int64_t& end_ms) {
-    if (free_window_dynamic()) {
-        start_ms = free_window_start_ms();
-        end_ms   = free_window_end_ms();
-        return;
-    }
-    // Static fallback (availability fetch failed): compute the SAME UTC calendar
-    // day the backend defaults to - today-2 (mirrors freeFloorDays/coldFloorDays).
-    // Epoch ms is UTC, so flooring to the day needs no tz math. This keeps the
-    // fallback request inside the backend's enforced calendar-day window; the OLD
-    // rolling [72h,48h] band did NOT (its start reached ~a day before the archived
-    // day, so the new calendar-day enforcement would 4xx it).
-    const int64_t DAY = 86400000LL;
-    const int64_t day_floor = (now_ms / DAY) * DAY;   // 00:00 UTC today
-    start_ms = day_floor - 2 * DAY;                   // 00:00 UTC, two days ago
-    end_ms   = start_ms + DAY;                         // +24h → 00:00 UTC, one day ago
+    start_ms = now_ms - FREE_WINDOW_MS + FREE_WINDOW_INSET_MS;
+    end_ms   = now_ms;
 }
 
-// Compact UTC day label for the account menu's "Replay window" row, from the
-// dynamic window (e.g. "9 JUL \xC2\xB7 24H"). Falls back to a static hint when the
-// backend window is unavailable. ASCII + the middot byte only (no atlas glyphs).
-inline const char* free_window_day_label() {
-    static std::string s;
-    static const char* MON_UC[] = {"JAN","FEB","MAR","APR","MAY","JUN",
-                                    "JUL","AUG","SEP","OCT","NOV","DEC"};
-    if (free_window_dynamic()) {
-        time_t t = static_cast<time_t>(free_window_start_ms() / 1000);
-        struct tm tmv;
-#ifdef _WIN32
-        gmtime_s(&tmv, &t);
-#else
-        gmtime_r(&t, &tmv);
-#endif
-        char buf[32];
-        snprintf(buf, sizeof(buf), "%d %s \xC2\xB7 24H", tmv.tm_mday, MON_UC[tmv.tm_mon]);
-        s = buf;
-        return s.c_str();
-    }
-    return "2 DAYS AGO \xC2\xB7 24H";
-}
-
-// Human copy of the free window in UTC, rounded to the hour, e.g.
-// "2 Jul 11:00 → 3 Jul 11:00 UTC". Concrete "from … up until …" for the picker +
-// upsell copy (§8.2). Reads cleanest once the window anchors to a calendar day.
+// Human copy of the free replay offer for the account menu and upsell modal.
 inline std::string free_window_label() {
-    int64_t s, e;
-    free_window_range(wall_now_ms(), s, e);
-    static const char* MON[] = {"Jan","Feb","Mar","Apr","May","Jun",
-                                "Jul","Aug","Sep","Oct","Nov","Dec"};
-    auto fmt = [&](int64_t ms, char* buf, size_t n) {
-        time_t t = static_cast<time_t>((ms + 1800000LL) / 3600000LL * 3600LL);  // round → hour
-        struct tm tmv;
-#ifdef _WIN32
-        gmtime_s(&tmv, &t);
-#else
-        gmtime_r(&t, &tmv);
-#endif
-        snprintf(buf, n, "%d %s %02d:00", tmv.tm_mday, MON[tmv.tm_mon], tmv.tm_hour);
-    };
-    char sb[24], eb[24];
-    fmt(s, sb, sizeof(sb));
-    fmt(e, eb, sizeof(eb));
-    // ASCII "to" (not a → glyph - the mono atlas has no U+2192, it renders as "?").
-    return std::string(sb) + " to " + eb + " UTC";
-}
-
-// Short UTC day label for the resolved free window ("9 Jul") for the chart
-// right-click "Replay <day> instead" rescue offer. Reflects the backend archived
-// day when known (window.__EDGEDEPTH_FREE_WINDOW__), else the static fallback day.
-// Rebuilt each call (cheap; only hit while the locked context menu is open).
-inline std::string free_window_short_label() {
-    int64_t s = 0, e = 0;
-    free_window_range(wall_now_ms(), s, e);
-    static const char* MON[] = {"Jan","Feb","Mar","Apr","May","Jun",
-                                "Jul","Aug","Sep","Oct","Nov","Dec"};
-    time_t t = static_cast<time_t>(s / 1000);
-    struct tm tmv;
-#ifdef _WIN32
-    gmtime_s(&tmv, &t);
-#else
-    gmtime_r(&t, &tmv);
-#endif
-    char buf[16];
-    snprintf(buf, sizeof(buf), "%d %s", tmv.tm_mday, MON[tmv.tm_mon]);
-    return std::string(buf);
+    return "BTCUSDT on Binance Futures, the past 3 days";
 }
 
 // May the current tier replay this symbol? (case-insensitive)
@@ -515,6 +371,12 @@ inline bool symbol_replay_allowed(const std::string& symbol) {
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     for (const char* a : FREE_REPLAY_SYMBOLS) if (s == a) return true;
     return false;
+}
+
+// May the current tier replay this market? Free: only FREE_REPLAY_EXCHANGE's
+// BTCUSDT (Bybit or Hyperliquid BTC is not the free market).
+inline bool market_replay_allowed(const std::string& exchange, const std::string& symbol) {
+    return is_pro() || (exchange == FREE_REPLAY_EXCHANGE && symbol_replay_allowed(symbol));
 }
 
 // Send the user to the upgrade page (web host). No-op off-Emscripten.
@@ -532,14 +394,36 @@ inline std::string pricing_href(const char* period) {
     return "https://edgedepth.com/pricing?billing=" + safe_period;
 }
 
-// Review Free, Pro and Research before the user chooses a payment rail. The
-// selected interval arrives preselected, so the extra page adds context, not
-// repeated work. Pricing opens in a NEW tab so the terminal (live socket,
-// replay session, layout) is still there afterwards; a blocked popup falls
-// back to navigating this tab. The opener is cut after opening rather than
-// with 'noopener', which makes window.open return null and hides a block.
-inline void open_pricing(const char* period = "yearly") {
-    const std::string href = pricing_href(period);
+// Straight to card checkout for the interval the upsell shows. The app's
+// /pricing gateway resolves the founder plan for that interval and opens
+// Stripe (it offers Bitcoin itself when card checkout is off), so the buyer
+// skips re-choosing on the plan page. Pure, so the native suite pins it.
+inline std::string checkout_href(const char* period) {
+    const std::string safe_period =
+        period && std::string(period) == "monthly" ? "monthly" : "yearly";
+    return "/pricing?plan=" + safe_period + "&rail=card&source=terminal-upsell";
+}
+
+// A market's coin for prose and buttons: "ognusdt" -> "OGN", "1000pepeusdt"
+// -> "1000PEPE"; a Hyperliquid "BTC" is already a coin. Pure (native-tested).
+inline std::string coin_label(const std::string& symbol) {
+    std::string s = symbol;
+    for (auto& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    for (const char* quote : {"USDT", "USDC", "BUSD", "USD"}) {
+        const std::string q(quote);
+        if (s.size() > q.size() && s.compare(s.size() - q.size(), q.size(), q) == 0) {
+            s.resize(s.size() - q.size());
+            break;
+        }
+    }
+    return s;
+}
+
+// Opens in a NEW tab so the terminal (live socket, replay session, layout) is
+// still there afterwards; a blocked popup falls back to navigating this tab.
+// The opener is cut after opening rather than with 'noopener', which makes
+// window.open return null and hides a block.
+inline void open_in_new_tab(const std::string& href) {
 #ifdef __EMSCRIPTEN__
     EM_ASM({
         var url = UTF8ToString($0);
@@ -551,6 +435,18 @@ inline void open_pricing(const char* period = "yearly") {
 #else
     (void)href;
 #endif
+}
+
+// Review Free, Pro and Research before the user chooses a payment rail. The
+// selected interval arrives preselected, so the extra page adds context, not
+// repeated work.
+inline void open_pricing(const char* period = "yearly") {
+    open_in_new_tab(pricing_href(period));
+}
+
+// The upsell's main action: card checkout for the shown interval.
+inline void open_checkout(const char* period = "yearly") {
+    open_in_new_tab(checkout_href(period));
 }
 
 // Send the user to the login page (web host), preserving where they were so the

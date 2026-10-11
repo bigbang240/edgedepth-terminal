@@ -27,8 +27,14 @@ struct RealtimeDOMFrame {
         return (double(index) + 0.5) * bucket_size();
     }
     bool synchronized = false, paused = false, replay = false;
+    bool recovery_enabled = true;
+    // Display only. This book must never be appended to recorded observations.
+    bool recovery_visible() const {
+        return recovery_enabled && !fresh() && !replay && book && book->timestamp_ms > 0 &&
+            book->timestamp_ms <= clock_ms;
+    }
 
-    bool native_quote() const { return quote.timestamp_ms > 0; }
+    bool native_quote() const { return !recovery_visible() && quote.timestamp_ms > 0; }
     double bid() const { return native_quote() ? quote.best_bid : book->bid; }
     double ask() const { return native_quote() ? quote.best_ask : book->ask; }
 

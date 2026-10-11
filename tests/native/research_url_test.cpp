@@ -97,6 +97,9 @@ int main() {
               "&entry=terminal&moment=blessusdt,2026-08-01T13:57:00Z"
               "&mfields=feature.vpin,feature.taker_buy_ratio_15m",
               "moment url with mfields");
+    expect_eq(leadup_url("AIA/USDT", t_mid_minute, "feature.taker_buy_ratio_15m"),
+              "https://edgedepth.com/research/symbols/aiausdt?at=2026-08-01T13:57:00Z&leadup=30&entry=terminal&mfields=feature.taker_buy_ratio_15m#lead-up",
+              "lead-up preserves selected minute and reading without a run");
     expect_eq(moment_live_url("ETH/USDT"),
               "https://edgedepth.com/research/workbench?source=record&study=investigate"
               "&entry=terminal&moment=ethusdt,now",

@@ -6,7 +6,15 @@ int main() {
     using namespace liq_field;
     check(max_leverage("binancef", "koruusdt") == 25);
     check(max_leverage("binancef", "synusdt") == 10);
-    check(max_leverage("hl", "btcusdt") == 0);
+    check(max_leverage("hl", "btcusdt") == 0);   // HL coins are bare, case-kept names
+    check(max_leverage("hl", "BTC") == 40);
+    check(max_leverage("hl", "kPEPE") == 10);
+    check(max_leverage("hl", "KPEPE") == 0);
+    check(max_leverage("bybit", "btcusdt") == 150);
+    check(max_leverage("bybit", "BTCUSDT") == 0);  // the app lowercases Bybit symbols
+    check(max_leverage("okx", "btcusdt") == 0);
+    check(display_tiers(0x3f, max_leverage("hl", "0G")).enabled == 0);  // 3x: no modelled tier fits
+    check(display_tiers(0x3f, max_leverage("hl", "BTC")).enabled == 0x07);
     check(max_leverage("binancef", "unknownusdt") == 0);
     auto t = select_tiers(0x3f, 25); check(t.enabled == 0x07 && t.floor == 0x07);
     t = select_tiers(0x3f, 100); check(t.enabled == 0x3f && t.floor == 0x38);
@@ -18,6 +26,8 @@ int main() {
     t = display_tiers(0, 20); check(t.enabled == 0);
     t = display_tiers(0x3c, 3); check(t.enabled == 0);
     t = display_tiers(0x3c, 0); check(t.enabled == 0x3c);
+    for (const auto& cap : kHlLeverageCaps) check(cap.leverage > 0 && max_leverage("hl", cap.symbol) == cap.leverage);
+    for (const auto& cap : kBybitLeverageCaps) check(cap.leverage > 0 && max_leverage("bybit", cap.symbol) == cap.leverage);
     for (const auto& cap : kLeverageCaps) {
         check(max_leverage("binancef", cap.symbol) == cap.leverage);
         for (uint8_t mask = 0; mask < 64; ++mask) {

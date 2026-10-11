@@ -57,6 +57,16 @@ std::shared_ptr<RealtimeArchive> RealtimeArchive::acquire(CandleManager& candles
     });
     return current;
 }
+void RealtimeArchive::update_live(OrderbookManager& books, StreamManager& stream, int64_t clock) {
+    // Main-thread capture is independent of chart visibility and GPU frames.
+    // Match the live owner so replay sessions never receive the wall clock.
+    for (auto& [candles, weak] : sessions) {
+        if (auto archive = weak.lock(); archive && &archive->books_ == &books) {
+            archive->update(clock);
+            archive->request_startup(stream);
+        }
+    }
+}
 bool RealtimeArchive::prepare_replay(CandleManager* candles, int64_t clock) {
     const auto it=sessions.find(candles);
     if(it==sessions.end())return true;
@@ -149,11 +159,11 @@ void RealtimeArchive::update(int64_t clock) {
     }
     if(!seed_.empty() && make_room(131072) &&
         archive_prepend(id_.c_str(),seed_.data(),int(seed_.size()),double(clock))==1) {
-        seed_.clear();cancel_view();++generation;
+        seed_.clear();cancel_view();++view_revision;
     }
     if(!recovered_.empty() && make_room(131072) &&
        archive_recover(id_.c_str(),recovered_.data(),int(recovered_.size()),double(clock))==1) {
-        recovered_.clear();cancel_view();++generation;
+        recovered_.clear();cancel_view();++view_revision;
     }
     const bool valid=books_.copy_realtime_since(pair_,serial_,pending_);
     for(const auto& sample:pending_) {

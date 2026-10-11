@@ -6,6 +6,8 @@
 using namespace liquidity_response;
 Json reply(const Json& q){return {{"request_id",q["data"]["request_id"]},{"exchange","binancef"},{"symbol","btcusdt"},{"mode","replay"},{"result",{{"version","liquidity_response.v1"},{"from_ms",100000},{"to_ms",110000},{"through_ms",109000},{"status","observed"},{"config",{{"tick_size",.1}}},{"episodes",Json::array({{{"id","a"},{"resting_side","bid"},{"status","observed"},{"started_ms",100100},{"known_ms",104000},{"updated_ms",109000},{"price_low",100},{"price_high",101},{"executed_usd",20000},{"added_base",100},{"removed_base",100},{"refill_cycles",4},{"detection_cycles",3},{"detection_executed_usd",15000}}})}}}};}
 int main(){
+ assert(supported("binancef","btcusdt")&&supported("binancef","solusdt"));
+ assert(!supported("binancef","rlcusdt")&&!supported("bybit","btcusdt"));
  History h;auto q=h.poll("binancef","btcusdt",.1,100000,110000,true,0);auto good=reply(q);History::receive(good);assert(h.ready&&h.episodes.size()==1);assert(!visible(h.episodes[0],105000));assert(visible(h.episodes[0],109000));
  q=h.poll("binancef","btcusdt",.1,100000,110000,true,6000);auto old=reply(q);h.reset();History::receive(old);assert(!h.ready);
  for(int which=0;which<5;which++){q=h.poll("binancef","btcusdt",.1,100000,110000,true,12000+which*6000);auto bad=reply(q);if(which==0)bad["symbol"]="solusdt";if(which==1)bad["mode"]="live";if(which==2)bad["result"]["episodes"][0]["updated_ms"]=120000;if(which==3)bad["result"]["episodes"][0]["executed_usd"]="bad";if(which==4)bad["result"]["config"]["tick_size"]=1;History::receive(bad);assert(!h.ready);h.reset();}

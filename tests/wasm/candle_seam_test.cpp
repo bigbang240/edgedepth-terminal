@@ -103,6 +103,45 @@ int main() {
     check(kept, "a server candle with fewer trades never replaces ours");
     check(cm.building_candle().timestamp_ms == s + 25000, "the building period stays live");
 
+    // Replay seek: no next-minute tick can establish a future building bar
+    // before trades arrive. Exercise two subscribers as in a floating chart.
+    const Terminal::Pair replay_pair{"binancef", "metusdt"};
+    CandleManager primary(replay_pair, 60, sm), secondary(replay_pair, 60, sm);
+    for (auto* replay : {&primary, &secondary}) {
+        replay->subscribe();
+        replay->mark_ready_for_replay();
+        replay->reset_for_seek(180000);
+    }
+    const StreamKey replay_candles{replay_pair, Terminal::Stream::Candles, 60};
+    const StreamKey replay_trades{replay_pair, Terminal::Stream::Trades, 0};
+    std::vector<Terminal::Candle> history{candle(60000, 10, 3), candle(120000, 11, 5)};
+    sm.dispatch_candles_impl(replay_candles, history);
+    sm.dispatch_candle_impl(replay_candles, candle(240000, 99, 100));
+    for (auto* replay : {&primary, &secondary})
+        check(!replay->has_building_candle(), "ahead tick cannot create a future bar after seek");
+    sm.dispatch_trade_impl(replay_trades, {12, 1, 181000, true});
+    for (auto* replay : {&primary, &secondary}) {
+        check(replay->building_candle().timestamp_ms == 180000, "trade owns the active replay minute");
+        replay->reset_for_seek(150000);
+    }
+    // Late response to the previous position includes the now-future 180/240 bars.
+    history.push_back(candle(180000, 98, 100));
+    history.push_back(candle(240000, 99, 100));
+    sm.dispatch_candles_impl(replay_candles, history);
+    for (auto* replay : {&primary, &secondary}) {
+        check(replay->count() == 1 && replay->candles().back().timestamp_ms == 60000,
+              "late batch cannot restore future finalized candles");
+        check(replay->building_candle().timestamp_ms == 120000 && replay->building_candle().volume == 0,
+              "late batch adopts and truncates only the playhead period");
+        replay->handle_trade({12, 1, 151000, true});
+        replay->handle_trade({13, 1, 241000, true});
+        replay->trim_candles_after(180000);
+        check(!replay->has_building_candle(), "rewind into gap keeps the preceding closed bar finalized");
+        check(replay->candles().back().timestamp_ms == 120000 && replay->candles().back().close == 12,
+              "rewind preserves fully observed closed OHLC");
+        check(replay->tick_times().empty(), "rewind drops future line points");
+    }
+
     std::puts("candle seam passed");
     return 0;
 }

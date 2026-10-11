@@ -1,5 +1,8 @@
 #pragma once
+#include "rendering/observed_liquidations.h"
 #include "core/liquidity_response.h"
+#include "core/liq_rails.h"
+#include "core/liqmap2_release.h"
 #ifdef EDGEDEPTH_EXPOSURE_V2_DEV
 #include "core/exposure_history.h"
 #include "core/exposure_summary_history.h"
@@ -8,6 +11,7 @@
 #endif
 #include "core/candle_bubble_history.h"
 #include "core/flow_positioning.h"
+#include "core/activity_strip.h"
 #include "core/reference_context.h"
 #include "ui/realtime_dom_frame.h"
 #include "ui/realtime_dom_ladder.h"
@@ -176,18 +180,26 @@ public:
     // trade view (render_realtime). Toggled from the Real-time pill beside the
     // timeframe bar (see app_shell render_tf_control).
     bool rt_mode() const { return rt_mode_; }
+    bool show_standalone_panels() const { return rt_show_standalone_; }
     // Views with no indicator subplots. Real-time draws observed depth on a
     // two-minute axis where timeframe series have nothing to say; Renko uses
     // a brick-index axis the time-aligned pane cannot follow. The pane's
     // indicators are kept, so returning to candles restores them.
     bool subplots_suppressed() const { return rt_mode_ || chart_type_ == ChartType::Renko; }
     void set_rt_mode(bool v);
-    void toggle_rt_mode() { set_rt_mode(!rt_mode_); }
+    // The viewer's own toggle (the toolbar pill). Every other set_rt_mode(true)
+    // is automatic, and the upsell records which one opened it.
+    void toggle_rt_mode();
     // True when turning real-time on would open the upsell instead: a Free
-    // viewer on the hosted LIVE feed. Replay sessions and local packs are open
+    // viewer on the hosted LIVE feed of a Pro market with today's free preview
+    // spent (core/realtime_preview.h). Replay sessions and local packs are open
     // to everyone. The toolbar pill reads this to draw its padlock; set_rt_mode
     // is still the one place that enforces it.
     bool rt_mode_locked() const;
+    // This market needs Pro for real-time (whatever the preview has left), so
+    // real-time here runs on the free daily preview.
+    bool rt_mode_gated() const;
+    int64_t rt_preview_remaining_ms() const;
     void render_realtime_settings();
     void on_rewind(int64_t cutoff_ms) override;
 
@@ -307,6 +319,7 @@ private:
     int64_t reference_tf_ = 0;
     double reference_update_time_ = -1;
     int64_t reference_asof_ = 0;
+    int64_t reference_autoload_from_ = 0;   // the period start an automatic history read was last made for
     void update_reference_context();
     void render_reference_context();
     // ─── External Dependencies (not owned) ───────────────────────────────
@@ -409,6 +422,7 @@ private:
     bool rt_candles_ = false, rt_bubbles_ = true, rt_book_valid_ = false;
     bool rt_paused_ = false, rt_trade_line_ = false;
     bool rt_extend_depth_ = true;
+    bool rt_bridge_gaps_ = true;
     // Real-time depth cells. Separate from heatmap_enabled_ (the candle-chart
     // depth heatmap) so entering/leaving real-time mode keeps each view's choice.
     bool rt_depth_enabled_ = true;
@@ -420,6 +434,7 @@ private:
     bool rt_dom_linked_ = false;
     RealtimeDomLadder rt_dom_ladder_;
     RealtimePriceWindow rt_price_window_;
+    bool rt_show_standalone_ = false;
     bool rt_auto_fit_history_ = true;
     RealtimeAutoFit rt_auto_fit_;
     int rt_effective_multiplier_ = 5;
@@ -437,7 +452,7 @@ private:
     MixedBubbles::View candle_bubble_view_;  // per-bar mixed markers on candle charts
     bool realtime_live_edge() const;
     bool rt_history_view_ = false;
-    uint64_t rt_archive_generation_ = 0;
+    uint64_t rt_archive_generation_ = 0, rt_archive_view_revision_ = 0;
     int64_t rt_query_from_ = 0, rt_query_to_ = 0, rt_query_step_ = 0;
     int64_t rt_loaded_to_ = 0, rt_loaded_step_ = 100;
     bool rt_trade_tail_waiting_ = false;
@@ -456,13 +471,19 @@ private:
     RealtimeBubbleScale rt_bubble_scale_;
     float rt_min_notional_ = 10000.0f;
     double rt_span_ms_ = realtime_default_span_ms;
+    double rt_usage_emit_s_ = -1;
     int64_t rt_clock_ms_ = 0;
     uint64_t rt_serial_ = 0, rt_generation_ = 0;
     std::unique_ptr<ShaderHeatmapRenderer> rt_renderer_;
     std::vector<RealtimeDepthHistory::SamplePtr> rt_pending_;
-    RealtimeDepthHistory::SamplePtr rt_latest_;
+    RealtimeDepthHistory::SamplePtr rt_latest_, rt_last_good_;
+    uint64_t rt_reported_failure_ = 0;
+    bool rt_was_healthy_ = false;
     std::unordered_map<double, float> rt_prices_;
     void update_realtime();
+    // Bills this frame to the free preview while real-time runs on a Pro market;
+    // true when the budget just ran out and real-time was switched off.
+    bool tick_rt_preview();
     void render_realtime();
     void configure_depth_fidelity(ShaderHeatmapRenderer& renderer);
     // Deferred popup opens (set inside Indicators popup, opened next frame)
@@ -549,11 +570,12 @@ private:
     // single $305k position at +81% set an $18k floor. See render_liquidation_census().
     float   liq_census_rel_window_ = 0.30f;     // +/- fraction of mark that defines "near price" for the floor
 
-    // liq_dense_field_ toggles the dense projection Field ("Liq Heatmap" pill). §12 cleanup
+    // liq_dense_field_ is the one "Liquidation map" switch (workspace key "liq_dense_field", so a saved V1
+    // "on" reads as map on): on live charts it shows V2's milestone rails where the viewer has V2; in replay,
+    // packs and lessons (no V2 frames there) the dense projection Field, the scenario map. §12 cleanup
     // 2026-07-03: the old kLiqDense* constants (pre-Field "dense mode" that flipped the SHELF
     // floor/contrast) are deleted - the Field toggle no longer re-tunes the Levels shelf.
-    // Default ON: the dense projection Field ("Liq Heatmap" pill) is a headline layer, so the
-    // bare terminal boots with it active alongside Levels + Profile.
+    // Default ON: the liquidation map is a headline layer, so the bare terminal boots with it active.
     bool liq_dense_field_ = true;
 
     // ── Liq Heatmap projection Field ──────────────────────────────────────
@@ -605,11 +627,37 @@ private:
     // Discrete dots at (time, price), area ∝ USD, side-tinted (forced BUY = short liquidated
     // → Tokens::UP; forced SELL = long liquidated → Tokens::DOWN). The fact layer next to
     // the estimated Field - deliberately a different visual grammar (glyphs, not bands).
-    bool  liq_observed_enabled_ = false;
+    bool  liq_observed_enabled_ = true;
+    bool  rt_liq_observed_enabled_ = false;
+    bool& reported_liquidations_enabled() {
+        return rt_mode_ ? rt_liq_observed_enabled_ : liq_observed_enabled_;
+    }
+    bool reported_liquidations_enabled() const {
+        return rt_mode_ ? rt_liq_observed_enabled_ : liq_observed_enabled_;
+    }
     bool rt_liq_strip_ = false;
+    bool candle_liq_strip_ = true;
+    // Candle callouts and real-time diamonds switch separately (they were one flag, which Bybit's default turned off
+    // in real-time with no control left to turn it back on). Diamonds sit on the tape (tape_price) where a venue
+    // reports bankruptcy prices, so no venue starts with them off.
+    bool liq_markers_ = true;
+    bool rt_liq_markers_ = true;
+    bool liq_report_profile_ = false;
+    float rt_liq_height_ = 100.0f, candle_liq_height_ = 100.0f;
+    bool rt_liq_collapsed_ = false, candle_liq_collapsed_ = false;
+    int64_t liq_view_from_ = 0, liq_view_to_ = 0, liq_cutoff_ = 0;
+    char liq_status_[160] = {};
+    bool liq_status_attention_ = false;
+    void render_chart_empty(const char* title, const char* detail, bool busy);  // loading, interrupted or failed: worth a word on the chart
+    bool liquidation_activity_visible() const;
+    void render_liquidation_settings();
+    void prepare_liquidations();
+    void render_liquidation_profile();
     std::vector<Terminal::Liquidation> rt_paused_liquidations_;
     float liq_obs_min_usd_ = 0.0f;       // dust filter (USD); 0 = show all
-    float liq_obs_ref_usd_ = 25000.0f;   // USD at which a marker reads clearly (~2.5px radius)
+    bool liq_obs_auto_size_ = true;
+    observed_liquidations::MarketSizeReference liq_obs_size_reference_;
+    float liq_obs_ref_usd_ = 25000.0f;   // Saved logarithmic size reference; independent of viewport
     static constexpr int kLiqObsMaxDraw = 4000;  // per-frame draw cap → nth_element USD cutoff
 
     // ─── Trade bubbles on candles (free) ─────────────────────────────────
@@ -620,7 +668,7 @@ private:
     // "Large" = quote value >= kCandleBubbleMult x the same 60s 75th-percentile
     // market scale RT uses. Hold the reference until explicit recalibration
     // so panning recorded history cannot change the size of an existing print.
-    bool    candle_bubbles_ = true;
+    bool    candle_bubbles_ = false;
     bool    candle_bubble_history_enabled_ = true;
     CandleBubbleHistory candle_bubble_history_;
     float   candle_bubble_min_ = 0.0f;           // manual quote-value floor; 0 = auto
@@ -650,6 +698,30 @@ private:
     // leveraged tail, ~1-10% of OI notional) and must never read as a complete liq map.
     // The LIQ LEV chips filter this layer by REAL leverage tier (est_Nx = actual
     // position leverage) - same control as the modelled layer, venue-aware meaning.
+    // ─── V2 liquidation map (hub task liq-map-v2) ─────────────────────────────────────────
+    // What every viewer with V2 sees is the rails (stream 40, history 41; core/liqmap2_rails.h). The publisher's
+    // frames (stream 38, history 39) are still subscribed for admins only: the touch-odds rails' modelled fuel
+    // reads them. Both live in the managed direct-subscription registry so reconnects and replay transitions
+    // restore them.
+    int liqmap2_history_requested_ = 0;   // 0 not yet sent on this manager, 1 sent
+    int64_t liqmap2_scorecard_ms_ = 0;    // when this chart last asked for its scorecard (wall clock)
+    StreamManager* liqmap2_stream_mgr_ = nullptr;
+    // V2 rails (public since 2026-10-11, free on BTC, Pro elsewhere; admins as before): their own direct
+    // subscription and the history requests (a day at a time, see update_liqmap2).
+    int liqmap2_rails_colour_ = 1;  // rails colour: expected in 1 h, 4 h (admin default), 24 h, or $ if reached
+    // The colour drawn: customers get 24 h or dollars only (1 h / 4 h unvalidated until their forward look; a saved 1 h
+    // or 4 h choice reads as 24 h for them), admins any of the four.
+    int rails_colour() const {
+        const int c = std::clamp(liqmap2_rails_colour_, 0, 3);
+        return liqmap2_access() == liqmap2::Access::preview || c >= 2 ? c : 2;
+    }
+    bool liqmap2_rails_profile_ = true;  // rails: the live rails' profile at the right edge (ref-6)
+    Terminal::Pair liqmap2_rails_sibling() const;  // the coin on the other rails venue (Bybit, Binance)
+    int liqmap2_rails_history_requested_ = 0;   // days of rails history asked for (each request one day)
+    int64_t liqmap2_rails_view_lo_ = 0;
+    int64_t liqmap2_rails_window_ = 0;   // the replay window start the history counter belongs to (0: live)         // the plot's left edge in real time, last frame (0 before one)
+    StreamManager* liqmap2_rails_mgr_ = nullptr;
+
     bool liq_census_show_history_ = false;
     float liq_census_min_usd_ = 1000.0f;
     int liq_history_requested_ = 0;
@@ -714,11 +786,33 @@ private:
     uint64_t liquidity_response_marker_revision_=~uint64_t(0);
     int64_t liquidity_response_marker_tf_=0;
     void update_liquidity_response();
+    // V2 liquidation map: the rails for every viewer with V2, the frames for admins' touch-odds fuel.
+    void update_liqmap2();
     void render_liquidity_response();
     void render_liquidity_response_settings();
     void update_flow_positioning();
     void render_flow_positioning();
     flow_positioning::History flow_history_;
+    void update_activity();
+    void render_activity_settings();
+    void render_bookmark_action();
+    void render_activity_strip();
+    void render_activity_alerts();
+    void render_activity_bookmark();
+    bool activity_visible() const;
+    float activity_height() const;
+    bool activity_enabled_=true, activity_collapsed_=true;
+    bool activity_trades_=true,activity_volume_=true,activity_oi_=true,activity_buy_=true,activity_shading_=true,activity_book_enabled_=false;
+    bool alert_lines_=false,alert_markers_=false,activity_replay_=false,activity_pending_=false;
+    int activity_request_id_=0;
+    int64_t activity_clock_=0,activity_from_=0,activity_to_=0,activity_requested_clock_=0,bookmark_time_=0,activity_rewind_cutoff_=0;
+    uint64_t activity_book_generation_=0;
+    double activity_next_read_=0,activity_request_sent_=0;
+    float activity_header_height_=28.f;
+    std::string activity_request_key_,activity_market_;
+    activity_strip::Data activity_data_;
+    activity_strip::Book activity_book_;
+    char bookmark_note_[1024]={};
     int64_t flow_from_ = 0, flow_to_ = 0;
     bool flow_export_failed_ = false;
     void render_crosshair(const ImPlotPoint& mouse_pos) const;
@@ -809,8 +903,40 @@ private:
     const std::vector<Terminal::Liquidation>& realtime_liquidations() const;
     void render_realtime_liquidation_strip();
     void render_liq_observed();  // WS4 Observed markers - real @forceOrder dots (drawn over candles)
+    // Candle charts: callouts on the candles with unusual liquidations (observed_liquidations::callouts).
+    void render_liq_callouts();
+    struct LiqTypical { const void* data = nullptr; size_t n = 0; int64_t tf = 0, cutoff_bucket = 0; float min_usd = 0; double usd = 0; };
+    LiqTypical liq_typical_;  // the typical candle, recomputed when reports, timeframe, clock candle or filter change
+    float liq_callout_x_ = static_cast<float>(observed_liquidations::kCalloutDefault);  // callout at this x typical
     void toggle_liq_census();    // "Liq Levels HL" - subscribe/unsubscribe stream 34 (census)
     void render_liq_census();    // HL census shelves (REAL liq levels) + coverage badge
+    // Liquidation rails fuel from observed HL positions (admin choice on HL charts, census subscribed).
+    bool observed_rails_allowed() const;
+    liq_rails::FuelSource observed_rails_fuel(int64_t clock) const;
+    // V2 modelled map: who sees it (core/liqmap2_release.h, the web's release list); its rails fuel stays an
+    // admin choice and needs the layer on.
+    liqmap2::Access liqmap2_access() const;
+    bool liqmap2_allowed() const;
+    // Live data on this chart: not a replay context (research replay, archive, event, pack) and not an
+    // embedded lesson, event or pack before its replay starts.
+    bool live_chart() const;
+    // One liquidation map (Layers > Liquidation map, liq_dense_field_). Live: V2's milestone rails while this
+    // viewer has V2 here, else nothing (a locked PRO row); the scenario map (V1) never draws live. Replay,
+    // packs and lessons: the scenario map, since V2 has no frames there.
+    bool liqmap2_shown() const { return liq_dense_field_ && (live_chart() || rails_replay()) && liqmap2_allowed(); }
+    // A box replay (research and studio replays, archive events, the terminal's own replays) shows the rails as
+    // they were published at the time: the stored rails history is read for the replay window and drawn at the
+    // replay clock (James 2026-10-11). Packs and lessons have no backend or predate the record, and keep the
+    // scenario map.
+    bool rails_replay() const;
+    // The V2 rails draw on this chart: then they are the chart's one liquidation picture and the touch-odds rails'
+    // forward columns step aside (the touch readout at the cursor stays).
+    bool liqmap2_rails_drawn() const {
+        return liqmap2_shown() && !rt_mode_ && ct_allows_time_overlays(chart_type_);
+    }
+    bool scenario_map_shown() const { return liq_dense_field_ && !live_chart() && !(rails_replay() && liqmap2_allowed()); }
+    void render_liqmap2();
+    liq_rails::FuelSource modelled_rails_fuel(int64_t clock) const;
 
     // VPVR overlay
     void render_vpvr_profile();

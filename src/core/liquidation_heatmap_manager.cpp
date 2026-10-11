@@ -227,6 +227,8 @@ void LiquidationHeatmapManager::clear(const Terminal::Pair& pair) {
     snapshots_.erase(key);
     census_snapshots_.erase(key);
     census_history_.erase(key);
+    liqmap2_history_.erase(key);
+    liqmap2_rails_.erase(key);
     obs_peaks_.erase(key);
     raw_timeline_protos_.erase(key);
     last_reach_mark_.erase(key);
@@ -240,6 +242,8 @@ void LiquidationHeatmapManager::clear_all() {
     snapshots_.clear();
     census_snapshots_.clear();
     census_history_.clear();
+    liqmap2_history_.clear();
+    liqmap2_rails_.clear();
     obs_peaks_.clear();
     raw_timeline_protos_.clear();
     timeline_heatmaps_.clear();
@@ -253,55 +257,18 @@ void LiquidationHeatmapManager::clear_all() {
 
 void LiquidationHeatmapManager::add_observed_event(const Terminal::Pair& pair,
                                                    const Terminal::Liquidation& liq) {
-    if (liq.timestamp_ms <= 0) return;
-    auto& evs = observed_events_[LiqHeatmapKey{pair.exchange, pair.symbol}];
-    // Near-monotonic input: append, or short back-scan insert to keep sorted
-    // (out-of-order arrivals are rare and shallow - reconnect races, replay
-    // buffer boundaries). Renderer binary-searches on timestamp_ms.
-    // Exact-duplicate skip makes replay rewind re-delivery idempotent (the
-    // history buffer / backend may re-stream the trimmed window).
-    auto is_dup_around = [&](std::vector<Terminal::Liquidation>::iterator pos) {
-        for (auto it = pos; it != evs.begin();) {
-            --it;
-            if (it->timestamp_ms != liq.timestamp_ms) break;
-            if (it->price == liq.price && it->qty == liq.qty && it->is_buy == liq.is_buy)
-                return true;
-        }
-        for (auto it = pos; it != evs.end() && it->timestamp_ms == liq.timestamp_ms; ++it) {
-            if (it->price == liq.price && it->qty == liq.qty && it->is_buy == liq.is_buy)
-                return true;
-        }
-        return false;
-    };
-    if (evs.empty() || liq.timestamp_ms > evs.back().timestamp_ms) {
-        evs.push_back(liq);
-    } else {
-        auto it = std::upper_bound(
-            evs.begin(), evs.end(), liq.timestamp_ms,
-            [](int64_t ts, const Terminal::Liquidation& e) { return ts < e.timestamp_ms; });
-        if (is_dup_around(it)) return;
-        evs.insert(it, liq);
-    }
-    if (evs.size() > kMaxObservedEvents) {
-        // Amortized: shed the oldest 10% in one erase instead of one-per-insert.
-        evs.erase(evs.begin(), evs.begin() + static_cast<long>(kMaxObservedEvents / 10));
-    }
+    reported_history(pair).add(liq);
 }
 
 const std::vector<Terminal::Liquidation>&
 LiquidationHeatmapManager::observed_events(const Terminal::Pair& pair) const {
     static const std::vector<Terminal::Liquidation> kEmpty;
     const auto it = observed_events_.find(LiqHeatmapKey{pair.exchange, pair.symbol});
-    return it != observed_events_.end() ? it->second : kEmpty;
+    return it != observed_events_.end() ? it->second.events : kEmpty;
 }
 
 void LiquidationHeatmapManager::trim_observed_after(int64_t cutoff_ms) {
-    for (auto& [key, evs] : observed_events_) {
-        auto it = std::upper_bound(
-            evs.begin(), evs.end(), cutoff_ms,
-            [](int64_t ts, const Terminal::Liquidation& e) { return ts < e.timestamp_ms; });
-        evs.erase(it, evs.end());
-    }
+    for (auto& [key, history] : observed_events_) history.trim_after(cutoff_ms);
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -665,4 +632,113 @@ const LiquidationHeatmapManager::CensusHistory*
 LiquidationHeatmapManager::get_census_history(const Terminal::Pair& pair) const {
     const auto it = census_history_.find({pair.exchange, pair.symbol});
     return it == census_history_.end() ? nullptr : &it->second;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// V2 modelled map (stream 38 live, stream 39 history)
+// ═══════════════════════════════════════════════════════════════════
+
+bool LiquidationHeatmapManager::apply_liqmap2_frame(const Terminal::Pair& pair, const pb::LiqMapV2Frame& p) {
+    const int n = p.price_mid_size();
+    if (n > static_cast<int>(liqmap2::kMaxLevels) || p.long_usd_size() != n || p.short_usd_size() != n) return false;
+    liqmap2::Frame f;
+    f.timestamp_ms = p.timestamp_ms();
+    f.warm_since_ms = p.warm_since_ms();
+    f.last_bar_ms = p.last_bar_ms();
+    f.mark_price = p.mark_price();
+    f.band_width_pct = p.band_width_pct();
+    f.total_long_usd = p.total_long_usd();
+    f.total_short_usd = p.total_short_usd();
+    f.usd_scale = p.usd_scale();
+    f.status = p.status();
+    f.model_class = p.model_class();
+    f.config_id = p.config_id();
+    f.provisional = p.provisional();
+    f.dropped_levels = p.dropped_levels();
+    f.levels.resize(n);
+    for (int i = 0; i < n; ++i) f.levels[i] = {p.price_mid(i), p.long_usd(i), p.short_usd(i)};
+    f.expected_long.assign(p.expected_long_usd().begin(), p.expected_long_usd().end());
+    f.expected_short.assign(p.expected_short_usd().begin(), p.expected_short_usd().end());
+    f.regime = p.regime();
+    f.hot = p.hot();
+    f.day_move = p.day_move();
+    f.v22_config_id = p.v22_config_id();
+    const LiqHeatmapKey key{pair.exchange, pair.symbol};
+    if (!liqmap2_history_.contains(key) && liqmap2_history_.size() >= liqmap2::kMaxMarkets)
+        liqmap2_history_.erase(liqmap2_history_.begin());
+    return liqmap2_history_[key].insert(std::move(f));
+}
+
+const liqmap2::History* LiquidationHeatmapManager::get_liqmap2_history(const Terminal::Pair& pair) const {
+    const auto it = liqmap2_history_.find({pair.exchange, pair.symbol});
+    return it == liqmap2_history_.end() ? nullptr : &it->second;
+}
+
+namespace {
+// One step of a rail's numbers. A publisher older than the 1 h and 4 h fields sends neither (zero on the wire); a
+// zero chance and zero expected together are read as unknown, never as a known zero.
+liqmap2_rails::Step step_of(const pb::LiqMapV2Rail& r) {
+    liqmap2_rails::Step s{r.step_ms(), r.usd(), r.chance(), r.expected_usd(), r.zone_lo(), r.zone_hi()};
+    const auto known = [](double c, double e) { return !(c == 0 && e == 0); };
+    if (known(r.chance_1h(), r.expected_usd_1h())) { s.chance_1h = r.chance_1h(); s.expected_1h = r.expected_usd_1h(); }
+    if (known(r.chance_4h(), r.expected_usd_4h())) { s.chance_4h = r.chance_4h(); s.expected_4h = r.expected_usd_4h(); }
+    return s;
+}
+
+liqmap2_rails::Rail rail_of(const pb::LiqMapV2Rail& r) {
+    liqmap2_rails::Rail x;
+    x.id = r.id();
+    x.is_long = r.is_long();
+    x.price = r.price();
+    x.born_ms = r.born_ms();
+    x.steps.push_back(step_of(r));
+    return x;
+}
+}  // namespace
+
+liqmap2_rails::Store& LiquidationHeatmapManager::rails_store(const Terminal::Pair& pair) {
+    const LiqHeatmapKey key{pair.exchange, pair.symbol};
+    if (!liqmap2_rails_.contains(key) && liqmap2_rails_.size() >= liqmap2_rails::kMaxMarkets)
+        liqmap2_rails_.erase(liqmap2_rails_.begin());
+    return liqmap2_rails_[key];
+}
+
+void LiquidationHeatmapManager::apply_liqmap2_rails(const Terminal::Pair& pair, const pb::LiqMapV2Rails& m) {
+    liqmap2_rails::Latest latest;
+    latest.timestamp_ms = m.timestamp_ms();
+    latest.mark = m.mark_price();
+    latest.status = m.status();
+    latest.config_id = m.config_id();
+    latest.chance_ready = m.chance_ready();
+    latest.provisional = m.provisional();
+    std::vector<liqmap2_rails::Rail> rails, ended;
+    rails.reserve(m.rails_size());
+    for (const auto& r : m.rails()) rails.push_back(rail_of(r));
+    for (const auto& e : m.ended()) {
+        liqmap2_rails::Rail x;
+        x.id = e.id();
+        x.end_ms = e.end_ms();
+        x.end = e.end();
+        ended.push_back(std::move(x));
+    }
+    rails_store(pair).apply_live(latest, m.config_id(), rails, ended);
+}
+
+// A history record keeps every stored step; its config id keys it with the live messages of the same bundle.
+void LiquidationHeatmapManager::apply_liqmap2_rails_history(const Terminal::Pair& pair, const pb::LiqMapV2RailsHistory& h) {
+    auto& store = rails_store(pair);
+    for (const auto& rec : h.rails()) {
+        if (!rec.has_rail()) continue;
+        liqmap2_rails::Rail x = rail_of(rec.rail());
+        x.steps.clear();
+        for (const auto& s : rec.steps()) x.steps.push_back(step_of(s));
+        x.end_ms = rec.end_ms();
+        x.end = rec.end();
+        store.apply_record(rec.config_id(), x);
+    }
+}
+
+const liqmap2_rails::Store* LiquidationHeatmapManager::get_liqmap2_rails(const Terminal::Pair& pair) const {
+    const auto it = liqmap2_rails_.find({pair.exchange, pair.symbol});
+    return it == liqmap2_rails_.end() ? nullptr : &it->second;
 }

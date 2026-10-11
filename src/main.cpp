@@ -1,3 +1,4 @@
+#include "core/liqmap2_scorecard.h"
 #include "core/realtime_archive.h"
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_opengl.h>
@@ -9,6 +10,7 @@
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "ui/stats_widget.h"
+#include "ui/data_widget.h"
 #include "implot.h"
 #include "implot_internal.h"
 
@@ -60,6 +62,7 @@
 #include "ui/drawing/drawing_style_editor.h"
 #include "rendering/layout.h"
 #include "rendering/theme.h"
+#include "core/ui_test_marks.h"
 #include "rendering/menu.h"
 #include "rendering/app_shell.h"
 #include "rendering/performance_diagnostics.h"
@@ -84,6 +87,7 @@ using json = nlohmann::json;
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 #include <emscripten/html5.h>
+#include <emscripten/eventloop.h>
 #endif
 
 struct Timeframe {
@@ -247,6 +251,15 @@ static void on_ws_message(const uint8_t* data, size_t len, WsLane lane) {
                 if ((lane == WsLane::Replay && replay && g_app.replay_mgr->active_socket() == g_app.replay_ws_client.get()) ||
                     (lane == WsLane::Live && (!replay || g_app.replay_mgr->active_socket() == g_app.ws_client.get())))
                     flow_positioning::History::receive(parsed);
+                return;
+            }
+            if (type == "reported_liquidations") {
+                if (lane == WsLane::Live && !(g_app.replay_mgr && g_app.replay_mgr->is_active()))
+                    LiquidationHeatmapManager::ReportHistory::receive(parsed);
+                return;
+            }
+            if (type == "liqmap2_scorecard") {
+                if (lane == WsLane::Live) liqmap2::Scorecards::receive(parsed);
                 return;
             }
             if (type == "candle_bubble_history") {
@@ -493,6 +506,14 @@ static void on_ws_status(const std::string& status) {
 //   2. window.__EDGEDEPTH_WS_URL__  (host page, set before the glue loads)
 //   3. wss://api.edgedepth.com/ws   (production default)
 // Only ws:// and wss:// schemes are accepted; anything else falls through.
+//
+// Origin guard: when the PAGE is served from edgedepth.com, an override is
+// honoured only if it points at an *.edgedepth.com host. This is where a real
+// signed-in user's entitlement tokens exist, and both resolvers send the Bearer
+// token to whatever host they return, so a crafted ?ws= link must not be able
+// to redirect those tokens to an attacker's server. Off edgedepth.com (local
+// dev, a self-hoster's own domain) the override is unrestricted exactly as
+// before, so the open-source self-host build is unaffected.
 static std::string resolve_ws_url() {
     static const char* kDefaultWsUrl = "wss://api.edgedepth.com/ws";
 #ifdef __EMSCRIPTEN__
@@ -502,6 +523,11 @@ static std::string resolve_ws_url() {
                       window.__EDGEDEPTH_WS_URL__ || "";
             url = String(url);
             if (url.indexOf('ws://') !== 0 && url.indexOf('wss://') !== 0) return 0;
+            var page = String(window.location.hostname || "");
+            if (page === "edgedepth.com" || page.endsWith(".edgedepth.com")) {
+                var h = new URL(url).hostname;
+                if (h !== "edgedepth.com" && !h.endsWith(".edgedepth.com")) return 0;
+            }
             var len = lengthBytesUTF8(url);
             var buf = _malloc(len + 1);
             stringToUTF8(url, buf, len + 1);
@@ -554,6 +580,13 @@ static std::string resolve_replay_ws_url() {
                       window.__EDGEDEPTH_REPLAY_WS_URL__ || "";
             url = String(url);
             if (url.indexOf('ws://') !== 0 && url.indexOf('wss://') !== 0) return 0;
+            // Same origin guard as resolve_ws_url: on edgedepth.com, only an
+            // *.edgedepth.com target may receive the entitlement token.
+            var page = String(window.location.hostname || "");
+            if (page === "edgedepth.com" || page.endsWith(".edgedepth.com")) {
+                var h = new URL(url).hostname;
+                if (h !== "edgedepth.com" && !h.endsWith(".edgedepth.com")) return 0;
+            }
             var len = lengthBytesUTF8(url);
             var buf = _malloc(len + 1);
             stringToUTF8(url, buf, len + 1);
@@ -730,6 +763,13 @@ void check_initialization() {
         auto initial_chart = std::make_unique<ChartWidget>(pair, g_app.app_ctx, tick_size);
         if (EducationBoot::instance().is_pack() && EducationBoot::instance().pack_realtime())
             initial_chart->set_rt_mode(true);
+#ifdef __EMSCRIPTEN__
+        // Recent-BTC links continue the welcome demo's recorded depth view.
+        // This only sets the first chart's view; replay admission stays unchanged.
+        if (EducationBoot::instance().is_research_replay() &&
+            EM_ASM_INT({ return new URLSearchParams(location.search).get('realtime') === '1'; }))
+            initial_chart->set_rt_mode(true);
+#endif
         g_app.widgets.push_back(std::move(initial_chart));
         // The native shell (topbar + stats strip) is suppressed in embedded
         // lesson mode (React owns it), so skip its init too - it subscribes the
@@ -776,6 +816,11 @@ void check_initialization() {
                     pair, g_app.app_ctx
                 ));
             }
+            for (auto& w : g_app.widgets)
+                if (w->type() == WidgetType::DOM || w->type() == WidgetType::Trades) {
+                    w->mode_companion = true;
+                    w->follows_route = true;
+                }
             widgets_created = true;
             initialization_complete = true;
             g_init_complete = true;
@@ -802,22 +847,11 @@ void resolve_instrument_metadata_rebind() {
     }
 }
 
-// ─── Live order-flow widgets torn down by a replay ───────────────────────────
-// Entering a replay DESTROYS the live DOM and tape. They are not hidden: the
-// swap sets is_open = false and update_and_render_widgets ends every frame with
-// erase_if(!is_open), so the object is gone. The exit side used to "restore"
-// them by setting is_open = true on widgets that no longer existed, which is
-// why leaving a replay left the chart and watchlist sitting over empty space.
-//
-// Rebuilding is the only thing that can work, and it cannot happen inside the
-// context-swap callback: constructing a widget subscribes through a stream
-// manager and pushes into g_app.widgets, and stop() is reachable from ImGui
-// item handlers. It is drained at the same safe point as the +widget queue.
+// A replay of another market replaces the primary chart. Rebuild it only at
+// the safe widget-add point, once the replay-owned identity has been retired.
 namespace {
 struct LiveFlowRebuild {
     bool armed = false;
-    bool want_dom = false;
-    bool want_trades = false;
     bool want_chart = false;   // set when a replay of another symbol replaced it
     Terminal::Pair pair{};
 };
@@ -840,7 +874,6 @@ void resolve_live_flow_widget_rebuild() {
     if (pair.symbol.empty()) return;
 
     const double dom_tick = SymbolRegistry::instance().tick_or_zero(pair.exchange, pair.symbol);
-    auto fmt = SymbolRegistry::instance().get_formatter(pair.exchange, pair.symbol);
 
     // A replay of a different symbol replaced the chart, so the dock tree in
     // place is keyed on the REPLAY pair's titles. Re-key it for the live pair
@@ -853,20 +886,6 @@ void resolve_live_flow_widget_rebuild() {
             std::make_unique<ChartWidget>(pair, g_app.app_ctx, dom_tick));
         g_live_flow_rebuild.want_chart = false;
     }
-
-    // Same order and constructor arguments as the boot layout, so the rebuilt
-    // pair inherits the dock nodes the originals held (ImGui keys them by the
-    // window title, which is derived from the pair).
-    if (g_live_flow_rebuild.want_dom) {
-        g_app.widgets.push_back(
-            std::make_unique<DOMWidget>(pair, g_app.app_ctx, dom_tick, 20));
-    }
-    if (g_live_flow_rebuild.want_trades) {
-        g_app.widgets.push_back(
-            std::make_unique<TradesWidget>(pair, g_app.app_ctx, fmt));
-    }
-    g_live_flow_rebuild.want_dom = false;
-    g_live_flow_rebuild.want_trades = false;
 }
 
 // Embedded lesson mode: start the replay for the lesson's window exactly once,
@@ -1118,27 +1137,16 @@ void render_lesson_loading_overlay() {
     const ImVec2 c = ImVec2(vp->Pos.x + vp->Size.x * 0.5f,
                             vp->Pos.y + vp->Size.y * 0.5f);
 
-    // Full-viewport scrim so the half-built chart doesn't flash through.
+    // Full-viewport scrim so the half-built chart doesn't flash through. The one spinner while it is up: the
+    // real-time chart skips its own in embedded mounts (chart_widget_realtime.cpp).
     fg->AddRectFilled(vp->Pos,
                       ImVec2(vp->Pos.x + vp->Size.x, vp->Pos.y + vp->Size.y),
-                      IM_COL32(10, 14, 18, 235));
-
-    // Spinning arc.
-    const float t = static_cast<float>(ImGui::GetTime());
+                      Theme::u32(Theme::Tokens::BASE, 0.96f));
     const float r = 22.0f;
-    const float a0 = t * 3.2f;
-    const float a1 = a0 + 4.2f;  // ~240° sweep
-    const ImU32 col = IM_COL32(77, 219, 172, 255);  // brand mint (Tokens::LOGO)
-    fg->PathClear();
-    fg->PathArcTo(c, r, a0, a1, 48);
-    fg->PathStroke(col, 0, 3.0f);
-    // Faint full ring behind it.
-    fg->AddCircle(c, r, IM_COL32(77, 219, 172, 40), 48, 3.0f);
-
-    const char* msg = "Loading replay. Priming order book and candles...";
+    Theme::spinner(fg, c, r, 3.0f);
+    const char* msg = "Loading replay";
     const ImVec2 ts = ImGui::CalcTextSize(msg);
-    fg->AddText(ImVec2(c.x - ts.x * 0.5f, c.y + r + 16.0f),
-                IM_COL32(180, 195, 210, 255), msg);
+    fg->AddText(ImVec2(std::round(c.x - ts.x * 0.5f), c.y + r + 16.0f), Theme::u32(Theme::Tokens::TX2), msg);
 }
 
 // Historical event and lesson pages never fall back to live data. This modal
@@ -1183,19 +1191,20 @@ void render_historical_replay_error_overlay() {
     ImGui::PopStyleColor();
 }
 
-void update_and_render_widgets() {
+void drain_data_dispatches(double budget_ms, bool profile) {
     // Drain queued dispatches from data thread → fire widget callbacks on main
     // thread. TIME-BUDGETED: ingest storms (replay catch-up, reconnect bursts)
     // used to execute unbounded in one frame - the classic 90-FPS dip. The
     // remainder stays queued in order and resumes next frame.
-    static constexpr double DISPATCH_BUDGET_MS = 3.0;
     if (g_app.data_thread && g_app.data_thread->is_running()) {
-        g_profiler.begin("Dispatch");
+        if (profile) g_profiler.begin("Dispatch");
         const size_t n = g_app.data_thread->drain_dispatches(*g_app.stream_mgr,
-                                                             DISPATCH_BUDGET_MS);
-        g_profiler.end("Dispatch");
-        g_profiler.add_count("Dispatch", static_cast<long>(n));
-        if (const size_t backlog = g_app.data_thread->carry_backlog(); backlog > 0) {
+                                                             budget_ms);
+        if (profile) {
+            g_profiler.end("Dispatch");
+            g_profiler.add_count("Dispatch", static_cast<long>(n));
+        }
+        if (const size_t backlog = g_app.data_thread->carry_backlog(); profile && backlog > 0) {
             g_profiler.add_count("DispBacklog", static_cast<long>(backlog));
         }
         // The queue is bounded (DispatchQueue::kMaxPending): a window hidden
@@ -1212,7 +1221,7 @@ void update_and_render_widgets() {
             exposure::History::invalidate_all("V2 dispatch gap; reload required");
             exposure::SummaryHistory::invalidate_all("V2 dispatch gap; reload required");
 #endif
-            g_profiler.add_count("DispDropped", static_cast<long>(dropped));
+            if (profile) g_profiler.add_count("DispDropped", static_cast<long>(dropped));
             const double span_ms = std::max(0.0, DispatchQueue::steady_ms() - gap_start_ms);
             g_refetch_outage_ms = std::max(g_refetch_outage_ms, span_ms);
             const double now = emscripten_get_now();
@@ -1220,6 +1229,44 @@ void update_and_render_widgets() {
             if (g_refetch_at_ms[1] == 0) g_refetch_at_ms[1] = now + 30000;
         }
     }
+}
+
+#ifdef __EMSCRIPTEN__
+extern "C" EMSCRIPTEN_KEEPALIVE void capture_background_live() {
+    if (g_app.done || !EM_ASM_INT({ return document.hidden; }) ||
+        !g_app.replay_mgr || g_app.replay_mgr->is_active()) return;
+    // Browsers throttle timers, but even a minute cadence is inside the depth
+    // owner's five-minute ring. A frozen/discarded page still leaves real gaps.
+    drain_data_dispatches(12.0, false);
+    const int64_t clock = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    RealtimeArchive::update_live(*g_app.ob_mgr, *g_app.stream_mgr, clock);
+}
+#endif
+
+void resolve_mode_companions() {
+    for (auto& w : g_app.widgets) {
+        w->hidden_by_chart = false;
+        if (!w->is_open || !w->mode_companion || w->suspended_for_replay) continue;
+        const Terminal::Pair* pair = nullptr;
+        if (w->type() == WidgetType::DOM) pair = &static_cast<DOMWidget*>(w.get())->pair();
+        if (w->type() == WidgetType::Trades) pair = &static_cast<TradesWidget*>(w.get())->pair();
+        if (!pair) continue;
+        bool owner_rt = false, needed = false;
+        for (const auto& candidate : g_app.widgets) {
+            if (!candidate->is_open || candidate->type() != WidgetType::Chart || candidate->suspended_for_replay) continue;
+            const auto& chart = *static_cast<const ChartWidget*>(candidate.get());
+            if (chart.pair().exchange != pair->exchange || chart.pair().symbol != pair->symbol) continue;
+            if (chart.chart_instance() == 1) owner_rt = chart.rt_mode();
+            needed |= !chart.rt_mode() || chart.show_standalone_panels();
+        }
+        w->hidden_by_chart = owner_rt && !needed;
+    }
+}
+
+void update_and_render_widgets() {
+    resolve_mode_companions();
+    drain_data_dispatches(3.0, true);
     // Swap the ACTIVE orderbook manager's buffers (write→read).
     // During replay, app_ctx.orderbooks points to the replay OB manager.
     // During live, it points to the live OB manager. Either way, this
@@ -1231,7 +1278,8 @@ void update_and_render_widgets() {
     }
     g_profiler.begin("WidgetsUpd");
     for (const auto& widget: g_app.widgets) {
-        widget->update();
+        if (widget->is_open && !widget->suspended_for_replay && !widget->hidden_by_chart)
+            widget->update();
     }
     g_profiler.end("WidgetsUpd");
     // REC focus layout: don't SUBMIT the watchlist while a focused clip records -
@@ -1241,6 +1289,7 @@ void update_and_render_widgets() {
     const bool rec_focus_widgets = ClipRecorder::focus_active() ||
                                    edu::RecorderRuntime::instance().active();
     for (const auto& widget: g_app.widgets) {
+        if (!widget->is_open || widget->hidden_by_chart || widget->suspended_for_replay) continue;
         if (rec_focus_widgets && widget->type() == WidgetType::Watchlist) continue;
         // Per-widget render timing - labels by widget type so the once/sec
         // console profile shows exactly where frame time goes.
@@ -1251,14 +1300,42 @@ void update_and_render_widgets() {
             case WidgetType::Orderbook:    sec = "Orderbook"; break;
             case WidgetType::Trades:       sec = "Trades";    break;
             case WidgetType::Watchlist:    sec = "Watchlist"; break;
+            case WidgetType::Data:         sec = "Data";      break;
             case WidgetType::Stats:        sec = "Stats";     break;
             case WidgetType::PaperTrading: sec = "Paper";     break;
             case WidgetType::ReplayLibrary: sec = "ReplayLib"; break;
             default: break;
         }
+        // An undocked panel is floating chrome: rounded like the menus and cards, with their shadow (drawn below);
+        // docked panels stay square. Decided from the window's state last frame, so a new window is square for one.
+        char wname[512];
+        std::snprintf(wname, sizeof(wname), "%s%s", widget->title(), widget->title_suffix().c_str());
+        const ImGuiWindow* last = ImGui::FindWindowByName(wname);
+        const bool floating = last && !last->DockIsActive && last->WasActive;
+        if (floating) ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, Theme::Radius::R3);
         g_profiler.begin(sec);
         widget->render();
         g_profiler.end(sec);
+        if (floating) ImGui::PopStyleVar();
+    }
+    // Floating panels: the menus' shadow outside the frame, and the accent line on the focused one's title bar,
+    // as on the focused panel's tab.
+    {
+        const ImGuiWindow* nav = GImGui->NavWindow ? GImGui->NavWindow->RootWindow : nullptr;
+        for (const auto& widget : g_app.widgets) {
+            char wname[512];
+            std::snprintf(wname, sizeof(wname), "%s%s", widget->title(), widget->title_suffix().c_str());
+            ImGuiWindow* w = ImGui::FindWindowByName(wname);
+            if (!w || w->DockIsActive || w->LastFrameActive != ImGui::GetFrameCount() || w->Hidden) continue;
+            const ImVec2 a = w->Pos, b(w->Pos.x + w->Size.x, w->Pos.y + w->Size.y);
+            Theme::float_shadow(w->DrawList, a, b, w->WindowRounding);
+            if (w == nav && !(w->Flags & ImGuiWindowFlags_NoTitleBar)) {
+                const float r = w->WindowRounding;
+                w->DrawList->PushClipRectFullScreen();
+                w->DrawList->AddRectFilled(ImVec2(a.x + r, a.y), ImVec2(b.x - r, a.y + 2.0f), Theme::u32(Theme::Tokens::BRAND));
+                w->DrawList->PopClipRect();
+            }
+        }
     }
     // Draw venue images in the reserved leading space of native dock tabs
     // and floating title bars. Keep stable ### IDs and native tab interactions.
@@ -1268,6 +1345,7 @@ void update_and_render_widgets() {
         if (widget->type() == WidgetType::DOM) pair = &static_cast<DOMWidget*>(widget.get())->pair();
         if (widget->type() == WidgetType::Trades) pair = &static_cast<TradesWidget*>(widget.get())->pair();
         if (widget->type() == WidgetType::Orderbook) pair = &static_cast<OrderbookWidget*>(widget.get())->pair();
+        if (widget->type() == WidgetType::Data) pair = &static_cast<DataWidget*>(widget.get())->pair();
         if (widget->type() == WidgetType::Stats) pair = &static_cast<StatsWidget*>(widget.get())->pair();
         if (!pair) continue;
         char name[512];
@@ -1294,6 +1372,29 @@ void update_and_render_widgets() {
         draw->PopClipRect();
         if (ImGui::IsMouseHoveringRect(pos, ImVec2(pos.x + size, pos.y + size)))
             Theme::tooltip("%s", widget_venue_label(pair->exchange));
+    }
+    // Dim the tabs a panel is not showing (label and venue image), so the selected one reads at a glance; hovering
+    // one lifts it. ImGui draws every tab label in one text colour, so this veils them with the strip's own tone.
+    {
+        ImGuiContext& g = *GImGui;
+        const ImU32 veil = Theme::u32(Theme::Tokens::BASE, 0.52f);
+        for (int n = 0; n < g.DockContext.Nodes.Data.Size; ++n) {
+            auto* node = static_cast<ImGuiDockNode*>(g.DockContext.Nodes.Data[n].val_p);
+            if (!node || !node->TabBar || !node->HostWindow || node->IsHiddenTabBar() ||
+                node->HostWindow->LastFrameActive != ImGui::GetFrameCount()) continue;
+            ImGuiTabBar* bar = node->TabBar;
+            if (bar->Tabs.Size < 2) continue;
+            ImDrawList* draw = node->HostWindow->DrawList;
+            for (const ImGuiTabItem& tab : bar->Tabs) {
+                if (tab.ID == bar->SelectedTabId) continue;
+                const ImVec2 a(bar->BarRect.Min.x + tab.Offset - bar->ScrollingAnim, bar->BarRect.Min.y);
+                const ImVec2 b(a.x + tab.Width, bar->BarRect.Max.y);
+                if (ImGui::IsMouseHoveringRect(a, b)) continue;
+                draw->PushClipRect(bar->BarRect.Min, bar->BarRect.Max, true);
+                draw->AddRectFilled(a, b, veil);
+                draw->PopClipRect();
+            }
+        }
     }
     std::erase_if(g_app.widgets,
                   [](const auto& w) { return !w->is_open; });
@@ -1690,12 +1791,53 @@ void main_loop() {
         g_init_complete && !EducationBoot::instance().is_embedded() &&
         !EducationBoot::instance().is_pack() && !g_app.replay_mgr->is_active() &&
         !g_live_flow_rebuild.armed && !ClipRecorder::focus_active());
+#ifdef __EMSCRIPTEN__
+    // Apply explicit navigation intent AFTER the initial workspace restore.
+    // Once only: later mode changes and named workspaces remain the user's choice.
+    static bool realtime_link_applied = false;
+    if ((!realtime_link_applied || Menu::market_view_navigation_pending) && g_init_complete && !EducationBoot::instance().is_embedded() &&
+        !EducationBoot::instance().is_pack() && !g_app.replay_mgr->is_active() &&
+        !g_live_flow_rebuild.armed && !ClipRecorder::focus_active()) {
+        Menu::market_view_ready=false;
+        const bool returning=Menu::market_view_navigation_pending;
+        Menu::market_view_navigation_pending=false;
+        realtime_link_applied = true;
+        if (EM_ASM_INT({return new URLSearchParams(location.search).get('view')==='data';})) {
+            const int hours=EM_ASM_INT({return new URLSearchParams(location.search).get('range')==='24h'?24:4;});
+            Menu::request_market_data({g_initial_route.exchange,g_initial_route.symbol},hours);
+            Menu::resolve_widget_add_request(g_app.widgets,g_app.app_ctx);
+        } else if (returning) {
+            for (const auto& widget : g_app.widgets) {
+                if (widget->type()!=WidgetType::Chart) continue;
+                const auto& chart=*static_cast<ChartWidget*>(widget.get());
+                if (chart.chart_instance()==1) { ImGui::SetWindowFocus(chart.title()); break; }
+            }
+        }
+        if (!returning && EM_ASM_INT({ return new URLSearchParams(window.location.search).get('realtime') === '1'; })) {
+            for (auto& widget : g_app.widgets) {
+                if (widget->type() != WidgetType::Chart) continue;
+                auto* chart = static_cast<ChartWidget*>(widget.get());
+                if (chart->chart_instance() == 1) { chart->set_rt_mode(true); break; }
+            }
+        }
+    }
+#endif
+#ifdef __EMSCRIPTEN__
+    // The replay host can extend the canvas across its HTML rail. Only the
+    // dock workspace is inset; floating windows retain the whole canvas.
+    LayoutManager::left_reserve += std::clamp(float(EM_ASM_DOUBLE({
+        return Number(Module['__edgedepthReplayInset']) || 0;
+    })),0.0f,std::max(0.0f,ImGui::GetIO().DisplaySize.x-100.0f));
+#endif
     LayoutManager::render_dockspace(nullptr,
         g_initial_route.exchange, g_initial_route.symbol);
     g_profiler.end("Shell+Dock");
     if (g_app.drawing_mgr) g_app.drawing_mgr->tick();  // debounced persist flush
     if (LayoutManager::is_initialized) {
         update_and_render_widgets();
+#ifdef __EMSCRIPTEN__
+        Menu::market_view_ready = realtime_link_applied && !EducationBoot::instance().is_embedded() && !EducationBoot::instance().is_pack();
+#endif
     }
     if (g_app.replay_mgr) {
         // Pack engine first: it processes fetch responses, serves queued
@@ -1707,6 +1849,8 @@ void main_loop() {
         g_app.replay_mgr->tick_usage(static_cast<double>(frame_ms) / 1000.0, g_doc_visible);
         g_app.replay_mgr->flush_pending_skip();
         g_app.replay_mgr->flush_pending_join();
+        // Recreate a replay whose socket dropped, once that socket is back.
+        g_app.replay_mgr->tick_reconnect();
         g_profiler.begin("Drip");
         g_app.replay_mgr->drip_feed_pending_replay();
         g_profiler.end("Drip");
@@ -1818,9 +1962,31 @@ void main_loop() {
         PerformanceDiagnostics::render(g_profiler, g_frame_tracker, queues);
     }
     // render_debug();
+    ui_test::publish();
     g_profiler.begin("ImGui::Render");
     ImGui::Render();
     g_profiler.end("ImGui::Render");
+#ifdef __EMSCRIPTEN__
+    if (EM_ASM_INT({ return typeof Module['__edgedepthFloatingWindows'] === 'function'; })) {
+        // Root floating surfaces only. Docked charts stay beside the HTML rail;
+        // child windows are already contained by their root. The same clip path
+        // controls browser hit testing, so uncovered markers remain clickable.
+        float rects[512]; int count=0;
+        for (ImGuiWindow* window : ImGui::GetCurrentContext()->Windows) {
+            if (!window->Active || window->Hidden || window->RootWindow!=window || window->DockIsActive) continue;
+            if ((window->Flags & ImGuiWindowFlags_NoMove) &&
+                !(window->Flags & (ImGuiWindowFlags_Popup | ImGuiWindowFlags_Tooltip))) continue;
+            if (count+4>512) break;
+            rects[count++]=window->Pos.x; rects[count++]=window->Pos.y;
+            rects[count++]=window->Pos.x+window->Size.x;
+            rects[count++]=window->Pos.y+window->Size.y;
+        }
+        EM_ASM({
+            const rects = Array.from(HEAPF32.subarray($0/4, $0/4+$1));
+            Module['__edgedepthFloatingWindows'](rects);
+        },rects,count);
+    }
+#endif
     ImGuiIO& io = ImGui::GetIO();
     if (io.DisplaySize.x <= 0.0f || io.DisplaySize.y <= 0.0f ||
         std::isnan(io.DisplaySize.x) || std::isnan(io.DisplaySize.y)) {
@@ -1888,6 +2054,11 @@ extern "C" {
         Route route = parse_route(url_get_current_path(), url_get_current_search());
         if (route.symbol.empty()) return;
 
+        if (route.exchange==g_initial_route.exchange && route.symbol==g_initial_route.symbol) {
+            Menu::market_view_navigation_pending=true;
+            return;
+        }
+        // Market changes still restore their workspace through the normal reload.
         // For now: full reload on back/forward.
         // A proper implementation would tear down widgets and recreate,
         // but that requires a "switch_symbol" flow you don't have yet.
@@ -2099,6 +2270,7 @@ int main(int, char**) {
             exposure::SummaryHistory::invalidate_all("V2 replay context changed; reload required");
 #endif
         if (replay_ctx) {
+            workspace::checkpoint_live();
             // Stop live data from the backend
             g_app.stream_mgr->pause_live_subscriptions();
             // Also unsubscribe live debug (managed separately from StreamManager)
@@ -2148,34 +2320,14 @@ int main(int, char**) {
                 }
             }
 
-            // Tear the live order-flow widgets down: they subscribe to the live
-            // managers and would keep drawing live data over a replay. Note this
-            // DESTROYS them (erase_if(!is_open) at the end of the frame), it does
-            // not hide them, so record what went so the exit side can rebuild it.
-            // Their destructors unsubscribe through the manager they subscribed
-            // to, which is the LIVE one, so tearing down after the pointer swap
-            // above is still correct.
-            // A rebuild can still be owed from a previous exit if the user
-            // re-entered a replay within a frame or two of leaving one. Do not
-            // clear that debt: the widgets it owes are exactly the ones this
-            // teardown would otherwise have found and recorded.
-            if (!g_live_flow_rebuild.armed) {
-                g_live_flow_rebuild.want_dom = false;
-                g_live_flow_rebuild.want_trades = false;
-                g_live_flow_rebuild.want_chart = false;
-            }
+            // Keep live flow objects and their settings/subscriptions intact.
+            // Their live StreamManager survives replay; suspended widgets neither
+            // update nor submit windows against the replay context.
+            if (!g_live_flow_rebuild.armed) g_live_flow_rebuild.want_chart = false;
             for (auto& w : g_app.widgets) {
-                if (w && w->type() == WidgetType::DOM) {
-                    g_live_flow_rebuild.want_dom = true;
-                    g_live_flow_rebuild.pair = static_cast<DOMWidget*>(w.get())->pair();
-                    w->is_open = false;
-                    w->is_replay_widget = false;  // not replay-owned: it predates the swap
-                } else if (w && w->type() == WidgetType::Trades) {
-                    g_live_flow_rebuild.want_trades = true;
-                    g_live_flow_rebuild.pair = static_cast<TradesWidget*>(w.get())->pair();
-                    w->is_open = false;
-                    w->is_replay_widget = false;
-                }
+                if (!w || (w->type() != WidgetType::DOM && w->type() != WidgetType::Trades)) continue;
+                if (w->is_replay_widget) w->is_open = false;
+                else if (w->is_open) w->suspended_for_replay = true;
             }
 
             // Create replay widgets subscribed to the replay StreamManager.
@@ -2250,25 +2402,35 @@ int main(int, char**) {
                         chart->set_time_linked(!compare.empty());
                 }
 
-                auto trades_w = std::make_unique<TradesWidget>(replay_pair, g_app.app_ctx, fmt);
-                trades_w->is_replay_widget = true;
-                // No title suffix - inherit live widget's dock position via same ImGui window name
-                g_app.widgets.push_back(std::move(trades_w));
-
-                auto dom_w = std::make_unique<DOMWidget>(replay_pair, g_app.app_ctx, dom_tick, 20);
-                dom_w->is_replay_widget = true;
-                // No title suffix - inherit live widget's dock position via same ImGui window name
-                g_app.widgets.push_back(std::move(dom_w));
+                // Mirror only panels that actually existed, with their preferences.
+                // Parked live objects retain their data and settings for return-live.
+                for (const auto type : {WidgetType::Trades, WidgetType::DOM}) {
+                    Widget* source = nullptr;
+                    for (const auto& w : g_app.widgets) {
+                        if (!w->is_open || !w->suspended_for_replay || w->type() != type) continue;
+                        const auto& pair = type == WidgetType::DOM ? static_cast<DOMWidget*>(w.get())->pair()
+                                                                  : static_cast<TradesWidget*>(w.get())->pair();
+                        if (w->mode_companion || (pair.exchange == replay_pair.exchange && pair.symbol == replay_pair.symbol)) {
+                            source = w.get(); break;
+                        }
+                    }
+                    if (!source) continue; // Never resurrect a panel closed before replay.
+                    std::unique_ptr<Widget> flow;
+                    if (type == WidgetType::DOM) flow = std::make_unique<DOMWidget>(replay_pair, g_app.app_ctx, dom_tick, 20);
+                    else flow = std::make_unique<TradesWidget>(replay_pair, g_app.app_ctx, fmt);
+                    flow->load_settings(source->save_settings());
+                    flow->mode_companion = source->mode_companion;
+                    flow->is_replay_widget = true;
+                    g_app.widgets.push_back(std::move(flow));
+                }
             }
         } else {
-            // Close replay-created widgets and ARM the live rebuild. There is
-            // nothing here to "restore": the live DOM and tape were destroyed on
-            // the way in, so setting is_open = true on them matched nothing. The
-            // rebuild runs at the safe drain point once this sweep has removed
-            // the replay-owned pair, see resolve_live_flow_widget_rebuild.
+            // Restore parked live panels; retire replay-owned widgets before
+            // the next render so stable window IDs are never submitted twice.
             bool closed_replay_chart = false;
             for (auto& w : g_app.widgets) {
                 if (!w) continue;
+                w->suspended_for_replay = false;
                 if (w->is_replay_widget) {
                     closed_replay_chart = closed_replay_chart ||
                                           w->type() == WidgetType::Chart;
@@ -2292,9 +2454,7 @@ int main(int, char**) {
                 }
                 closed_replay_chart = true;
             }
-            g_live_flow_rebuild.armed = g_live_flow_rebuild.want_dom ||
-                                        g_live_flow_rebuild.want_trades ||
-                                        g_live_flow_rebuild.want_chart;
+            g_live_flow_rebuild.armed = g_live_flow_rebuild.want_chart;
             // No blind reset_layout() here. It cleared the dock tree without
             // queueing a pair, so the rebuild had nothing to key on; the chart
             // arm below re-docks for the pair that was live instead.
@@ -2449,6 +2609,7 @@ int main(int, char**) {
     // record button disabled instead of letting a click fail silently.
     ClipRecorder::probe_support();
     url_register_popstate();
+    emscripten_set_interval([](void*) { capture_background_live(); }, 1000, nullptr);
     emscripten_set_main_loop(main_loop, 0, 1);
 #else
     while (!g_app.done) {

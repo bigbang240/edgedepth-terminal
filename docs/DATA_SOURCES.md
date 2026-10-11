@@ -88,7 +88,7 @@ available source coverage. These overlays are absent from TPO and Renko.
 
 ## Connection and depth coverage
 
-Live sockets reconnect with a 1–30 second backoff. Frame age in the status bar
+Live sockets reconnect with a 1 to 30 second backoff. Frame age in the status bar
 measures socket traffic, not every layer's completeness. Paused subscriptions
 stay paused. An interrupted network replay stays paused until reopened; packs
 need no live socket. Missing depth stays missing: the current book is never

@@ -10,4 +10,6 @@ void tick(std::vector<std::unique_ptr<Widget>>& widgets, const AppContext& ctx,
 void menu();
 void reset_default();
 void flush();
+// Capture live state before the replay context replaces it, including recent UI changes.
+void checkpoint_live();
 }

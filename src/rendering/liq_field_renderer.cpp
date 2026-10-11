@@ -38,6 +38,7 @@ void LiqFieldRenderer::rebuild(uint8_t lmask, int64_t tf_ms) {
     ProfileScope _ps("LiqRebuild");
     (void)tf_ms;
     segs_.clear();
+    standing_.clear();
     max_mag_ = 0.0f;
     norm_lo_ = 0.0f;
     norm_hi_ = 0.0f;
@@ -175,7 +176,11 @@ void LiqFieldRenderer::rebuild(uint8_t lmask, int64_t tf_ms) {
     // stays deterministic between rebuilds and identical in replay).
     int64_t t_ref = candles.empty() ? 0 : candles.back().timestamp_ms;
     if (has_bld) t_ref = std::max(t_ref, cm.building_candle().timestamp_ms);
-    for (const auto& [k, st] : live) emit(k, st.run_start, kSegPending, decayed(st, t_ref));
+    for (const auto& [k, st] : live) {
+        const double f = decayed(st, t_ref);
+        emit(k, st.run_start, kSegPending, f);
+        if (f > 0.0) standing_.push_back({std::exp(static_cast<double>(k) * lbw), f});
+    }
     if (segs_.empty()) { max_mag_ = 0.0f; return; }
 
     bw_ = lbw;   // stored: LOG bucket width (grid = exp(k·lbw))
@@ -198,7 +203,7 @@ void LiqFieldRenderer::rebuild(uint8_t lmask, int64_t tf_ms) {
         float hi = pick(std::clamp(knobs_.hi_pct, 0.50f, 1.00f));
         float lo = pick(std::clamp(knobs_.lo_pct, 0.00f, 0.95f));
         if (hi <= 0.0f) hi = max_mag_;
-        if (hi <= 0.0f) { segs_.clear(); return; }
+        if (hi <= 0.0f) { segs_.clear(); standing_.clear(); return; }
         // Degenerate spread (young symbol / near-uniform mass) → fall back to a wide fixed range so
         // the map stays defined; everything then reads bright, which is the honest degenerate render.
         if (lo <= 0.0f || lo >= hi * 0.5f) lo = hi / 256.0f;

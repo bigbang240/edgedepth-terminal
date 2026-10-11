@@ -46,7 +46,7 @@ float RealtimeDomLadder::preferred_width() {
 void RealtimeDomLadder::render(const RealtimeDOMFrame& frame, const PriceFormatter& fmt, bool* open) {
     ProfileScope profile("RT DOM");
     ImGui::TextColored(Theme::Tokens::TX2, "%s%s",
-        frame.replay ? "Replay" : "Live", frame.paused ? " paused" : "");
+        frame.replay ? "Replay" : frame.recovery_visible() ? "Last known" : "Live", frame.paused ? " paused" : "");
     ImGui::SameLine();
     if (ImGui::SmallButton(display_usd_ ? "Quote" : "Qty")) display_usd_ = !display_usd_;
     if (ImGui::IsItemHovered()) Theme::tooltip("Resting depth and received trade volume at the chart clock. CVD is buy quantity minus sell quantity, reset every 5 minutes of market time. Rows use the heatmap fidelity. The shared price scale keeps numbers readable at every fidelity.");
@@ -71,12 +71,15 @@ void RealtimeDomLadder::render(const RealtimeDOMFrame& frame, const PriceFormatt
         ImGui::SameLine();
         ImGui::TextDisabled("5m qty%s", frame.flow->reset_after_gap() ? " / reset after gap" : "");
     }
-    if (!frame.fresh()) {
+    if (!frame.fresh() && !frame.recovery_visible()) {
         ImGui::TextWrapped(frame.replay
             ? "Waiting for synchronized RT depth. Seeking reconstructs recorded depth."
             : "Recovering synchronized RT depth...");
         return;
     }
+    if (frame.recovery_visible())
+        ImGui::TextColored(Theme::Tokens::WARN, "Recovering / book %.1fs old",
+            double(frame.clock_ms - frame.book->timestamp_ms) / 1000);
     const auto& book = *frame.book;
     char bid[24], ask[24];
     snprintf(bid, sizeof(bid), fmt.price_fmt, frame.bid());

@@ -1,3 +1,4 @@
+#include "core/entitlements.h"
 #include "message_handler.h"
 #include "core/trade_identity.h"
 #include <unordered_map>
@@ -205,6 +206,32 @@ void MessageHandler::route_message(const pb::WSPayload& ws_payload, const Messag
                 handle_liquidation_levels_message(pair, inner_data, inner_size, ctx.liq_heatmaps);
             }
             break;
+        case pb::Stream::STREAM_LIQMAP2:
+        case pb::Stream::STREAM_HISTORICAL_LIQMAP2: {
+            const bool history = ws_payload.stream() == pb::Stream::STREAM_HISTORICAL_LIQMAP2;
+            if (ctx.dispatch_queue) {
+                std::string captured(static_cast<const char*>(inner_data), inner_size);
+                ctx.dispatch_queue->push({[pair, captured, history, lhm = ctx.liq_heatmaps](StreamManager&) {
+                    handle_liqmap2_message(pair, captured.data(), captured.size(), history, lhm);
+                }});
+            } else {
+                handle_liqmap2_message(pair, inner_data, inner_size, history, ctx.liq_heatmaps);
+            }
+            break;
+        }
+        case pb::Stream::STREAM_LIQMAP2_RAILS:
+        case pb::Stream::STREAM_HISTORICAL_LIQMAP2_RAILS: {
+            const bool history = ws_payload.stream() == pb::Stream::STREAM_HISTORICAL_LIQMAP2_RAILS;
+            if (ctx.dispatch_queue) {
+                std::string captured(static_cast<const char*>(inner_data), inner_size);
+                ctx.dispatch_queue->push({[pair, captured, history, lhm = ctx.liq_heatmaps](StreamManager&) {
+                    handle_liqmap2_rails_message(pair, captured.data(), captured.size(), history, lhm);
+                }});
+            } else {
+                handle_liqmap2_rails_message(pair, inner_data, inner_size, history, ctx.liq_heatmaps);
+            }
+            break;
+        }
         case pb::Stream::STREAM_PATTERN_ADMIN:
             handle_pattern_admin_message(pair, inner_data, inner_size, ctx.streams);
             break;
@@ -344,6 +371,20 @@ void MessageHandler::route_message(const pb::WSPayload& ws_payload, const Messag
                     }});
                 } else {
                     handle_positioning_state_message(pair, inner_data, inner_size, ctx.analytics);
+                }
+            }
+            break;
+        case pb::Stream::STREAM_ICEBERG_STATE:
+            if (ctx.analytics && inner_size <= 4096) {
+                auto update = std::make_shared<pb::IcebergStats>();
+                if (!update->ParseFromArray(inner_data, static_cast<int>(inner_size))) break;
+                const auto key = Terminal::pair_key(pair.exchange, pair.symbol);
+                if (ctx.dispatch_queue) {
+                    ctx.dispatch_queue->push({[update, key, am = ctx.analytics](StreamManager& streams) {
+                        if (!streams.is_replay_mode()) am->apply_iceberg(key, *update, static_cast<int64_t>(Entitlements::wall_now_ms()));
+                    }});
+                } else if (ctx.streams && !ctx.streams->is_replay_mode()) {
+                    ctx.analytics->apply_iceberg(key, *update, static_cast<int64_t>(Entitlements::wall_now_ms()));
                 }
             }
             break;
@@ -748,6 +789,7 @@ void MessageHandler::handle_stats_batch(const Terminal::Pair& pair, int64_t time
     StreamKey key{pair, Terminal::Stream::Stats, timeframe};
     for (const auto& stat_pb : stats_pb.values()) {
         Terminal::Stat stat;
+        stat.historical = true;
         stat.mark_price = stat_pb.mark_price();
         stat.funding = stat_pb.funding();
         stat.liq_long_volume = stat_pb.liq_long_volume();
@@ -782,6 +824,8 @@ void MessageHandler::handle_liquidation(const Terminal::Pair& pair, const pb::Li
     liq.qty = liq_pb.qty();
     liq.is_buy = liq_pb.is_buy();
     liq.timestamp_ms = liq_pb.timestamp_ms();
+    liq.trade_timestamp_ms = liq_pb.trade_timestamp_ms();
+    liq.filled_qty = liq_pb.filled_qty();
     const StreamKey key{pair, Terminal::Stream::Liquidations, 0};
     stream_mgr->dispatch_liquidation(key, liq);
 }
@@ -826,6 +870,47 @@ void MessageHandler::handle_liquidation_levels_message(
         key = Terminal::Pair{update_pb->pair().exchange(), update_pb->pair().symbol()};
     }
     liq_heatmap_mgr->apply_census_update(key, *update_pb);
+}
+
+// The frame's own pair is authoritative (the publisher sets it), as for the census: the envelope pair
+// is only a fallback.
+void MessageHandler::handle_liqmap2_message(
+    const Terminal::Pair& pair,
+    const void* data, size_t size,
+    bool history,
+    LiquidationHeatmapManager* liq_heatmap_mgr)
+{
+    if (!liq_heatmap_mgr) return;
+    const auto key_of = [&pair](const pb::LiqMapV2Frame& f) {
+        return f.has_pair() && !f.pair().symbol().empty() ? Terminal::Pair{f.pair().exchange(), f.pair().symbol()} : pair;
+    };
+    if (!history) {
+        auto* frame_pb = google::protobuf::Arena::CreateMessage<pb::LiqMapV2Frame>(&s_arena);
+        if (frame_pb->ParseFromArray(data, static_cast<int>(size)))
+            liq_heatmap_mgr->apply_liqmap2_frame(key_of(*frame_pb), *frame_pb);
+        return;
+    }
+    auto* batch_pb = google::protobuf::Arena::CreateMessage<pb::LiqMapV2History>(&s_arena);
+    if (!batch_pb->ParseFromArray(data, static_cast<int>(size))) return;
+    for (const auto& f : batch_pb->frames()) liq_heatmap_mgr->apply_liqmap2_frame(key_of(f), f);
+}
+
+// Rails admin preview (stream 40 live, 41 history): the message's own pair is authoritative, as for frames.
+void MessageHandler::handle_liqmap2_rails_message(
+    const Terminal::Pair& pair,
+    const void* data, size_t size,
+    bool history,
+    LiquidationHeatmapManager* liq_heatmap_mgr)
+{
+    if (!liq_heatmap_mgr) return;
+    const auto key_of = [&pair](const pb::Pair& p) { return !p.symbol().empty() ? Terminal::Pair{p.exchange(), p.symbol()} : pair; };
+    if (!history) {
+        auto* m = google::protobuf::Arena::CreateMessage<pb::LiqMapV2Rails>(&s_arena);
+        if (m->ParseFromArray(data, static_cast<int>(size))) liq_heatmap_mgr->apply_liqmap2_rails(key_of(m->pair()), *m);
+        return;
+    }
+    auto* h = google::protobuf::Arena::CreateMessage<pb::LiqMapV2RailsHistory>(&s_arena);
+    if (h->ParseFromArray(data, static_cast<int>(size))) liq_heatmap_mgr->apply_liqmap2_rails_history(key_of(h->pair()), *h);
 }
 
 void MessageHandler::handle_historical_liq_heatmap_batch(

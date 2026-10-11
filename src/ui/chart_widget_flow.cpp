@@ -1,4 +1,5 @@
 #include "ui/chart_widget.h"
+#include "rendering/observed_liquidations.h"
 #include "core/app_context.h"
 #include "core/candle_manager.h"
 #include "core/display_time_zone.h"
@@ -104,7 +105,7 @@ void ChartWidget::render_flow_positioning() {
         } else if(lane==1){
             ImGui::Text("OI %s %+.2f%%",a.usable_oi?(a.oi_pct>0?"rising":a.oi_pct<0?"falling":"unchanged"):"partial endpoint change",a.oi_pct);
             ImGui::SameLine();ImGui::TextDisabled("| %s",a.recovered_count?(a.recovered_count==a.raw_count?"Recovered":"Mixed raw/recovered"):"Raw recorded");
-        } else ImGui::TextDisabled("Reported liquidations / USD per minute (partial feed)");
+        } else ImGui::TextDisabled("Reported liquidations / USD per minute%s",observed_liquidations::sampled_feed(pair_.exchange)?" (sampled feed)":"");
         if(ImPlot::BeginPlot(lane==0?"##FlowAggression":lane==1?"##FlowOI":"##FlowLiquidations",ImVec2(-1,lane==0?55:lane==1?65:45),ImPlotFlags_NoTitle|ImPlotFlags_NoLegend|ImPlotFlags_NoMouseText|ImPlotFlags_NoMenus)){
             ImPlot::SetupAxis(ImAxis_X1,nullptr,ImPlotAxisFlags_Lock|(!last_lane?ImPlotAxisFlags_NoTickLabels:0));
             ImPlot::SetupAxis(ImAxis_Y1,nullptr,ImPlotAxisFlags_Opposite|ImPlotAxisFlags_Lock|((lane==1&&(!ready||a.raw_count==0))?ImPlotAxisFlags_NoTickLabels|ImPlotAxisFlags_NoGridLines:0));
@@ -192,7 +193,7 @@ void ChartWidget::render_flow_positioning() {
             ImGui::TableNextColumn();
             if(e.liquidations_available){
                 flow_split(a.forced_buy,a.forced_sell,"Short-liquidation share");
-                ImGui::TextWrapped("$%s reported | partial feed",liq);
+                ImGui::TextWrapped("$%s reported%s",liq,observed_liquidations::sampled_feed(pair_.exchange)?" | sampled feed":"");
             } else ImGui::TextWrapped("Liquidations: %s",flow_positioning::error_message(e.liquidations_status));
             ImGui::EndTable();
         }
@@ -218,10 +219,17 @@ void ChartWidget::render_flow_positioning() {
             ImGui::Text("Minute bars %zu / %lld",e.bars.size(),static_cast<long long>((e.to-e.from)/60000));
             if(a.raw_count){char first[128]{},last[128]{};flow_time(a.first_oi,first,sizeof(first));flow_time(a.last_oi,last,sizeof(last));ImGui::TextWrapped("First OI: %s",first);ImGui::TextWrapped("Last OI: %s",last);ImGui::Text("Last sample to selected end: %.3fs",(e.to-a.last_oi)/1000.0);}
 
-            ImGui::TextWrapped("OI points retain original poll times. Recovered quantities divide the same stored row USD value by its stored mark. Raw NULL and recovery operands remain in the export; no state refresh or interpolation is used.");
-            ImGui::TextWrapped("No universal OI materiality threshold is applied. Read the exact size and sample coverage; a small signed change alone is not evidence of covering or unwinding.");
-            ImGui::TextWrapped("Saved assessment includes these source rows and exact boundaries. It is a local JSON file, not a published Studio assessment.");
-            ImGui::TextWrapped("Aggression is a share of traded quantity, not traders. Each trade has a buyer and seller; its aggressor takes available liquidity.");
+            if(ImGui::TreeNode("Source and interpretation")){
+                ImGui::TextWrapped("OI keeps original poll times; no interpolation");
+                ImGui::TextWrapped("Recovered contracts: same-row USD / mark");
+                ImGui::TextWrapped("Export retains raw NULLs and recovery inputs");
+                ImGui::TextWrapped("Small OI changes alone do not identify position exits");
+                ImGui::TextWrapped("No universal OI materiality threshold");
+                ImGui::TextWrapped("Aggression: taker quantity share, not trader count");
+                ImGui::TextWrapped("Each trade still has a buyer and seller");
+                ImGui::TreePop();
+            }
+            ImGui::TextDisabled("Save: local JSON with source rows and boundaries");
         if(ImGui::SmallButton("Save assessment")){
             auto document=flow_history_.source;
             document["version"]="terminal_flow_assessment.v1";
@@ -262,7 +270,7 @@ void ChartWidget::render_flow_positioning() {
             } else ImGui::Text("OI unavailable (%zu recorded poll timestamps)",polls);
             double buys=0,sells=0;int64_t buy_reports=0,sell_reports=0;
             for(const auto& l:e.liquidations)if(l.time==minute){(l.buy?buys:sells)+=l.usd;(l.buy?buy_reports:sell_reports)+=l.count;}
-            if(e.liquidations_available){ImGui::Text("Forced buys $%.2f (%lld) / sells $%.2f (%lld)",buys,static_cast<long long>(buy_reports),sells,static_cast<long long>(sell_reports));ImGui::TextDisabled("Reported liquidations only; partial coverage");}
+            if(e.liquidations_available){ImGui::Text("Forced buys $%.2f (%lld) / sells $%.2f (%lld)",buys,static_cast<long long>(buy_reports),sells,static_cast<long long>(sell_reports));ImGui::TextDisabled("%s",observed_liquidations::feed_line(pair_.exchange));}
             else ImGui::TextWrapped("Liquidations: %s",flow_positioning::error_message(e.liquidations_status));
             Theme::end_tooltip();
         }

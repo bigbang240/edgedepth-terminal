@@ -5,7 +5,9 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-option(EDGEDEPTH_EXPOSURE_V2_DEV "Compile the V2 exposure chart attachment (Layers > Exposure scenarios); the runtime checkbox stays default-off" ON)
+# Retired 2026-10-04: the Exposure V2 pilot publishers are stopped and its June screen refused advancing.
+# Kept compilable for the record; existing build caches must be reconfigured with -DEDGEDEPTH_EXPOSURE_V2_DEV=OFF.
+option(EDGEDEPTH_EXPOSURE_V2_DEV "Compile the retired V2 exposure chart attachment (Layers > Exposure V2 bands)" OFF)
 
 include(FetchContent)
 
@@ -396,6 +398,8 @@ set(PROJECT_SRC
         src/ui/chart_reference_context.cpp
         src/ui/workspace_settings.cpp
         src/ui/chart_widget.cpp
+        src/ui/chart_widget_liquidations.cpp
+        src/ui/chart_widget_activity.cpp
         src/ui/chart_widget_realtime.cpp
         src/ui/chart_widget_flow.cpp
         src/ui/chart_widget_liquidity_response.cpp
@@ -415,6 +419,8 @@ set(PROJECT_SRC
         src/ui/realtime_dom_ladder.cpp
         src/ui/stats_widget.h
         src/ui/stats_widget.cpp
+        src/ui/data_widget.cpp
+        src/core/terminal_request.cpp
 
         # Generated protobuf (from build directory)
         ${PROTO_SRCS}
@@ -574,6 +580,12 @@ if(EMSCRIPTEN)
     target_compile_options(cvd_availability_regression PRIVATE -O1)
     target_link_options(cvd_availability_regression PRIVATE -sENVIRONMENT=node -sALLOW_MEMORY_GROWTH=1)
     set_target_properties(cvd_availability_regression PROPERTIES SUFFIX ".js")
+    add_executable(pack_preview_regression EXCLUDE_FROM_ALL
+        tests/wasm/pack_preview_test.cpp ${PROTO_SRCS} ${PROTOBUF_LITE_SRCS})
+    add_dependencies(pack_preview_regression generate_proto)
+    target_compile_options(pack_preview_regression PRIVATE -O1)
+    target_link_options(pack_preview_regression PRIVATE -sENVIRONMENT=node -sALLOW_MEMORY_GROWTH=1)
+    set_target_properties(pack_preview_regression PROPERTIES SUFFIX ".js")
     add_executable(pack_seek_regression EXCLUDE_FROM_ALL
         tests/wasm/pack_seek_test.cpp src/replayer/pack_replay_engine.cpp
         src/core/message_parser.cpp src/core/orderbook_manager.cpp
@@ -582,6 +594,13 @@ if(EMSCRIPTEN)
     target_compile_options(pack_seek_regression PRIVATE -O1)
     target_link_options(pack_seek_regression PRIVATE -sENVIRONMENT=node -sALLOW_MEMORY_GROWTH=1)
     set_target_properties(pack_seek_regression PROPERTIES SUFFIX ".js")
+    add_executable(companion_layout_regression EXCLUDE_FROM_ALL
+        tests/wasm/companion_layout_test.cpp ${IMGUI_DIR}/imgui.cpp
+        ${IMGUI_DIR}/imgui_draw.cpp ${IMGUI_DIR}/imgui_tables.cpp ${IMGUI_DIR}/imgui_widgets.cpp)
+    target_compile_definitions(companion_layout_regression PRIVATE "ImDrawIdx=unsigned int")
+    target_compile_options(companion_layout_regression PRIVATE -O1)
+    target_link_options(companion_layout_regression PRIVATE -sENVIRONMENT=node -sALLOW_MEMORY_GROWTH=1)
+    set_target_properties(companion_layout_regression PROPERTIES SUFFIX ".js")
     add_executable(realtime_mesh_regression EXCLUDE_FROM_ALL
         tests/wasm/realtime_mesh_test.cpp ${IMGUI_DIR}/imgui.cpp
         ${IMGUI_DIR}/imgui_draw.cpp ${IMGUI_DIR}/imgui_tables.cpp ${IMGUI_DIR}/imgui_widgets.cpp)

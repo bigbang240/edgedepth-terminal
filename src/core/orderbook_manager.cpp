@@ -31,11 +31,11 @@ void OrderbookManager::apply_book_update_from_pb(
         return;
     }
     if (db.epoch != realtime_epoch_.load()) {
-        db.realtime.interrupt();
+        db.realtime.interrupt("Depth transport changed", update_pb.timestamp_ms());
         db.epoch = realtime_epoch_.load();
     }
     db.realtime.check_delta(orderbook.last_update_id, update_pb.first_update_id(),
-        last_update_id, prev_last_update_id);
+        last_update_id, prev_last_update_id, update_pb.timestamp_ms());
     // During replay, skip strict LastUpdateId continuity checks entirely.
     // DB-backed replay delivers depth updates from 5-second batches where
     // multiple rows per timestamp can arrive in non-deterministic order.
@@ -193,7 +193,7 @@ void OrderbookManager::apply_orderbook_snapshot_from_pb(
     // stale levels. INT32_MAX = permanent (never decrements to 0).
     orderbook.replay_grace_remaining = INT32_MAX;
     const auto epoch = realtime_epoch_.load();
-    if (db.epoch != epoch) db.realtime.interrupt();
+    if (db.epoch != epoch) db.realtime.interrupt("Depth transport changed", snapshot_pb.timestamp_ms());
     db.epoch = epoch;
     if (observed_source) {
         db.realtime.seed();
@@ -288,14 +288,21 @@ bool OrderbookManager::realtime_ready(const Terminal::Pair& pair, int64_t clock_
 }
 
 bool OrderbookManager::copy_realtime_since(const Terminal::Pair& pair, uint64_t serial,
-    std::vector<RealtimeDepthHistory::SamplePtr>& out) const {
+    std::vector<RealtimeDepthHistory::SamplePtr>& out,
+    RealtimeDepthHistory::SyncFailure* failure) const {
     out.clear();
+    if (failure) *failure = {};
     const auto it = orderbooks_.find({pair.exchange, pair.symbol});
     if (it == orderbooks_.end()) return false;
     const auto& db = it->second;
     std::lock_guard lock(db.write_mutex);
     db.realtime.copy_since(serial, out);
-    return realtime_transport_open_.load() && db.epoch == realtime_epoch_.load() && db.realtime.valid();
+    const bool connected = realtime_transport_open_.load() && db.epoch == realtime_epoch_.load();
+    if (failure) {
+        *failure = db.realtime.failure();
+        if (!connected) failure->reason = "Depth transport changed";
+    }
+    return connected && db.realtime.valid();
 }
 
 void OrderbookManager::prune_orderbook(Terminal::Orderbook& orderbook) {

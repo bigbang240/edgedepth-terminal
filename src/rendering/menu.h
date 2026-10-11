@@ -21,7 +21,7 @@ namespace Menu {
         bool open = false;
         char search_buf[64] = {};
         enum class PendingWidget {
-            None, Orderbook, DOM, Trades, Stats, Charts, Debug, PaperTrading,
+            None, Orderbook, DOM, Trades, Stats, Data, Charts, Debug, PaperTrading,
             ReplayLibrary, Watchlist
         } pending = PendingWidget::None;
 
@@ -104,8 +104,13 @@ namespace Menu {
         PriceFormatter fmt;
         double tick_size = 0.0;
         bool pending = false;
+        int data_hours = 4;
     };
     inline WidgetAddRequest g_widget_add_request;
+    inline bool market_view_navigation_pending = false;
+    inline bool market_view_ready = false;
+    void sync_market_view(const Terminal::Pair& pair, bool data, int hours = 4);
+    void request_market_data(const Terminal::Pair& pair, int hours = 4);
 
     // Identity for a new chart of `pair`: 1 = primary, >1 = secondary chart.
     int next_chart_instance(const std::vector<std::unique_ptr<Widget>>& widgets,

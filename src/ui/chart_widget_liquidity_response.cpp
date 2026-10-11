@@ -20,6 +20,10 @@ void ChartWidget::add_absorption_indicator(){
 }
 
 void ChartWidget::update_liquidity_response(){
+    if(!liquidity_response::supported(pair_.exchange,pair_.symbol)){
+        if(liquidity_response_history_.status!="Pilot: Binance BTC and SOL only")liquidity_response_history_.reset("Pilot: Binance BTC and SOL only");
+        liquidity_response_evidence_open_=false;return;
+    }
     if(!liquidity_response_enabled_&&!indicator_mgr_.has_indicator_of_type<Indicators::AbsorptionIndicator>()){liquidity_response_history_.reset("Layer off");return;}
     if(ctx_.replay_mgr().is_pack_mode()||ctx_.replay_mgr().is_loading()||replay_selection_.active){liquidity_response_history_.reset("Unavailable in packs or while seeking");return;}
     if(!rt_mode_&&chart_type_!=ChartType::Candles){liquidity_response_history_.reset("Use candlesticks or real-time view");return;}
@@ -49,21 +53,18 @@ void ChartWidget::update_liquidity_response(){
     }
 }
 
+// Layers > Absorption details: state and the export, no method text (the row tooltip carries the scope).
 void ChartWidget::render_liquidity_response_settings(){
-    ImGui::TextWrapped("Observed trading against replenishing bids or asks. Hidden order identity and remaining size are unknown. Separate from liquidation heatmaps.");
-    ImGui::TextWrapped("Pilot: Binance BTC/SOL, up to 24 hours of stored activity. Enable Absorption activity in Indicators for aligned bid/ask columns. Missing history stays unavailable.");
-    ImGui::TextWrapped("%s",liquidity_response_history_.status.c_str());
     if(liquidity_response_history_.ready){
         char through[64]="";
         DisplayTimeZone::instance().format(liquidity_response_history_.through,TimeZoneFormat::FullInspection,through,sizeof(through));
-        ImGui::TextWrapped("Observed through %s",through);
-        ImGui::TextWrapped("Rule v1: 10-tick bands, at least $10,000 executed, 3 hit/refill cycles and 3 seconds. These are research thresholds, not a probability.");
-        if(ImGui::Button("Export research observations"))response_export(liquidity_response_history_.source.dump().c_str());
-        ImGui::TextWrapped("Executions use their source time, episode counts use first qualification. Whole-market scans and predictive validation are not yet available.");
-    }
+        ImGui::TextDisabled("Recorded through %s",through);
+        if(ImGui::Button("Export observations"))response_export(liquidity_response_history_.source.dump().c_str());
+    }else ImGui::TextDisabled("%s",liquidity_response_history_.status.c_str());
 }
 
 void ChartWidget::render_liquidity_response(){
+    if(!liquidity_response::supported(pair_.exchange,pair_.symbol))return;
     if((!liquidity_response_enabled_&&!liquidity_response_evidence_open_)||(!rt_mode_&&chart_type_!=ChartType::Candles))return;
     auto& history=liquidity_response_history_;
     const int64_t clock=ctx_.replay_mgr().is_active()?std::min(ctx_.replay_mgr().interpolated_time_ms(),ctx_.replay_mgr().info().confirmed_time_ms):int64_t(emscripten_date_now());
@@ -127,7 +128,7 @@ void ChartWidget::render_liquidity_response(){
     char label[192];
     if(history.ready)std::snprintf(label,sizeof(label),"Absorption: %s%s%s",state,stamp[0]?" through ":"",stamp);
     else std::snprintf(label,sizeof(label),"Absorption: %s",state);
-    if(rt_mode_)draw->AddText(ImVec2(pos.x+12,pos.y+110),Theme::u32(Theme::Tokens::TX2),label);
+    if(rt_mode_)draw->AddText(ImVec2(pos.x+12,pos.y+(ctx_.replay_mgr().is_active()?88:38)),Theme::u32(Theme::Tokens::TX2),label);
     ImPlot::PopPlotClipRect();
     if(!history.ready||history.selected.empty()||history.selected_index>=history.selected.size()||!liquidity_response::visible(history.selected[history.selected_index],clock))liquidity_response_evidence_open_=false;
     if(!liquidity_response_evidence_open_)return;
@@ -166,8 +167,13 @@ void ChartWidget::render_liquidity_response(){
             ImGui::Text("At last update: $%.0f | %d cycles",p.executed,p.cycles);
             ImGui::Text("Added %.4g / removed %.4g base units",p.added,p.removed);
             ImGui::Text("Observed %.1fs | %s",double(p.updated-p.start)/1000,p.status.c_str());
-            ImGui::TextWrapped("Hidden size and order identity are unknown. Removal can be execution or cancellation. Source completeness is not certified.");
-            ImGui::TextWrapped("Research query handoff is not available yet.");
+            ImGui::TextDisabled("Hidden size unknown / coverage uncertified");
+            if(ImGui::TreeNode("Evidence limits")){
+                ImGui::TextWrapped("Order identity unknown");
+                ImGui::TextWrapped("Removal: execution or cancellation");
+                ImGui::TextWrapped("Research handoff unavailable");
+                ImGui::TreePop();
+            }
             if(ImGui::Button("Export pinned evidence")){
                 auto evidence=history.selected_source;
                 evidence["selected_episode_id"]=p.id;

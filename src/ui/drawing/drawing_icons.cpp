@@ -395,6 +395,53 @@ void draw_ui_icon(ImDrawList* dl, UiIcon icon, ImVec2 c, float s, ImU32 col, flo
             arrow_head(dl, ImVec2(tip.x + s * 0.12f, tip.y + s * 0.30f), ImVec2(tip.x - s * 0.40f, tip.y - s * 0.30f), col, s * 0.42f);
             break;
         }
+        case UiIcon::Info:
+            dl->AddCircle(c, s * 0.85f, col, 24, th);
+            dl->AddCircleFilled(at(c, s, 0.0f, -0.42f), std::max(1.0f, s * 0.11f), col, 8);
+            dl->AddLine(at(c, s, 0.0f, -0.12f), at(c, s, 0.0f, 0.46f), col, th);
+            break;
+        case UiIcon::Expand:
+            // Two corner brackets, outward.
+            dl->AddLine(at(c, s, -0.75f, -0.20f), at(c, s, -0.75f, -0.75f), col, th);
+            dl->AddLine(at(c, s, -0.75f, -0.75f), at(c, s, -0.20f, -0.75f), col, th);
+            dl->AddLine(at(c, s, 0.75f, 0.20f), at(c, s, 0.75f, 0.75f), col, th);
+            dl->AddLine(at(c, s, 0.75f, 0.75f), at(c, s, 0.20f, 0.75f), col, th);
+            dl->AddLine(at(c, s, -0.70f, -0.70f), at(c, s, -0.25f, -0.25f), col, th);
+            dl->AddLine(at(c, s, 0.70f, 0.70f), at(c, s, 0.25f, 0.25f), col, th);
+            break;
+        case UiIcon::Collapse:
+            // Two corner brackets, inward.
+            dl->AddLine(at(c, s, -0.15f, -0.70f), at(c, s, -0.15f, -0.15f), col, th);
+            dl->AddLine(at(c, s, -0.15f, -0.15f), at(c, s, -0.70f, -0.15f), col, th);
+            dl->AddLine(at(c, s, 0.15f, 0.70f), at(c, s, 0.15f, 0.15f), col, th);
+            dl->AddLine(at(c, s, 0.15f, 0.15f), at(c, s, 0.70f, 0.15f), col, th);
+            break;
+        case UiIcon::ArrowUpRight:
+            dl->AddLine(at(c, s, -0.55f, 0.55f), at(c, s, 0.55f, -0.55f), col, th);
+            dl->AddLine(at(c, s, -0.15f, -0.55f), at(c, s, 0.55f, -0.55f), col, th);
+            dl->AddLine(at(c, s, 0.55f, -0.55f), at(c, s, 0.55f, 0.15f), col, th);
+            break;
+        case UiIcon::Rows:
+            for (int i = -1; i <= 1; ++i)
+                dl->AddLine(at(c, s, -0.75f, i * 0.5f), at(c, s, 0.75f, i * 0.5f), col, th);
+            break;
+        case UiIcon::Target:
+            // A ring, a centre dot and four ticks: centre on price.
+            dl->AddCircle(c, s * 0.62f, col, 20, th);
+            dl->AddCircleFilled(c, std::max(1.2f, s * 0.16f), col, 8);
+            dl->AddLine(at(c, s, 0.0f, -1.0f), at(c, s, 0.0f, -0.70f), col, th);
+            dl->AddLine(at(c, s, 0.0f, 1.0f), at(c, s, 0.0f, 0.70f), col, th);
+            dl->AddLine(at(c, s, -1.0f, 0.0f), at(c, s, -0.70f, 0.0f), col, th);
+            dl->AddLine(at(c, s, 1.0f, 0.0f), at(c, s, 0.70f, 0.0f), col, th);
+            break;
+        case UiIcon::Grid:
+            for (int r = 0; r < 2; ++r) for (int q = 0; q < 2; ++q)
+                dl->AddRectFilled(at(c, s, -0.8f + q * 0.95f, -0.8f + r * 0.95f), at(c, s, -0.15f + q * 0.95f, -0.15f + r * 0.95f), col, s * 0.12f);
+            break;
+        case UiIcon::ChevronUp:
+            dl->AddLine(at(c, s, -0.60f, 0.25f), at(c, s, 0.0f, -0.35f), col, th);
+            dl->AddLine(at(c, s, 0.0f, -0.35f), at(c, s, 0.60f, 0.25f), col, th);
+            break;
         case UiIcon::ChevronDown:
             dl->AddLine(at(c, s, -0.60f, -0.25f), at(c, s, 0.0f, 0.35f), col, th);
             dl->AddLine(at(c, s, 0.0f, 0.35f), at(c, s, 0.60f, -0.25f), col, th);

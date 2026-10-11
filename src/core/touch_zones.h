@@ -1,7 +1,7 @@
 #pragma once
 // The strongest standing zones of the scenario map near the live price, for touch-odds labels.
 // Mass is the standing fuel within 0.5% (log) of a level, the same window the registered
-// long-range study used. The map itself showed no
+// long-range study used (hub outputs/heatmap-longrange-20260929). The map itself showed no
 // predictive edge there; these labels only attach calibrated touch odds to the zones people look at.
 #include <algorithm>
 #include <cmath>

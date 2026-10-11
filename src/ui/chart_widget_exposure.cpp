@@ -2,6 +2,7 @@
 #include "ui/chart_widget.h"
 #include "replayer/replay_manager.h"
 #include "core/display_time_zone.h"
+#include "ui/touch_odds_overlay.h"
 #include <emscripten.h>
 #include <cctype>
 #include <cstdio>
@@ -174,7 +175,8 @@ void ChartWidget::render_exposure_v2_settings() {
 }
 void ChartWidget::render_exposure_v2(int64_t clock) {
     if (!exposure_enabled_ || rt_mode_ || chart_type_!=ChartType::Candles) return;
-    const float note_y=ctx_.replay_mgr().is_active()?56.f:32.f;
+    // Below the LIVE/REPLAY chip (plot y 30 to 52) and, when shown, the touch-odds cascade chip (58 to 80).
+    const float note_y=touch_odds_enabled_&&touch_odds_overlay::chip_visible(pair_,ctx_.replay_mgr().is_active())?86.f:58.f;
     exposure_clock_=clock;
     exposure::Visibility visibility;
     size_t drawn=0;

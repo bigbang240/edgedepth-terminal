@@ -44,8 +44,8 @@ namespace Theme {
     enum class Accent : uint8_t { Teal, Indigo, Amber, Mono };
     // Saved as ints in edgedepth.appearance.v2: append new values, never reorder.
     enum class CandleConvention : uint8_t { TealMag, Classic, Muted, BlueWhite, Custom, BlueOrange };
-    // Dark chrome presets (surfaces, hairlines, text). Market colors and the
-    // accent stay separate choices. Values live in theme.cpp kChrome.
+    // Dark chrome presets (surfaces, controls, hairlines, text). Market colors
+    // and the accent stay separate choices. Values live in theme.cpp kChrome.
     enum class Chrome : uint8_t { EdgeDepth, Graphite, Midnight, HighContrast };
 
     namespace Tokens {
@@ -53,14 +53,22 @@ namespace Theme {
         // bg-0 app background / chart canvas · bg-1 bars + panel chrome ·
         // Near-black planes; controls have no idle tile. Hover and focus
         // reveal the hit area, while a rule and text identify selection.
-        // Surfaces, hairlines and text are runtime-mutable: these initial
-        // values are the EdgeDepth chrome preset (set_chrome).
+        // Surfaces, controls, hairlines and text are runtime-mutable: these
+        // initial values are the EdgeDepth chrome preset (set_chrome).
         inline ImVec4 BASE   = from_hex(0x050505);  // bg-0
         inline ImVec4 PANEL  = from_hex(0x080808);  // bg-1
         inline ImVec4 ELEV   = from_hex(0x0d0d0d);  // bg-2
         inline ImVec4 INPUT  = from_hex(0x0b0b0b);  // editable fields
         inline ImVec4 HOVER  = from_hex(0x141414);  // bg-2
         inline ImVec4 ACTIVE = from_hex(0x1b1b1b);  // bg-2 (accent marks "on")
+
+        // ── Controls (design v3) - soft filled buttons, segmented tracks, cards ─
+        inline ImVec4 CONTROL        = from_hex(0x171717);  // soft button rest
+        inline ImVec4 CONTROL_HOVER  = from_hex(0x202020);
+        inline ImVec4 CONTROL_ACTIVE = from_hex(0x2a2a2a);
+        inline ImVec4 TRACK          = from_hex(0x101010);  // segmented control track
+        inline ImVec4 CARD           = from_hex(0x0c0c0c);  // grouped content surface
+        inline ImVec4 MENU           = from_hex(0x0e0e0e);  // floating menus (begin_menu)
 
         // ── Hairlines - line-1 borders/dividers, line-2 control borders ──────
         inline ImVec4 BD1  = from_hex(0x1c1c1c);          // line-1 - the only separation
@@ -86,6 +94,8 @@ namespace Theme {
         inline ImVec4 BRAND_LINE = from_hex(0xe7e9ed, 0.55f);
         inline ImVec4 BRAND_TX   = from_hex(0xffffff);         // accent textTint (on-state text)
         inline constexpr ImVec4 WARN = from_hex(0xf0b350);     // funding, big prints, alerts
+        inline constexpr ImVec4 ACTIVITY_TRADES = from_hex(0x87b9e5);
+        inline constexpr ImVec4 ACTIVITY_ACTIVE = from_hex(0x4ddbac, 0.11f);
         inline constexpr ImVec4 WARN_SOFT = from_hex(0xf0b350, 0.12f);  // replay banner, high-regime chip fill
         // dark ink for text on solid BRAND fills (play orb, price chip, pills)
         inline constexpr ImVec4 BRAND_INK = from_hex(0x111111);
@@ -98,6 +108,8 @@ namespace Theme {
         inline constexpr ImVec4 LOGO    = from_hex(0x4ddbac);
         inline constexpr ImVec4 LOGO_HOVER = from_hex(0x78e7c4);  // marketing mint hover tint
         inline constexpr ImVec4 LOGO_TX = from_hex(0x4ddbac);
+        // Data inspection has a fixed mint cursor, distinct from mutable chrome.
+        inline constexpr ImVec4 INSPECT = LOGO;
         // resting-book blue (DOM v2): pending limit-order depth, side-agnostic. The
         // one neutral data hue - teal/rose stays reserved for EXECUTED flow. (Confirm
         // this hue or remap to a brand blue before shipping - dom.SPEC.md §8.)
@@ -118,12 +130,14 @@ namespace Theme {
     }
 
     // ── Radii ────────────────────────────────────────────────────────────────
-    // Chrome rules: docked panels are SQUARE with 1px line-1 borders only -
-    // Floating menus, inputs and badges also use square corners.
+    // Design v3 (James 2026-10-10: "I really hate those rectangle/square
+    // buttons"; supersedes the 2026-09-13 all-square rule): docked panels stay
+    // SQUARE with 1px line-1 borders; controls, cards and floating chrome are
+    // rounded.
     namespace Radius {
-        inline constexpr float R1 = 0.0f;   // small chips / table chips
-        inline constexpr float R2 = 0.0f;   // buttons, inputs, frames
-        inline constexpr float R3 = 0.0f;   // floating panels / popups / menus
+        inline constexpr float R1 = 4.0f;   // chips, badges, small controls
+        inline constexpr float R2 = 6.0f;   // buttons, inputs, segmented controls
+        inline constexpr float R3 = 10.0f;  // cards, popovers, menus, dialogs
     }
 
     // ── Layout metrics (px, logical) - theme-tokens.json `density` ──────────
@@ -162,12 +176,13 @@ namespace Theme {
     void render_appearance_controls();
     void set_accent(Accent a);                       // mutates BRAND* tokens
     void set_candle_convention(CandleConvention c);  // mutates UP*/DOWN* tokens
-    void set_chrome(Chrome c);                       // mutates surface/hairline/text tokens
+    void set_chrome(Chrome c);                       // mutates surface/control/hairline/text tokens
 
     // ── Fonts ────────────────────────────────────────────────────────────────
     // Inter = chrome/labels/headings. Roboto Mono = ALL numerics
     // (naturally fixed-advance → tabular alignment for free).
     namespace Fonts {
+        ImFont* ui_sm();        // Inter Regular 15, secondary UI text
         ImFont* ui();           // Inter Regular 13 - default chrome text
         ImFont* ui_semibold();  // Inter SemiBold 13 - emphasis, symbol names
         ImFont* heading();      // Inter SemiBold 17 - panel/modal headings
@@ -187,8 +202,40 @@ namespace Theme {
     // Shared transient surfaces and selection controls. Popup padding is latched
     // by BeginPopup, so callers keep the normal ImGui::EndPopup pairing.
     bool begin_popup(const char* id, ImGuiWindowFlags flags = 0);
+    // A toggle chip: rounded, filled while selected (was an underlined text button).
     bool choice_button(const char* label, bool selected, ImVec2 size = ImVec2(0, 0));
     void section_label(const char* label);
+
+    // ── Controls (design v3) ─────────────────────────────────────────────────
+    // A font at an exact logical size (ImGui 1.92 rasterizes it crisply).
+    void push_font(ImFont* font, float logical_px);
+    // Rounded buttons. Soft: the everyday action (filled). Ghost: quiet until
+    // hovered. Primary: the one main action on a surface. Upgrade: mint, upsell
+    // CTAs only. size 0 = fit the label at the current frame height; an icon
+    // leads the label, or trails it with trailing_icon.
+    enum class ButtonKind : uint8_t { Soft, Ghost, Primary, Upgrade };
+    bool button(const char* label, ButtonKind kind = ButtonKind::Soft, ImVec2 size = ImVec2(0, 0),
+                drawing::UiIcon icon = drawing::UiIcon(255), bool trailing_icon = false);
+    // A round, icon-only ghost button; active keeps it filled (a toggle that is on).
+    bool icon_button(const char* id, drawing::UiIcon icon, const char* tooltip = nullptr,
+                     float size = 26.0f, bool active = false);
+    // One of n options on a rounded track, the selected one raised. Returns the
+    // clicked index, else selected. height 0 = the frame height.
+    int segmented(const char* id, const char* const* labels, int n, int selected, float height = 0.0f);
+    // Widths, for right-aligning controls before drawing them.
+    float button_width(const char* label, float height = 0.0f, bool with_icon = false);
+    float segmented_width(const char* const* labels, int n, float height = 0.0f);
+    // An inline rounded chip (status, qualifier); advances the cursor like text.
+    void chip(const char* text, const ImVec4& fg, const ImVec4& bg);
+    // A signed 24h change as a slim pill (watchlist, symbol picker; James 2026-10-11: the mono pills read "thick"
+    // and wide for the number): Inter at px, 7 px of padding, px * 1.5 tall, a faint signed fill. Right-aligned at
+    // right_x, centred on cy; at least as wide as "+00.00%" so a column of pills lines up. Returns its width.
+    float change_pill(ImDrawList* dl, float right_x, float cy, double pct, float px);
+    float change_pill_width(float px);   // the column's width (that of "+00.00%")
+    // A small circled "i" whose hover shows text; replaces "?" buttons.
+    void info_hint(const char* text);
+    // A hairline across width at the cursor, with vertical room around it.
+    void hairline(float width, float space = 10.0f);
 
     // Floating action menus (chart right-click, + widget, chart tools, Layers,
     // Chart view, timeframes): one look everywhere. begin_menu pushes the
@@ -213,18 +260,42 @@ namespace Theme {
                      bool keep_open = false, float trailing_w = 0.0f);
     bool menu_item(drawing::UiIcon icon, const char* label,
                    const char* hint = nullptr, bool enabled = true, bool keep_open = false);
-    // Checklist row for multi-select menus (Layers): a check box in the icon
+    // Checklist row for multi-select menus: a rounded check box in the icon
     // slot, stays open on click. Locked = a lock and a PRO tag; the caller
-    // routes the click to the upsell.
-    bool menu_toggle(const char* label, bool on, bool locked = false, const char* hint = nullptr);
+    // routes the click to the upsell. trailing_w reserves room at the right
+    // for a control the caller submits over the row afterwards (as menu_row).
+    // Inside a row's settings (begin_menu_detail / an open group) it draws as
+    // a setting instead: a shorter row with a switch at the right.
+    bool menu_toggle(const char* label, bool on, bool locked = false, const char* hint = nullptr,
+                     float trailing_w = 0.0f);
+    // A layer or indicator row (Layers, Indicators): menu_toggle with the tag
+    // ("admin", "pilot", "not on HL") drawn as a quiet chip at the right.
+    bool menu_layer(const char* label, bool on, bool locked = false, const char* tag = nullptr);
     // An action the viewer cannot take yet, under its own name: lock, label,
     // and the reason on a second line. pro adds the mint PRO tag.
     bool menu_item_locked(const char* label, const char* reason, bool pro, bool enabled = true);
     // Collapsible settings inside a menu. true = open: the content that
     // follows is indented to the label column and wraps at a fixed width;
-    // close it with end_menu_group. Open state lives in ImGui storage.
+    // close it with end_menu_group. Open state lives in ImGui storage. Inside
+    // a row's settings it is a quiet "Options >" disclosure.
     bool begin_menu_group(const char* label);
     void end_menu_group();
+    // A layer's settings while it is on, always open: under its row, the
+    // labels on the row's label column, joined to the row's check box by a
+    // guide line. Close with end_menu_detail. Keep it to the controls a viewer
+    // reaches for; longer settings go in a collapsed begin_menu_group inside
+    // it. menu_toggle, menu_item and menu_note draw as settings in here.
+    void begin_menu_detail();
+    void end_menu_detail();
+    // One of n choices as a segmented control across the content width (the
+    // selected one raised). Returns the clicked index, or selected when
+    // nothing was clicked.
+    int menu_choice(const char* id, const char* const* labels, int n, int selected);
+    // A setting with a few values: its label, a compact segmented control at the right.
+    int menu_choice_row(const char* label, const char* id, const char* const* labels, int n, int selected);
+    // A setting with a number: its label, a compact rounded field at the right. Returns true when edited.
+    bool menu_field(const char* label, float* value, const char* format = "%.0f", float step = 0.0f,
+                    float field_w = 96.0f);
     void menu_note(const char* text);        // muted wrapped explanation
     void menu_section(const char* label);
     void menu_separator();
@@ -232,12 +303,23 @@ namespace Theme {
     ImVec2 pro_tag_size();
     void draw_pro_tag(ImDrawList* dl, ImVec2 top_left);
 
+    // ── Chart chips and loading ─────────────────────────────────────────────
+    // Chips drawn over a chart (OHLC readout, status, layer keys) register their rectangle for the frame; the chart's
+    // crosshair passes under them instead of running through their text. A chart resets the list as it starts.
+    void chart_chips_reset();
+    void chart_chip(ImVec2 a, ImVec2 b);
+    bool chart_chip_covers(ImVec2 p, float margin = 2.0f);
+    // A soft drop shadow outside a floating surface (menus, undocked panels), drawn into dl with a full-screen clip.
+    void float_shadow(ImDrawList* dl, ImVec2 a, ImVec2 b, float rounding);
+    // The one loading mark (replay scrim, real-time chart, empty chart): a mint arc turning over a faint ring.
+    void spinner(ImDrawList* dl, ImVec2 center, float radius, float thickness = 2.5f);
+
     // ── Tooltips ─────────────────────────────────────────────────────────────
     // The global WindowPadding is (0,0) (panels manage their own gutters) and
     // ImGui tooltip windows inherit it, so raw ImGui::SetTooltip/BeginTooltip
     // renders text flush against the border (looks clipped). All tooltips
     // route through these, which push floating-chrome padding + radius first.
-    void begin_tooltip();
+    void begin_tooltip(bool replace_previous = false);
     void end_tooltip();
     void tooltip(const char* fmt, ...) IM_FMTARGS(1);  // SetTooltip replacement
 

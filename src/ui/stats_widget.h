@@ -1,22 +1,9 @@
 #pragma once
-// ═══════════════════════════════════════════════════════════════════════════════
-// stats_widget.h - Stats panel v2 (premium microstructure surface).
-//
-// Dockable panel (~360 wide) that replaces the old floating Stats widget. Header +
-// price, then three collapsible sections (order flow / positioning / liquidations
-// + risk), a signal chip, and a settings disclosure row. Live data comes from the
-// thin Stat stream (mark, funding, buys/sells, open interest, liquidations); the
-// premium microstructure rows (VPIN, CVD, orderbook imbalance, smart money, OI
-// velocity, nearest wall, cascade, contagion, signal) render as PLACEHOLDERS
-// pending the backend analytics feed (roadmap O2 / analytics.proto) - no
-// fabricated bindings. Pro-gated via Entitlements::is_pro(): the free tier redacts
-// Pro rows and funnels the UNLOCK affordance into ui::UpsellModal.
-//
-// Style: colors ONLY via Theme::Tokens; numerals in JetBrains Mono (Fonts::mono*),
-// chrome/labels in Hanken (Fonts::ui/label). Design bundle:
-// watchlist_stats_DOM_redesign/edgedepth-stats-panel-v2/stats-panel.SPEC.md
-// ═══════════════════════════════════════════════════════════════════════════════
-#include "core/stat_freshness.h"
+// Live market summary with explicit windows and missing-data states.
+#include "core/stats_snapshot.h"
+#include "core/market_context.h"
+#include "core/stats_ratio_history.h"
+#include "core/stats_oi_history.h"
 #include "ui/widget.h"
 #include "types/types.h"
 #include "stream_handler.h"
@@ -25,6 +12,8 @@
 #include "rendering/theme.h"
 #include <string>
 #include <cstdint>
+
+struct PositioningState;
 
 class StatsWidget : public Widget {
 public:
@@ -40,51 +29,69 @@ public:
         if (f.resolved) fmt_ = f;
     }
     void render() override;
-    void update() override;
+    void update() override {}
     WidgetType type() const override { return WidgetType::Stats; }
     [[nodiscard]] const Terminal::Pair& pair() const { return pair_; }
     const char* title() const override { return title_.c_str(); }
     void handle_stat(const Terminal::Stat& stat);
 
 private:
-    // Collapsible sections - order flow leads (premium value first).
-    enum Section : uint8_t { SEC_ORDER_FLOW = 0, SEC_POSITIONING, SEC_LIQ_RISK, SEC_COUNT };
+    // Persisted section IDs stay stable when the visible order changes.
+    enum Section : uint8_t { SEC_ORDER_FLOW = 0, SEC_POSITIONING, SEC_LIQ_RISK, SEC_CONTEXT, SEC_PRICE_RATIO, SEC_OVERVIEW, SEC_COUNT };
 
     Terminal::Pair    pair_;
     std::string       title_;
     StreamKey         stream_key_;
+    StreamKey         hour_stream_key_;
+    StreamKey         volume_stream_key_;
     const AppContext& ctx_;
     PriceFormatter    fmt_;
-    Terminal::Stat    current_stat_{};
+    StatsSnapshot snapshot_;
+    MinuteVolumeSnapshot volume_snapshot_;
+    StatsSnapshot hour_snapshot_{StatsSnapshot::hour_ms};
     StatFreshness::Field stat_field(int64_t clock_ms, int64_t stale_after_ms) const;
-    Terminal::Stat    prev_stat_{};
-    double            tps_ = 0.0;          // trades/sec (best-effort from stat deltas)
-    bool              have_prev_ = false;
-    bool              positioning_subscribed_ = false;  // live PositioningState (lazy, self-healing)
+    const PositioningState* positioning() const;
 
     // Session UI state
-    bool section_open_[SEC_COUNT] = { true, true, true };
-    bool settings_open_ = false;
+    bool more_details_ = false;
+    bool section_open_[SEC_COUNT] = { false, false, false, false, false, true };
+    MarketContext market_context_;
+    int context_id_ = 0;
+    int64_t context_requested_ms_ = 0;
+    bool context_locked_ = false;
+    void update_market_context(bool enabled);
+    void render_market_context();
+    StatsRatioHistory ratio_history_;
+    int64_t ratio_requested_ms_ = 0;
+    bool ratio_loaded_ = false;
+    bool ratio_inverse_ = false;
+    bool ratio_archive_ = false;
+    int ratio_hours_ = 3;
+    int ratio_days_ = 1;
+    void update_ratio_history(bool enabled);
+    void render_price_ratio();
+    StatsOIHistory oi_history_;
+    int64_t history_requested_ms_ = 0;
+    int history_attempts_ = 0;
 
-    // Rendering (v2) - see stats_widget.cpp
-    void render_status_strip(bool live);   // dot . STATS.SYM . PRO/FREE
-    void render_replay_banner();           // replay only: AS OF ...
-    void render_header_price();            // mark (live) + 24h/H-L/VOL (placeholder)
-    bool render_section_header(Section s, const char* name, bool pro_section);
-    void render_settings_row();            // pinned bottom disclosure
+    // Fully expanded readings, with individually collapsible sections.
+    void render_status_strip(bool live);   // source activity, help and actual tier
+    void render_header_price();            // live last/mark, 24h change and volume
+    bool render_section_header(Section s, const char* name, bool pro_section, const char* scope);
 
     // ── Section bodies (step 2) ─────────────────────────────────────────────
-    void render_order_flow();
-    void feed_note();
-    void render_positioning();
-    void render_liq_risk();
-    void section_subhead(const char* txt);   // e.g. "SMART MONEY"
+    void render_order_flow(bool overview = false);
+    void render_icebergs();
+    void note(const char* text);
+    void render_positioning(bool overview = false);
+    void render_liq_risk(bool overview = false);
 
     // One metric row: label (left) + value (right) + optional chip / detail /
     // meter. Pro rows are redacted (label kept crisp, value/meter replaced with a
-    // muted bar + lock) for free-tier viewers. Numerals JBM mono; colors Tokens.
+    // muted bar + lock) for free-tier viewers. Numerals use mono; colors use Tokens.
     struct Row {
         const char* label      = "";
+        bool        prominent  = false;
         bool        pro        = false;
         const char* value      = "--";
         ImVec4      value_col  = Theme::Tokens::TX1;
@@ -96,6 +103,9 @@ private:
         ImVec4      meter_c2   = Theme::Tokens::DOWN;
         const char* chip       = nullptr;  // regime chip drawn before the value
         int         chip_level = 0;        // amber escalation 0..3
+        const char* help       = nullptr;
     };
     void metric_row(const Row& r);
+    void summary_pair(const Row& left, const Row& right, bool cards = false);
+    void split_bar(float share, const char* left, const char* right);
 };

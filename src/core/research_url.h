@@ -107,6 +107,17 @@ inline std::string moment_url(const std::string& symbol_raw, int64_t t_ms,
     return url;
 }
 
+// Read an exact minute's lead-up on the existing web comparison surface.
+// This carries no query or run flag; access and source checks remain web-owned.
+inline std::string leadup_url(const std::string& symbol_raw, int64_t t_ms,
+                              const std::string& mfields = std::string(),
+                              const char* base = "https://edgedepth.com") {
+    std::string url = std::string(base) + "/research/symbols/" + normalize_symbol(symbol_raw) +
+        "?at=" + iso_utc(floor_minute_ms(t_ms)) + "&leadup=30&entry=terminal";
+    if (!mfields.empty()) url += "&mfields=" + mfields;
+    return url + "#lead-up";
+}
+
 // The live variant: the newest closed minute, not a pointed one.
 inline std::string moment_live_url(const std::string& symbol_raw,
                                    const std::string& mfields = std::string(),

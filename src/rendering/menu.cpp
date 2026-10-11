@@ -6,6 +6,8 @@
 #include "ui/orderbook_widget.h"
 #include "ui/dom_widget.h"
 #include "ui/stats_widget.h"
+#include "ui/data_widget.h"
+#include "imgui_internal.h"
 #include "ui/debug_widget.h"
 #include "ui/positions_panel.h"
 #include "ui/replay_library_widget.h"
@@ -18,6 +20,7 @@
 #include "core/symbol_metadata.h"
 #include "core/ticker_manager.h"
 #include "core/logo_manager.h"
+#include "ui/drawing/drawing_icons.h"
 #include "core/scanner_manager.h"
 #include "core/stream_presence.h"
 #include "core/url_router.h"
@@ -25,6 +28,8 @@
 #include "replayer/replay_manager.h"
 #include "ui/upsell_modal.h"
 #include <cctype>
+#include <cfloat>
+#include <cmath>
 #include <algorithm>
 #include <cstring>
 #include <cstdio>
@@ -157,20 +162,28 @@ void render_symbol_picker_popup(
             load_persistence();
             g_symbol_picker.persistence_loaded = true;
         }
-        // Per-category active-symbol counts, parallel to cached_categories.
-        {
+        g_symbol_picker.keyboard_sel = -1;
+    }
+    // Per-category active-symbol counts on the selected venue, parallel to cached_categories
+    // (the list shows one venue, so a count across venues would not match it). Recounted on
+    // open and when the venue changes.
+    {
+        static std::string counted_for;
+        static bool counted_open = false;
+        if (g_symbol_picker.open && (!counted_open || counted_for != g_symbol_picker.selected_exchange)) {
             auto& cc = g_symbol_picker.cached_category_counts;
             cc.assign(g_symbol_picker.cached_categories.size(), 0);
             for (const auto& [k, m] : SymbolRegistry::instance().all()) {
-                if (!m.is_active) continue;
+                if (!m.is_active || m.exchange != g_symbol_picker.selected_exchange) continue;
                 for (const auto& c : m.categories) {
                     for (size_t ci = 0; ci < g_symbol_picker.cached_categories.size(); ++ci) {
                         if (g_symbol_picker.cached_categories[ci] == c) { cc[ci]++; break; }
                     }
                 }
             }
+            counted_for = g_symbol_picker.selected_exchange;
         }
-        g_symbol_picker.keyboard_sel = -1;
+        counted_open = g_symbol_picker.open;
     }
     if (!g_symbol_picker.open && was_open) {
         // Picker just closed - unsubscribe from scanner only
@@ -192,18 +205,22 @@ void render_symbol_picker_popup(
     auto& reg = SymbolRegistry::instance();
     if (!reg.is_loaded()) return;
 
-    // ── 1i modal chrome: floating card, custom header/search/browse rows ──
+    // ── Design v3 (James 2026-10-11: "symbol picker redesigned / repolished") ──
+    // A rounded card: title, venue segmented control with logos, Esc keycap and close;
+    // a rounded search field with a Ctrl K keycap; recent pills with logos; category
+    // filter pills; a quiet sortable header; rows with logos, a change pill, volume and
+    // a type chip (Score only when some row has one); keycap hints in the footer.
     using namespace Theme;
     ImVec2 center = ImGui::GetMainViewport()->GetCenter();
     ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
     const ImVec2 viewport_size = ImGui::GetMainViewport()->Size;
-    ImGui::SetNextWindowSize(ImVec2(std::min(1000.0f, viewport_size.x - 32.0f),
-                                  std::min(640.0f, viewport_size.y - 32.0f)), ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize(ImVec2(std::min(1040.0f, viewport_size.x - 32.0f),
+                                  std::min(700.0f, viewport_size.y - 32.0f)), ImGuiCond_Appearing);
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, Radius::R3);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, Radius::R3 + 2.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
-    ImGui::PushStyleColor(ImGuiCol_PopupBg, Tokens::PANEL);
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, Tokens::ELEV);
     ImGui::PushStyleColor(ImGuiCol_Border, Tokens::BD2);
 
     ImGui::OpenPopup("Find a symbol");
@@ -223,7 +240,30 @@ void render_symbol_picker_popup(
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 w0 = ImGui::GetWindowPos();
     const float  W  = ImGui::GetWindowWidth();
-    const float  PADX = 20.0f;
+    const float  K  = ImGui::GetFontSize() / 18.4f;   // the viewer's text size
+    const float  PADX = 22.0f * K;
+    ImFont* ui_f = Fonts::ui();
+    ImFont* semi_f = Fonts::ui_semibold();
+    ImFont* mono_f = Fonts::mono();
+    auto text_w = [](ImFont* f, float px, const char* t) { return f->CalcTextSizeA(px, FLT_MAX, 0, t).x; };
+    auto put = [&](ImDrawList* d, ImFont* f, float px, ImVec2 at, const ImVec4& c, const char* t, const char* e = nullptr) {
+        d->AddText(f, px, at, u32(c), t, e);
+    };
+    // A keycap: rounded, hairlined, quiet text. Returns its width.
+    // An empty key draws up/down chevrons (the UI font has no arrow glyphs).
+    auto keycap_w = [&](const char* k) { return k[0] ? text_w(ui_f, 12.0f * K, k) + 12.0f * K : 30.0f * K; };
+    auto keycap = [&](ImDrawList* d, ImVec2 p, const char* k) {
+        const float px = 12.0f * K, h = 20.0f * K;
+        const float w = keycap_w(k);
+        d->AddRectFilled(p, ImVec2(p.x + w, p.y + h), u32(Tokens::CONTROL), Radius::R1);
+        d->AddRect(p, ImVec2(p.x + w, p.y + h), u32(Tokens::BD2), Radius::R1);
+        if (k[0]) put(d, ui_f, px, ImVec2(p.x + 6.0f * K, p.y + (h - px * 1.17f) * 0.5f), Tokens::TX2, k);
+        else {
+            drawing::draw_ui_icon(d, drawing::UiIcon::ChevronUp, ImVec2(p.x + w * 0.33f, p.y + h * 0.5f), 3.2f * K, u32(Tokens::TX2), 1.3f);
+            drawing::draw_ui_icon(d, drawing::UiIcon::ChevronDown, ImVec2(p.x + w * 0.67f, p.y + h * 0.5f), 3.2f * K, u32(Tokens::TX2), 1.3f);
+        }
+        return w;
+    };
 
     // Open a symbol: record it as recent, then add the pending widget (or, in
     // replace-mode, reload the terminal at that symbol). Shared by the row click,
@@ -254,352 +294,188 @@ void render_symbol_picker_popup(
             // reload; a bare location.href would drop a self-hosted feed here.
             url_navigate(build_terminal_path(m.exchange, m.symbol));
         } else {
-            const size_t before = widgets.size();
-            switch (g_symbol_picker.pending) {
-                case SymbolPickerState::PendingWidget::Orderbook:
-                    widgets.push_back(std::make_unique<OrderbookWidget>(pair, ctx, fmt, 25)); break;
-                case SymbolPickerState::PendingWidget::DOM:
-                    widgets.push_back(std::make_unique<DOMWidget>(pair, ctx, tick, 25)); break;
-                case SymbolPickerState::PendingWidget::Trades:
-                    widgets.push_back(std::make_unique<TradesWidget>(pair, ctx, fmt)); break;
-                case SymbolPickerState::PendingWidget::Charts:
-                    // Same secondary-chart rule as resolve_widget_add_request:
-                    // a pair that already has a chart gets a second identity
-                    // (live only) instead of a duplicate ImGui window.
-                    widgets.push_back(std::make_unique<ChartWidget>(pair, ctx, tick,
-                        ctx.replay_mgr().is_active() ? 1 : next_chart_instance(widgets, pair)));
-                    break;
-                case SymbolPickerState::PendingWidget::Stats:
-                    widgets.push_back(std::make_unique<StatsWidget>(pair, ctx, fmt)); break;
-                case SymbolPickerState::PendingWidget::Debug:
-                    widgets.push_back(std::make_unique<DebugWidget>(pair, ctx)); break;
-                default: break;
-            }
-            if (widgets.size() > before) widgets.back()->open_centered = true;
+            g_widget_add_request = {g_symbol_picker.pending, pair, fmt, tick, true};
         }
         g_symbol_picker.open = false;
         g_symbol_picker.replace_mode = false;
         ImGui::CloseCurrentPopup();
     };
 
-    // ── header: title · listed count · ESC chip · close ──────────────
-    const float head_h = 44.0f;
+    // ── header: title, venue segmented control (logos), Esc keycap, close ─
+    const float head_h = 64.0f * K;
     {
-        // Title in the modal heading face (Inter SemiBold), not the mono
-        // numerals face it wore before; the listed count stays mono.
-        ImGui::PushFont(Fonts::heading());
-        dl->AddText(ImVec2(w0.x + PADX, w0.y + (head_h - ImGui::GetFontSize()) * 0.5f),
-                    u32(Tokens::TX1), "Find a symbol");
-        const float tw = ImGui::CalcTextSize("Find a symbol").x;
-        ImGui::PopFont();
-        char lc[64];
-        snprintf(lc, sizeof(lc), "%d listed \xC2\xB7", g_symbol_picker.exchange_total);
-        ImGui::PushFont(Fonts::ui());
-        const float lcw = ImGui::CalcTextSize(lc).x;
-        dl->AddText(ImVec2(w0.x + PADX + tw + 14.0f, w0.y + (head_h - ImGui::GetFontSize()) * 0.5f),
-                    u32(Tokens::TX3), lc);
-        ImGui::PopFont();
-
-        // ── venue toggle: BINANCE | HYPERLIQUID - filters the list by exchange ──
-        {
-            ImGui::PushFont(Fonts::ui());
-            const float chip_h = 20.0f;
-            const float chip_y = w0.y + (head_h - chip_h) * 0.5f;
-            float chip_x = w0.x + PADX + tw + 14.0f + lcw + 12.0f;
-            struct Venue { const char* id; const char* label; };
-            const Venue venues[3] = { {"binancef", "Binance"}, {"hl", "Hyperliquid"}, {"bybit", "Bybit"} };
-            const float ven_logo = 14.0f;
-            for (int i = 0; i < 3; ++i) {
-                const bool active = (g_symbol_picker.selected_exchange == venues[i].id);
-                // A self-hosted feed without this venue would open empty panels;
-                // keep the chip visible but disabled so the boundary is explicit.
-                const bool usable = active || Entitlements::venue_available(
-                    venues[i].id, TickerManager::instance().has_venue(venues[i].id));
-                const ImVec2 ts = ImGui::CalcTextSize(venues[i].label);
-                // Exchange mark left of the label; only insets once its texture is
-                // ready so a missing logo never leaves a permanent gap.
-                ImTextureID ven_tex = LogoManager::instance().exchange(venues[i].id);
-                const float logo_inset = ven_tex ? (ven_logo + 5.0f) : 0.0f;
-                const float cw = ts.x + 34.0f + logo_inset;
-                const ImVec2 cp(chip_x, chip_y);
-                ImGui::SetCursorScreenPos(cp);
-                ImGui::PushID(900 + i);
-                const bool clk = ImGui::InvisibleButton("##venue", ImVec2(cw, chip_h));
-                const bool hov = ImGui::IsItemHovered();
-                ImGui::PopID();
-                if (hov && usable) dl->AddRectFilled(cp, ImVec2(cp.x + cw, cp.y + chip_h), u32(Tokens::HOVER));
-                if (hov && !usable)
-                    Theme::tooltip("Hosted only: this feed does not serve %s.\nThe bundled community gateway covers Binance.",
-                                   venues[i].label);
-                const ImVec2 selection(cp.x + cw - 10.0f, cp.y + chip_h * 0.5f);
-                dl->AddCircle(selection, 4.0f, u32(active ? Tokens::TX1 : usable ? Tokens::TX3 : Tokens::TX4), 16, 1.0f);
-                if (active) dl->AddCircleFilled(selection, 2.0f, u32(Tokens::TX1), 16);
-                if (ven_tex)
-                    dl->AddImage(ven_tex, ImVec2(cp.x + 8.0f, cp.y + (chip_h - ven_logo) * 0.5f),
-                                 ImVec2(cp.x + 8.0f + ven_logo, cp.y + (chip_h + ven_logo) * 0.5f),
-                                 ImVec2(0, 0), ImVec2(1, 1), usable ? IM_COL32_WHITE : IM_COL32(255, 255, 255, 90));
-                dl->AddText(ImVec2(cp.x + 8.0f + logo_inset, cp.y + (chip_h - ts.y) * 0.5f),
-                    u32(active ? Tokens::BRAND_TX : usable ? Tokens::TX2 : Tokens::TX4), venues[i].label);
-                if (clk && !active && usable) {
-                    g_symbol_picker.selected_exchange = venues[i].id;
-                    g_symbol_picker.selected_category = -1; // categories are per-venue
-                    g_symbol_picker.invalidate_cache();
-                }
-                chip_x += cw + 6.0f;
+        const float title_px = 19.0f * K;
+        put(dl, semi_f, title_px, ImVec2(w0.x + PADX, w0.y + (head_h - title_px * 1.17f) * 0.5f), Tokens::TX1, "Search markets");
+        const float tw = text_w(semi_f, title_px, "Search markets");
+        struct Venue { const char* id; const char* label; };
+        const Venue venues[3] = { {"binancef", "Binance"}, {"hl", "Hyperliquid"}, {"bybit", "Bybit"} };
+        const float seg_h = 34.0f * K, logo = 16.0f * K, inset = 3.0f * K, label_px = 14.0f * K;
+        float widths[3], total = inset * 2;
+        for (int i = 0; i < 3; ++i) { widths[i] = 14.0f * K + logo + 8.0f * K + text_w(ui_f, label_px, venues[i].label) + 14.0f * K; total += widths[i]; }
+        const ImVec2 sp(w0.x + PADX + tw + 24.0f * K, w0.y + (head_h - seg_h) * 0.5f);
+        dl->AddRectFilled(sp, ImVec2(sp.x + total, sp.y + seg_h), u32(Tokens::TRACK), Radius::R2 + 2.0f);
+        dl->AddRect(sp, ImVec2(sp.x + total, sp.y + seg_h), u32(Tokens::BD1), Radius::R2 + 2.0f);
+        float x = sp.x + inset;
+        for (int i = 0; i < 3; ++i) {
+            const bool active = g_symbol_picker.selected_exchange == venues[i].id;
+            // A self-hosted feed without this venue would open empty panels;
+            // keep the segment visible but disabled so the boundary is explicit.
+            const bool usable = active || Entitlements::venue_available(
+                venues[i].id, TickerManager::instance().has_venue(venues[i].id));
+            ImGui::SetCursorScreenPos(ImVec2(x, sp.y));
+            ImGui::PushID(900 + i);
+            const bool clk = ImGui::InvisibleButton("##venue", ImVec2(widths[i], seg_h));
+            const bool hov = ImGui::IsItemHovered();
+            ImGui::PopID();
+            if (active || (hov && usable))
+                dl->AddRectFilled(ImVec2(x, sp.y + inset), ImVec2(x + widths[i], sp.y + seg_h - inset),
+                                  u32(active ? Tokens::CONTROL_ACTIVE : Tokens::CONTROL), Radius::R2);
+            if (hov && !usable)
+                Theme::tooltip("Hosted only: this feed does not serve %s.\nThe bundled community gateway covers Binance.",
+                               venues[i].label);
+            const ImVec2 lp(x + 14.0f * K, sp.y + (seg_h - logo) * 0.5f);
+            if (usable) LogoManager::instance().draw_exchange(dl, venues[i].id, lp, logo);
+            else if (ImTextureID tex = LogoManager::instance().exchange(venues[i].id))
+                dl->AddImage(tex, lp, ImVec2(lp.x + logo, lp.y + logo), ImVec2(0, 0), ImVec2(1, 1), IM_COL32(255, 255, 255, 90));
+            put(dl, ui_f, label_px, ImVec2(x + 14.0f * K + logo + 8.0f * K, sp.y + (seg_h - label_px * 1.17f) * 0.5f),
+                active ? Tokens::TX1 : !usable ? Tokens::TX4 : hov ? Tokens::TX2 : Tokens::TX3, venues[i].label);
+            if (clk && !active && usable) {
+                g_symbol_picker.selected_exchange = venues[i].id;
+                g_symbol_picker.selected_category = -1; // categories are per-venue
+                g_symbol_picker.invalidate_cache();
             }
-            ImGui::PopFont();
+            x += widths[i];
         }
-
-        // close (X) + ESC chip, right-aligned
-        const float xs = 16.0f;
-        const ImVec2 xp(w0.x + W - PADX - xs, w0.y + (head_h - xs) * 0.5f);
-        ImGui::SetCursorScreenPos(xp);
-        const bool xclk = ImGui::InvisibleButton("##pick_close", ImVec2(xs, xs));
-        const bool xhov = ImGui::IsItemHovered();
-        const ImU32 xc = u32(xhov ? Tokens::TX1 : Tokens::TX2);
-        const float cx0 = xp.x + xs * 0.5f, cy0 = xp.y + xs * 0.5f, xr = 4.0f;
-        dl->AddLine(ImVec2(cx0 - xr, cy0 - xr), ImVec2(cx0 + xr, cy0 + xr), xc, 1.4f);
-        dl->AddLine(ImVec2(cx0 - xr, cy0 + xr), ImVec2(cx0 + xr, cy0 - xr), xc, 1.4f);
-        if (xclk) { g_symbol_picker.open = false; ImGui::CloseCurrentPopup(); }
-
-        ImGui::PushFont(Fonts::ui());
-        const char* esc = "Esc";
-        const ImVec2 es = ImGui::CalcTextSize(esc);
-        const ImVec2 ep0(xp.x - 10.0f - es.x - 12.0f, w0.y + (head_h - (es.y + 6.0f)) * 0.5f);
-        dl->AddText(ImVec2(ep0.x + 6.0f, ep0.y + 3.0f), u32(Tokens::TX2), esc);
-        ImGui::PopFont();
-
-        dl->AddLine(ImVec2(w0.x, w0.y + head_h), ImVec2(w0.x + W, w0.y + head_h), u32(Tokens::BD1));
+        const float ib = 30.0f * K;
+        ImGui::SetCursorScreenPos(ImVec2(w0.x + W - PADX - ib + 6.0f * K, w0.y + (head_h - ib) * 0.5f));
+        if (Theme::icon_button("##pick_close", drawing::UiIcon::Close, nullptr, ib)) { g_symbol_picker.open = false; ImGui::CloseCurrentPopup(); }
+        const float ew = text_w(ui_f, 12.0f * K, "Esc") + 12.0f * K;
+        keycap(dl, ImVec2(w0.x + W - PADX - ib - 8.0f * K - ew, w0.y + (head_h - 20.0f * K) * 0.5f), "Esc");
     }
 
-    // ── search row: accent magnifier · frameless input · CTRL K chip ─
-    const float srch_h = 44.0f;
+    // ── search: a rounded field, magnifier inside, Ctrl K keycap ─────────
     const float srch_y = w0.y + head_h;
+    const float srch_h = 48.0f * K;
     {
-        const ImVec2 mc(w0.x + PADX + 6.0f, srch_y + srch_h * 0.5f - 1.0f);
-        dl->AddCircle(ImVec2(mc.x - 1.5f, mc.y - 1.5f), 4.2f, u32(Tokens::BRAND), 16, 1.3f);
-        dl->AddLine(ImVec2(mc.x + 1.8f, mc.y + 1.8f), ImVec2(mc.x + 5.5f, mc.y + 5.5f),
-                    u32(Tokens::BRAND), 1.3f);
-
-        ImGui::PushFont(Fonts::ui());
-        ImGui::SetCursorScreenPos(ImVec2(w0.x + PADX + 22.0f,
-                                         srch_y + (srch_h - ImGui::GetFrameHeight()) * 0.5f));
-        ImGui::SetNextItemWidth(W - PADX * 2.0f - 22.0f - 78.0f);
-        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0, 0, 0, 0));
+        const float fx = w0.x + PADX, fw = W - PADX * 2, fh = 44.0f * K;
+        Theme::push_font(ui_f, 15.5f * K);
+        ImGui::SetCursorScreenPos(ImVec2(fx, srch_y));
+        ImGui::SetNextItemWidth(fw);
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, Tokens::CONTROL);
+        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, Tokens::CONTROL_HOVER);
+        ImGui::PushStyleColor(ImGuiCol_FrameBgActive, Tokens::CONTROL_HOVER);
+        ImGui::PushStyleColor(ImGuiCol_TextDisabled, Tokens::TX3);
+        ImGui::PushStyleColor(ImGuiCol_NavCursor, ImVec4(0, 0, 0, 0));
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(42.0f * K, (fh - ImGui::GetFontSize()) * 0.5f));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, Radius::R2 + 2.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
-        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
-        ImGui::PushStyleColor(ImGuiCol_TextDisabled, Tokens::TX2);
-        ImGui::InputTextWithHint("##sym_search", "Search symbol or category...",
+        // The search keeps the keyboard: refocus it once a chip or row click ends, and own
+        // Up/Down so ImGui's keyboard nav does not move focus off it (the list handles them).
+        if (ImGui::IsWindowAppearing() ||
+            (!ImGui::IsAnyItemActive() && ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)))
+            ImGui::SetKeyboardFocusHere();
+        ImGui::InputTextWithHint("##sym_search", "Search by symbol or category",
             g_symbol_picker.search_buf, sizeof(g_symbol_picker.search_buf));
-        ImGui::PopStyleColor();
-        ImGui::PopStyleVar();
-        ImGui::PopStyleColor();
+        const bool focused = ImGui::IsItemActive();
+        if (focused) {
+            ImGui::SetItemKeyOwner(ImGuiKey_UpArrow);
+            ImGui::SetItemKeyOwner(ImGuiKey_DownArrow);
+        }
+        const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+        ImGui::PopStyleVar(3);
+        ImGui::PopStyleColor(5);
         ImGui::PopFont();
-
-        ImGui::PushFont(Fonts::ui());
-        const char* kk = "Ctrl K";
-        const ImVec2 ks = ImGui::CalcTextSize(kk);
-        const ImVec2 kp0(w0.x + W - PADX - ks.x - 12.0f, srch_y + (srch_h - (ks.y + 6.0f)) * 0.5f);
-        dl->AddText(ImVec2(kp0.x + 6.0f, kp0.y + 3.0f), u32(Tokens::TX2), kk);
-        ImGui::PopFont();
-
-        // accent inset underline (1i) over the row hairline
-        dl->AddLine(ImVec2(w0.x, srch_y + srch_h - 1.0f), ImVec2(w0.x + W, srch_y + srch_h - 1.0f),
-                    u32(Tokens::BD1));
-        dl->AddRectFilled(ImVec2(w0.x, srch_y + srch_h - 2.0f), ImVec2(w0.x + W, srch_y + srch_h),
-                          u32(Tokens::BRAND, 0.55f));
+        dl->AddRect(a, b, u32(focused ? Tokens::BD3 : Tokens::BD1), Radius::R2 + 2.0f);
+        drawing::draw_ui_icon(dl, drawing::UiIcon::Search, ImVec2(a.x + 21.0f * K, (a.y + b.y) * 0.5f), 7.0f * K, u32(Tokens::TX2), 1.5f);
+        const float kw = text_w(ui_f, 12.0f * K, "Ctrl K") + 12.0f * K;
+        keycap(dl, ImVec2(b.x - 12.0f * K - kw, (a.y + b.y) * 0.5f - 10.0f * K), "Ctrl K");
     }
 
-    // ── RECENT row: last-opened symbols as chips (persisted) ─────────
-    const float rec_y = srch_y + srch_h;
+    // ── recent: pills with logos (persisted) ──────────────────────────────
+    const float rec_y = srch_y + srch_h + 6.0f * K;
     float rec_h = 0.0f;
+    const float label_col = 104.0f * K;   // section labels' column
     if (!g_symbol_picker.recents.empty()) {
-        rec_h = 44.0f;
-        ImGui::PushFont(Fonts::label());
-        dl->AddText(ImVec2(w0.x + PADX, rec_y + (rec_h - ImGui::GetFontSize()) * 0.5f),
-                    u32(Tokens::TX3), "RECENT");
-        ImGui::PopFont();
-        const float rch = 24.0f, rcy = rec_y + (rec_h - rch) * 0.5f, rxmax = w0.x + W - PADX;
-        float rx = w0.x + PADX + 76.0f;
+        rec_h = 44.0f * K;
+        const float lpx = 13.0f * K;
+        put(dl, ui_f, lpx, ImVec2(w0.x + PADX, rec_y + (rec_h - lpx * 1.17f) * 0.5f), Tokens::TX3, "Recent");
+        const float rch = 32.0f * K, rcy = rec_y + (rec_h - rch) * 0.5f, rxmax = w0.x + W - PADX;
+        float rx = w0.x + PADX + label_col;
         int shown = 0;
         for (const auto& sym : g_symbol_picker.recents) {
             if (shown >= 8) break;
-            std::string up = sym;
-            std::transform(up.begin(), up.end(), up.begin(),
-                           [](unsigned char c) { return std::toupper(c); });
             // Recents are bare symbols (no venue stored); they are binancef-historical.
+            const auto* m = SymbolRegistry::instance().get("binancef", sym);
+            std::string up = m ? (m->base_asset.empty() ? sym : m->base_asset) : sym;
+            std::transform(up.begin(), up.end(), up.begin(), [](unsigned char c) { return std::toupper(c); });
             const auto* tk = TickerManager::instance().get("binancef", sym);
             char pctbuf[16] = "";
-            const bool has_pct = tk != nullptr;
-            ImVec4 pctcol = Tokens::TX2;
-            if (has_pct) {
-                snprintf(pctbuf, sizeof(pctbuf), "%+.2f%%", tk->change_pct_24h);
-                pctcol = tk->change_pct_24h >= 0.0 ? Tokens::UP : Tokens::DOWN;
-            }
-            ImGui::PushFont(Fonts::ui_semibold());
-            const float symw = ImGui::CalcTextSize(up.c_str()).x;
-            ImGui::PopFont();
-            ImGui::PushFont(Fonts::mono_sm());
-            const float pctw = has_pct ? ImGui::CalcTextSize(pctbuf).x + 8.0f : 0.0f;
-            ImGui::PopFont();
-            const float cw = symw + pctw + 20.0f;
+            if (tk) snprintf(pctbuf, sizeof(pctbuf), "%+.2f%%", tk->change_pct_24h);
+            const float spx = 14.5f * K, ppx = 13.0f * K, lg = 20.0f * K;
+            const float symw = text_w(semi_f, spx, up.c_str());
+            const float pctw = tk ? text_w(ui_f, ppx, pctbuf) + 8.0f * K : 0.0f;
+            const float cw = 6.0f * K + lg + 8.0f * K + symw + pctw + 14.0f * K;
             if (rx + cw > rxmax) break;
             ImGui::SetCursorScreenPos(ImVec2(rx, rcy));
             ImGui::PushID(3000 + shown);
             const bool clk = ImGui::InvisibleButton("##rec", ImVec2(cw, rch));
             const bool hov = ImGui::IsItemHovered();
             ImGui::PopID();
-            if (hov) dl->AddRectFilled(ImVec2(rx, rcy), ImVec2(rx + cw, rcy + rch), u32(Tokens::HOVER));
-            ImGui::PushFont(Fonts::ui_semibold());
-            dl->AddText(ImVec2(rx + 10.0f, rcy + (rch - ImGui::GetFontSize()) * 0.5f),
-                        u32(Tokens::TX1), up.c_str());
-            ImGui::PopFont();
-            if (has_pct) {
-                ImGui::PushFont(Fonts::mono_sm());
-                dl->AddText(ImVec2(rx + 10.0f + symw + 8.0f, rcy + (rch - ImGui::GetFontSize()) * 0.5f),
-                            u32(pctcol), pctbuf);
-                ImGui::PopFont();
-            }
-            if (clk) {
-                const auto* m = SymbolRegistry::instance().get("binancef", sym);
-                if (m) open_symbol(*m);
-            }
-            rx += cw + 8.0f;
+            dl->AddRectFilled(ImVec2(rx, rcy), ImVec2(rx + cw, rcy + rch), u32(hov ? Tokens::CONTROL_HOVER : Tokens::CONTROL), rch * 0.5f);
+            LogoManager::instance().draw_coin(dl, m ? m->base_asset : up, ImVec2(rx + 6.0f * K, rcy + (rch - lg) * 0.5f), lg);
+            put(dl, semi_f, spx, ImVec2(rx + 6.0f * K + lg + 8.0f * K, rcy + (rch - spx * 1.17f) * 0.5f), Tokens::TX1, up.c_str());
+            if (tk) put(dl, ui_f, ppx, ImVec2(rx + 6.0f * K + lg + 8.0f * K + symw + 8.0f * K, rcy + (rch - ppx * 1.17f) * 0.5f),
+                        tk->change_pct_24h >= 0.0 ? Tokens::UP : Tokens::DOWN, pctbuf);
+            if (clk && m) open_symbol(*m);
+            rx += cw + 8.0f * K;
             shown++;
         }
     }
 
-    // ── BROWSE: category chips (square, accent on-state) - wraps + counts ─
+    // ── categories: filter pills (selected = solid), wrapping, with counts ─
     const float cat_y = rec_y + rec_h;
-    const float cat_top = 10.0f, cat_bot = 12.0f, chh = 24.0f, chip_gap = 8.0f, row_gap = 8.0f;
+    const float chh = 30.0f * K, chip_gap = 8.0f * K, row_gap = 8.0f * K, cat_top = 6.0f * K, cat_bot = 14.0f * K;
     float cat_h = 0.0f;
     {
-        ImGui::PushFont(Fonts::label());
-        dl->AddText(ImVec2(w0.x + PADX, cat_y + cat_top + (chh - ImGui::GetFontSize()) * 0.5f),
-                    u32(Tokens::TX3), "BROWSE");
-        ImGui::PopFont();
-
+        const float lpx = 13.0f * K, cpx = 14.0f * K;
+        put(dl, ui_f, lpx, ImVec2(w0.x + PADX, cat_y + cat_top + (chh - lpx * 1.17f) * 0.5f), Tokens::TX3, "Categories");
         const auto& cats = g_symbol_picker.cached_categories;
         const auto& counts = g_symbol_picker.cached_category_counts;
-        const float x0 = w0.x + PADX + 76.0f, xmax = w0.x + W - PADX;
+        const float x0 = w0.x + PADX + label_col, xmax = w0.x + W - PADX;
         float chx = x0, chy = cat_y + cat_top;
-        // Label and count share ONE face (Inter 13) and one baseline. They used
-        // to mix a 10.5px mono label with a 13px sans count nudged 1px down,
-        // which is why "All 941" and "TradFi 190" looked out of register.
         auto cat_chip = [&](const char* label, int count, bool selected, int idx) -> bool {
-            ImGui::PushFont(Fonts::ui());
-            const ImVec2 ts = ImGui::CalcTextSize(label);
             char nbuf[16] = "";
             float nw = 0.0f;
-            if (count >= 0) {
-                snprintf(nbuf, sizeof(nbuf), "%d", count);
-                nw = ImGui::CalcTextSize(nbuf).x + 6.0f;
-            }
-            ImGui::PopFont();
-            const float cw2 = ts.x + nw + 20.0f;
+            if (count >= 0) { snprintf(nbuf, sizeof(nbuf), "%d", count); nw = text_w(ui_f, cpx, nbuf) + 7.0f * K; }
+            const float lw = text_w(ui_f, cpx, label);
+            const float cw2 = lw + nw + 26.0f * K;
             if (chx + cw2 > xmax) { chx = x0; chy += chh + row_gap; }   // wrap to next line
             ImGui::SetCursorScreenPos(ImVec2(chx, chy));
             ImGui::PushID(4000 + idx);
             const bool clk = ImGui::InvisibleButton("##cat", ImVec2(cw2, chh));
             const bool hov = ImGui::IsItemHovered();
             ImGui::PopID();
-            if (selected)
-                dl->AddRectFilled(ImVec2(chx, chy), ImVec2(chx + cw2, chy + chh), u32(Tokens::BRAND_SOFT));
-            if (selected)
-                dl->AddLine(ImVec2(chx + 8, chy + chh - 1), ImVec2(chx + cw2 - 8, chy + chh - 1),
-                            u32(Tokens::BRAND), 2.0f);
-            ImGui::PushFont(Fonts::ui());
-            const float ty = chy + (chh - ts.y) * 0.5f;
-            dl->AddText(ImVec2(chx + 10.0f, ty),
-                        u32(selected ? Tokens::BRAND_TX : (hov ? Tokens::TX1 : Tokens::TX2)), label);
+            dl->AddRectFilled(ImVec2(chx, chy), ImVec2(chx + cw2, chy + chh),
+                              u32(selected ? Tokens::TX1 : hov ? Tokens::CONTROL_HOVER : Tokens::CONTROL), chh * 0.5f);
+            const float ty = chy + (chh - cpx * 1.17f) * 0.5f;
+            put(dl, ui_f, cpx, ImVec2(chx + 13.0f * K, ty), selected ? Tokens::BRAND_INK : hov ? Tokens::TX1 : Tokens::TX2, label);
             if (count >= 0)
-                dl->AddText(ImVec2(chx + 10.0f + ts.x + 6.0f, ty),
-                            u32(selected ? Tokens::TX2 : Tokens::TX3), nbuf);
-            ImGui::PopFont();
+                put(dl, ui_f, cpx, ImVec2(chx + 13.0f * K + lw + 7.0f * K, ty), selected ? ImVec4(0.25f, 0.25f, 0.25f, 1.0f) : Tokens::TX3, nbuf);
             chx += cw2 + chip_gap;
             return clk;
         };
-        if (cat_chip("All", static_cast<int>(SymbolRegistry::instance().size()),
+        if (cat_chip("All", g_symbol_picker.exchange_total,
                      g_symbol_picker.selected_category < 0, -1))
             g_symbol_picker.selected_category = -1;
         for (int i = 0; i < static_cast<int>(cats.size()); ++i) {
             const bool sel = (g_symbol_picker.selected_category == i);
             const int cnt = i < static_cast<int>(counts.size()) ? counts[i] : -1;
+            if (cnt == 0 && !sel) continue;   // nothing in it on this venue
             if (cat_chip(cats[i].c_str(), cnt, sel, i))
                 g_symbol_picker.selected_category = sel ? -1 : i;
         }
         cat_h = (chy + chh + cat_bot) - cat_y;
-        dl->AddLine(ImVec2(w0.x, cat_y + cat_h), ImVec2(w0.x + W, cat_y + cat_h), u32(Tokens::BD1));
     }
-
-    // ── column header strip (bg-0, sortable; active col = accent) ────
-    const float hdr_h = 28.0f;
-    const float hdr_y = cat_y + cat_h;
-    const float col_star_x  = w0.x + PADX;
-    const float col_logo_x  = w0.x + PADX + 22.0f;   // coin logo, after the * zone
-    const float col_sym_x   = w0.x + PADX + 48.0f;   // symbol, after the logo
-    const float col_last_r  = w0.x + W * 0.46f;
-    const float col_chg_r   = w0.x + W * 0.58f;
-    const float col_vol_r   = w0.x + W * 0.72f;
-    const float col_score_r = w0.x + W * 0.82f;
-    const float col_type_r  = w0.x + W - PADX;
-    {
-        dl->AddRectFilled(ImVec2(w0.x, hdr_y), ImVec2(w0.x + W, hdr_y + hdr_h), u32(Tokens::BASE));
-        dl->AddLine(ImVec2(w0.x, hdr_y + hdr_h), ImVec2(w0.x + W, hdr_y + hdr_h), u32(Tokens::BD1));
-
-        ImGui::PushFont(Fonts::mono_sm());
-        dl->AddText(ImVec2(col_star_x, hdr_y + (hdr_h - ImGui::GetFontSize()) * 0.5f), u32(Tokens::TX2), "*");
-        ImGui::PopFont();
-
-        auto& smode = g_symbol_picker.sort_mode;
-        auto& asc = g_symbol_picker.sort_ascending;
-        auto hdr_cell = [&](const char* label, float anchor_x, bool right_align,
-                            SymbolPickerState::SortMode mode) {
-            ImGui::PushFont(Fonts::label());
-            const ImVec2 ts = ImGui::CalcTextSize(label);
-            const bool active = (smode == mode);
-            const float tx2 = right_align ? anchor_x - ts.x : anchor_x;
-            const float ty = hdr_y + (hdr_h - ts.y) * 0.5f;
-            ImGui::SetCursorScreenPos(ImVec2(tx2 - 12.0f, hdr_y));
-            ImGui::PushID(label);
-            const bool clk = ImGui::InvisibleButton("##hdr", ImVec2(ts.x + 14.0f, hdr_h));
-            const bool hov = ImGui::IsItemHovered();
-            ImGui::PopID();
-            if (clk) {
-                if (active) asc = !asc;
-                else { smode = mode; asc = (mode == SymbolPickerState::SortMode::Symbol); }
-            }
-            dl->AddText(ImVec2(tx2, ty),
-                        u32(active ? Tokens::BRAND_TX : (hov ? Tokens::TX1 : Tokens::TX2)), label);
-            if (active) {
-                const float ax = right_align ? tx2 - 10.0f : tx2 + ts.x + 8.0f;
-                const float ay = hdr_y + hdr_h * 0.5f;
-                const ImU32 ac = u32(Tokens::BRAND_TX);
-                if (asc) dl->AddTriangleFilled(ImVec2(ax - 3.5f, ay + 2.0f), ImVec2(ax + 3.5f, ay + 2.0f), ImVec2(ax, ay - 3.0f), ac);
-                else     dl->AddTriangleFilled(ImVec2(ax - 3.5f, ay - 2.0f), ImVec2(ax + 3.5f, ay - 2.0f), ImVec2(ax, ay + 3.0f), ac);
-            }
-            ImGui::PopFont();
-        };
-        hdr_cell("SYMBOL", col_sym_x,   false, SymbolPickerState::SortMode::Symbol);
-        hdr_cell("LAST",   col_last_r,  true,  SymbolPickerState::SortMode::Price);
-        hdr_cell("24H %",  col_chg_r,   true,  SymbolPickerState::SortMode::Change24h);
-        hdr_cell("VOLUME", col_vol_r,   true,  SymbolPickerState::SortMode::Volume);
-        hdr_cell("SCORE",  col_score_r, true,  SymbolPickerState::SortMode::Score);
-        // Scanner scores are a hosted stream; on a feed that never delivered
-        // one, say so at the column that stays blank (see stream_presence.h).
-        if (StreamPresence::instance().absent(
-                static_cast<uint32_t>(Terminal::Stream::Scanner)) &&
-            ImGui::IsMouseHoveringRect(ImVec2(col_score_r - 60.0f, hdr_y),
-                                       ImVec2(col_score_r + 12.0f, hdr_y + hdr_h))) {
-            Theme::tooltip("Scanner scores ride EdgeDepth's hosted feed.\n"
-                           "This feed has not delivered them.");
-        }
-        ImGui::PushFont(Fonts::label());
-        const ImVec2 tts = ImGui::CalcTextSize("TYPE");
-        dl->AddText(ImVec2(col_type_r - tts.x, hdr_y + (hdr_h - tts.y) * 0.5f), u32(Tokens::TX2), "TYPE");
-        ImGui::PopFont();
-    }
-    ImGui::SetCursorScreenPos(ImVec2(w0.x, hdr_y + hdr_h));
 
     // ── Build filtered + sorted list (cached - only rebuild when inputs change) ──
     auto& ticker_mgr = TickerManager::instance();
@@ -637,7 +513,9 @@ void render_symbol_picker_popup(
             // shouldn't wipe every HL row from the picker, so keep HL rows unconditional.
             if (filter_dead && meta.exchange == "binancef" && !ticker_mgr.get(meta.exchange, meta.symbol)) continue;
             if (!matches_search(meta.base_asset, g_symbol_picker.search_buf) &&
-                !matches_search(meta.symbol, g_symbol_picker.search_buf))
+                !matches_search(meta.symbol, g_symbol_picker.search_buf) &&
+                std::none_of(meta.categories.begin(), meta.categories.end(),
+                             [](const std::string& c) { return matches_search(c, g_symbol_picker.search_buf); }))
                 continue;
             if (!matches_category(meta, g_symbol_picker.selected_category, cats))
                 continue;
@@ -707,6 +585,55 @@ void render_symbol_picker_popup(
     }
 
     const auto& visible = g_symbol_picker.cached_visible;
+    // Score only when the scanner has scored a row in this list (an all-dash column is noise).
+    bool any_score = false;
+    for (const auto* m : visible)
+        if (const auto* sc = scanner_mgr.get(m->exchange, m->symbol); sc && sc->edgedepth_score > 0.0) { any_score = true; break; }
+
+    // ── column header: quiet, sortable, sentence case ─────────────────────
+    const float hdr_h = 34.0f * K;
+    const float hdr_y = cat_y + cat_h;
+    const float col_star_x  = w0.x + PADX + 6.0f * K;
+    const float col_logo_x  = w0.x + PADX + 26.0f * K;
+    const float col_sym_x   = col_logo_x + 26.0f * K + 12.0f * K;
+    const float col_type_r  = w0.x + W - PADX - 6.0f * K;
+    const float col_score_r = any_score ? w0.x + W * 0.78f : col_type_r;
+    const float col_vol_r   = any_score ? w0.x + W * 0.68f : w0.x + W * 0.74f;
+    const float col_chg_r   = any_score ? w0.x + W * 0.56f : w0.x + W * 0.60f;
+    const float col_last_r  = any_score ? w0.x + W * 0.44f : w0.x + W * 0.47f;
+    {
+        dl->AddLine(ImVec2(w0.x + PADX, hdr_y + hdr_h - 1.0f), ImVec2(w0.x + W - PADX, hdr_y + hdr_h - 1.0f), u32(Tokens::BD1));
+        const float hpx = 12.5f * K;
+        auto& smode = g_symbol_picker.sort_mode;
+        auto& asc = g_symbol_picker.sort_ascending;
+        auto hdr_cell = [&](const char* label, float anchor_x, bool right_align, SymbolPickerState::SortMode mode) {
+            const bool active = (smode == mode);
+            const float lw = text_w(ui_f, hpx, label), chev = active ? 13.0f * K : 0.0f;
+            const float tx2 = right_align ? anchor_x - lw - chev : anchor_x;
+            const float ty = hdr_y + (hdr_h - hpx * 1.17f) * 0.5f;
+            ImGui::SetCursorScreenPos(ImVec2(tx2 - 6.0f * K, hdr_y));
+            ImGui::PushID(label);
+            const bool clk = ImGui::InvisibleButton("##hdr", ImVec2(lw + chev + 12.0f * K, hdr_h));
+            const bool hov = ImGui::IsItemHovered();
+            ImGui::PopID();
+            if (clk) {
+                if (active) asc = !asc;
+                else { smode = mode; asc = (mode == SymbolPickerState::SortMode::Symbol); }
+            }
+            put(dl, ui_f, hpx, ImVec2(tx2, ty), active ? Tokens::TX1 : hov ? Tokens::TX2 : Tokens::TX3, label);
+            if (active)
+                drawing::draw_ui_icon(dl, asc ? drawing::UiIcon::ChevronUp : drawing::UiIcon::ChevronDown,
+                                      ImVec2(tx2 + lw + 7.5f * K, hdr_y + hdr_h * 0.5f + 0.5f), 3.5f * K, u32(Tokens::TX1), 1.3f);
+        };
+        hdr_cell("Market",     col_sym_x,  false, SymbolPickerState::SortMode::Symbol);
+        hdr_cell("Price",      col_last_r, true,  SymbolPickerState::SortMode::Price);
+        hdr_cell("24h",        col_chg_r,  true,  SymbolPickerState::SortMode::Change24h);
+        hdr_cell("Volume",     col_vol_r,  true,  SymbolPickerState::SortMode::Volume);
+        if (any_score) hdr_cell("Score", col_score_r, true, SymbolPickerState::SortMode::Score);
+        const float tw2 = text_w(ui_f, hpx, "Type");
+        put(dl, ui_f, hpx, ImVec2(col_type_r - tw2, hdr_y + (hdr_h - hpx * 1.17f) * 0.5f), Tokens::TX3, "Type");
+    }
+    ImGui::SetCursorScreenPos(ImVec2(w0.x, hdr_y + hdr_h));
 
     // ── keyboard navigation (arrows move highlight, Enter opens) ─────
     const int vis_n = static_cast<int>(visible.size());
@@ -726,8 +653,8 @@ void render_symbol_picker_popup(
         }
     }
 
-    // ── Symbol list (clipped - only renders visible rows) - 1i rows ──
-    const float row_h = 34.0f, foot_h = 36.0f;
+    // ── rows (clipped): star, logo, market, price, change pill, volume, score, type chip ─
+    const float row_h = 46.0f * K, foot_h = 48.0f * K;
     ImGui::BeginChild("SymbolList", ImVec2(0, -foot_h), false);
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.0f, 0.0f));
     ImDrawList* rdl = ImGui::GetWindowDrawList();
@@ -742,6 +669,7 @@ void render_symbol_picker_popup(
         g_symbol_picker.scroll_to_sel = false;
     }
 
+    const float sym_px = 15.5f * K, num_px = 15.0f * K, small_px = 13.5f * K;
     ImGuiListClipper clipper;
     clipper.Begin(static_cast<int>(visible.size()), row_h);
     while (clipper.Step()) {
@@ -749,156 +677,122 @@ void render_symbol_picker_popup(
             const auto* meta = visible[i];
             ImGui::PushID(i);
             const auto* ticker = ticker_mgr.get(meta->exchange, meta->symbol);
-
             const ImVec2 rp = ImGui::GetCursorScreenPos();
             const bool ksel = (i == g_symbol_picker.keyboard_sel);
             const bool row_clk = ImGui::InvisibleButton("##row", ImVec2(W, row_h));
             const bool row_hov = ImGui::IsItemHovered();
-            if (ksel || row_hov)
-                rdl->AddRectFilled(rp, ImVec2(rp.x + W, rp.y + row_h), u32(Tokens::ELEV));
-            if (ksel)
-                rdl->AddRectFilled(rp, ImVec2(rp.x + 2.0f, rp.y + row_h), u32(Tokens::BRAND_TX));
+            const ImVec2 ra(rp.x + PADX - 8.0f * K, rp.y + 1.0f), rb(rp.x + W - PADX + 8.0f * K, rp.y + row_h - 1.0f);
+            if (ksel || row_hov) rdl->AddRectFilled(ra, rb, u32(ksel ? Tokens::CONTROL_HOVER : Tokens::CONTROL), Radius::R2);
             const float cy = rp.y + row_h * 0.5f;
 
-            // ★ favorite marker + its own click zone at the left edge of the row.
+            // Favourite star, with its own click zone at the left of the row.
             const ImVec2 mp = ImGui::GetIO().MousePos;
-            const bool on_star = mp.x >= col_star_x - 4.0f && mp.x <= col_star_x + 20.0f;
+            const bool on_star = mp.x >= col_star_x - 8.0f * K && mp.x <= col_star_x + 14.0f * K;
             const bool fav = g_symbol_picker.is_favorite(meta->symbol);
             {
-                ImGui::PushFont(Fonts::mono());
-                const ImVec4& sc = fav ? Tokens::BRAND_TX
-                                       : ((row_hov && on_star) ? Tokens::TX2 : Tokens::TX4);
-                rdl->AddText(ImVec2(col_star_x, cy - ImGui::GetFontSize() * 0.5f), u32(sc), "*");
-                ImGui::PopFont();
+                ImVec2 pt[10];
+                const float r = 6.0f * K, ri = r * 0.42f;
+                const ImVec2 c(col_star_x + 4.0f * K, cy);
+                for (int k = 0; k < 10; ++k) {
+                    const float ang = (-90.0f + k * 36.0f) * 3.14159265f / 180.0f;
+                    const float rr = (k & 1) ? ri : r;
+                    pt[k] = ImVec2(c.x + std::cos(ang) * rr, c.y + std::sin(ang) * rr);
+                }
+                if (fav) for (int k = 0; k < 10; ++k) rdl->AddTriangleFilled(c, pt[k], pt[(k + 1) % 10], u32(Tokens::WARN));
+                else rdl->AddPolyline(pt, 10, u32(row_hov && on_star ? Tokens::TX1 : row_hov ? Tokens::TX3 : Tokens::TX4), ImDrawFlags_Closed, 1.1f);
             }
-
-            // Keyboard action hint uses the same quiet treatment as Esc and Ctrl K.
-            if (ksel) {
-                ImGui::PushFont(Fonts::ui());
-                const char* op = "Enter";
-                const float ox = col_score_r + 22.0f;
-                rdl->AddText(ImVec2(ox, cy - ImGui::GetFontSize() * 0.5f), u32(Tokens::BRAND_TX), op);
-                ImGui::PopFont();
-            }
-
             if (row_clk) {
                 if (on_star) { g_symbol_picker.toggle_favorite(meta->symbol); persist_favorites(); }
                 else { open_symbol(*meta); }
             }
 
-        ImGui::PushFont(Fonts::mono());
-        const float fs = ImGui::GetFontSize();
-        const float ty = cy - fs * 0.5f;
-
-        // Coin logo in the star→symbol gutter (monogram fallback while loading).
-        LogoManager::instance().draw_coin(rdl, meta->base_asset,
-                                          ImVec2(col_logo_x, cy - 9.0f), 18.0f);
-
-        // Symbol - base bright, /QUOTE dimmed. Non-ASCII base assets (CJK etc.)
-        // fall back to the uppercased raw symbol.
-        {
-            std::string display = meta->display_name();
-            bool has_nonascii = false;
-            for (char c : meta->base_asset) {
-                if (static_cast<unsigned char>(c) > 127) { has_nonascii = true; break; }
-            }
-            if (has_nonascii) {
-                std::string sym_upper = meta->symbol;
-                std::transform(sym_upper.begin(), sym_upper.end(), sym_upper.begin(),
-                    [](unsigned char c) { return std::toupper(c); });
-                if (sym_upper.size() > 4 && sym_upper.substr(sym_upper.size() - 4) == "USDT") {
-                    sym_upper = sym_upper.substr(0, sym_upper.size() - 4);
+            // Logo and market: base bright, /quote dim. Non-ASCII bases fall back to the raw symbol.
+            LogoManager::instance().draw_coin(rdl, meta->base_asset, ImVec2(col_logo_x, cy - 13.0f * K), 26.0f * K);
+            {
+                std::string display = meta->display_name();
+                bool has_nonascii = false;
+                for (char c : meta->base_asset)
+                    if (static_cast<unsigned char>(c) > 127) { has_nonascii = true; break; }
+                if (has_nonascii) {
+                    std::string sym_upper = meta->symbol;
+                    std::transform(sym_upper.begin(), sym_upper.end(), sym_upper.begin(), [](unsigned char c) { return std::toupper(c); });
+                    if (sym_upper.size() > 4 && sym_upper.substr(sym_upper.size() - 4) == "USDT") sym_upper = sym_upper.substr(0, sym_upper.size() - 4);
+                    display = sym_upper + "/USDT";
                 }
-                display = sym_upper + "/USDT";
+                const float ty = cy - sym_px * 0.58f;
+                const auto slash = display.find('/');
+                if (slash != std::string::npos) {
+                    put(rdl, semi_f, sym_px, ImVec2(col_sym_x, ty), Tokens::TX1, display.c_str(), display.c_str() + slash);
+                    const float bw = semi_f->CalcTextSizeA(sym_px, FLT_MAX, 0, display.c_str(), display.c_str() + slash).x;
+                    put(rdl, ui_f, sym_px, ImVec2(col_sym_x + bw + 1.0f, ty), Tokens::TX3, display.c_str() + slash);
+                } else put(rdl, semi_f, sym_px, ImVec2(col_sym_x, ty), Tokens::TX1, display.c_str());
             }
-            const auto slash = display.find('/');
-            if (slash != std::string::npos) {
-                char base_buf[48];
-                snprintf(base_buf, sizeof(base_buf), "%.*s", static_cast<int>(slash), display.c_str());
-                rdl->AddText(ImVec2(col_sym_x, ty), u32(Tokens::TX1), base_buf);
-                const float bw = ImGui::CalcTextSize(base_buf).x;
-                rdl->AddText(ImVec2(col_sym_x + bw, ty), u32(Tokens::TX2), display.c_str() + slash);
-            } else {
-                rdl->AddText(ImVec2(col_sym_x, ty), u32(Tokens::TX1), display.c_str());
+            auto num_cell = [&](float right_x, const char* s, const ImVec4& col, float px) {
+                put(rdl, mono_f, px, ImVec2(right_x - text_w(mono_f, px, s), cy - px * 0.58f), col, s);
+            };
+            if (ticker && ticker->last_price > 0.0) {
+                char pbuf[32];
+                meta->fmt.format_price(pbuf, sizeof(pbuf), ticker->last_price);
+                num_cell(col_last_r, pbuf, Tokens::TX1, num_px);
+            } else num_cell(col_last_r, "-", Tokens::TX4, num_px);
+            // 24h: a coloured pill, as the watchlist.
+            if (ticker) Theme::change_pill(rdl, col_chg_r, cy, ticker->change_pct_24h, small_px);
+            else num_cell(col_chg_r, "-", Tokens::TX4, num_px);
+            if (ticker && ticker->volume_quote > 0.0) {
+                char vbuf[32];
+                format_volume(vbuf, sizeof(vbuf), ticker->volume_quote);
+                num_cell(col_vol_r, vbuf, Tokens::TX2, 14.5f * K);
+            } else num_cell(col_vol_r, "-", Tokens::TX4, 14.5f * K);
+            if (any_score) {
+                const auto* scan = scanner_mgr.get(meta->exchange, meta->symbol);
+                if (scan && scan->edgedepth_score > 0.0) {
+                    char sbuf[16];
+                    snprintf(sbuf, sizeof(sbuf), "%.0f", scan->edgedepth_score);
+                    num_cell(col_score_r, sbuf, scan->edgedepth_score >= 70.0 ? Tokens::BRAND_TX : scan->edgedepth_score >= 40.0 ? Tokens::TX1 : Tokens::TX2, num_px);
+                } else num_cell(col_score_r, "-", Tokens::TX4, num_px);
             }
-        }
-
-        // right-aligned mono numeral cell
-        auto num_cell = [&](float right_x, const char* s, const ImVec4& col) {
-            const float sw2 = ImGui::CalcTextSize(s).x;
-            rdl->AddText(ImVec2(right_x - sw2, ty), u32(col), s);
-        };
-
-        // LAST
-        if (ticker && ticker->last_price > 0.0) {
-            char pbuf[32];
-            meta->fmt.format_price(pbuf, sizeof(pbuf), ticker->last_price);
-            num_cell(col_last_r, pbuf, Tokens::TX1);
-        } else num_cell(col_last_r, "-", Tokens::TX4);
-
-        // 24H % - signed up/down
-        if (ticker) {
-            char cbuf[24];
-            snprintf(cbuf, sizeof(cbuf), "%+.2f%%", ticker->change_pct_24h);
-            num_cell(col_chg_r, cbuf, ticker->change_pct_24h >= 0.0 ? Tokens::UP : Tokens::DOWN);
-        } else num_cell(col_chg_r, "-", Tokens::TX4);
-
-        // VOLUME
-        if (ticker && ticker->volume_quote > 0.0) {
-            char vbuf[32];
-            format_volume(vbuf, sizeof(vbuf), ticker->volume_quote);
-            num_cell(col_vol_r, vbuf, Tokens::TX2);
-        } else num_cell(col_vol_r, "-", Tokens::TX4);
-
-        // SCORE - accent for hot, text ramp below (no traffic lights)
-        {
-            const auto* scan = scanner_mgr.get(meta->exchange, meta->symbol);
-            if (scan && scan->edgedepth_score > 0.0) {
-                char sbuf[16];
-                snprintf(sbuf, sizeof(sbuf), "%.0f", scan->edgedepth_score);
-                const ImVec4& col = scan->edgedepth_score >= 70.0 ? Tokens::BRAND_TX
-                                  : scan->edgedepth_score >= 40.0 ? Tokens::TX1
-                                                                  : Tokens::TX2;
-                num_cell(col_score_r, sbuf, col);
-            } else num_cell(col_score_r, "-", Tokens::TX4);
-        }
-        ImGui::PopFont();
-
-        // TYPE - DATED for a dated contract, else first category or PERP,
-        // mono-sm text-2 (legible, not tiny)
-        {
-            ImGui::PushFont(Fonts::mono_sm());
-            const char* tp = !meta->perpetual ? "DATED"
-                           : meta->categories.empty() ? "PERP" : meta->categories[0].c_str();
-            const float tw2 = ImGui::CalcTextSize(tp).x;
-            rdl->AddText(ImVec2(col_type_r - tw2, cy - ImGui::GetFontSize() * 0.5f),
-                         u32(Tokens::TX2), tp);
-            ImGui::PopFont();
-        }
-
-        ImGui::PopID();
+            // Type: a quiet chip (DATED for a dated contract, else the first category or PERP).
+            {
+                const char* tp = !meta->perpetual ? "Dated" : meta->categories.empty() ? "Perp" : meta->categories[0].c_str();
+                const float tpx = 12.5f * K, tw2 = text_w(ui_f, tpx, tp), ch = 22.0f * K;
+                const ImVec2 ca(col_type_r - tw2 - 16.0f * K, cy - ch * 0.5f);
+                rdl->AddRectFilled(ca, ImVec2(col_type_r, cy + ch * 0.5f), u32(row_hov || ksel ? Tokens::CONTROL_ACTIVE : Tokens::CONTROL), ch * 0.5f);
+                put(rdl, ui_f, tpx, ImVec2(ca.x + 8.0f * K, cy - tpx * 0.58f), Tokens::TX2, tp);
+                if (ksel) keycap(rdl, ImVec2(ca.x - 12.0f * K - (text_w(ui_f, 12.0f * K, "Enter") + 12.0f * K), cy - 10.0f * K), "Enter");
+            }
+            ImGui::PopID();
         }
     }
     clipper.End();
+    if (visible.empty()) {
+        const char* none = "No markets match";
+        const float px = 15.0f * K;
+        put(rdl, ui_f, px, ImVec2(w0.x + (W - text_w(ui_f, px, none)) * 0.5f, ImGui::GetCursorScreenPos().y + 40.0f * K), Tokens::TX3, none);
+    }
     ImGui::PopStyleVar();
     ImGui::EndChild();
 
-    // ── footer strip (bg-0): count + key hints ───────────────────────
+    // ── footer: count on the left, keycap hints on the right ──────────────
     {
         const float fy = ImGui::GetCursorScreenPos().y;
-        dl->AddRectFilled(ImVec2(w0.x + 1.0f, fy), ImVec2(w0.x + W - 1.0f, fy + foot_h - 1.0f),
-                          u32(Tokens::BASE));
         dl->AddLine(ImVec2(w0.x, fy), ImVec2(w0.x + W, fy), u32(Tokens::BD1));
-        ImGui::PushFont(Fonts::ui());
-        const float text_y = fy + (foot_h - ImGui::GetFontSize()) * 0.5f;
-        char summary[80];
-        snprintf(summary, sizeof(summary), "%zu symbols · 24h statistics", visible.size());
-        dl->AddText(ImVec2(w0.x + PADX, text_y), u32(Tokens::TX2), summary);
-        const char* hint = "Arrows navigate · Enter opens · * favorites · Esc closes";
-        const float hw = ImGui::CalcTextSize(hint).x;
-        if (W - PADX - hw > PADX + ImGui::CalcTextSize(summary).x + 24.0f)
-            dl->AddText(ImVec2(w0.x + W - PADX - hw, text_y), u32(Tokens::TX3), hint);
-        ImGui::PopFont();
+        const float px = 13.5f * K, ty = fy + (foot_h - px * 1.17f) * 0.5f;
+        const char* venue = g_symbol_picker.selected_exchange == "hl" ? "Hyperliquid" : g_symbol_picker.selected_exchange == "bybit" ? "Bybit" : "Binance";
+        char summary[96];
+        snprintf(summary, sizeof(summary), "%zu of %d markets on %s", visible.size(), g_symbol_picker.exchange_total, venue);
+        put(dl, ui_f, px, ImVec2(w0.x + PADX, ty), Tokens::TX2, summary);
+        struct Hint { const char* key; const char* label; };
+        const Hint hints[] = {{"", "Navigate"}, {"Enter", "Open"}, {"Esc", "Close"}};
+        float total = 0.0f;
+        for (const auto& h : hints) total += keycap_w(h.key) + 6.0f * K + text_w(ui_f, px, h.label) + 18.0f * K;
+        float hx = w0.x + W - PADX - total + 18.0f * K;
+        if (hx > w0.x + PADX + text_w(ui_f, px, summary) + 24.0f * K) {
+            for (const auto& h : hints) {
+                hx += keycap(dl, ImVec2(hx, fy + (foot_h - 20.0f * K) * 0.5f), h.key) + 6.0f * K;
+                put(dl, ui_f, px, ImVec2(hx, ty), Tokens::TX3, h.label);
+                hx += text_w(ui_f, px, h.label) + 18.0f * K;
+            }
+        }
         ImGui::Dummy(ImVec2(W, foot_h - 1.0f));
     }
     ImGui::EndPopup();
@@ -928,6 +822,33 @@ int next_chart_instance(const std::vector<std::unique_ptr<Widget>>& widgets,
 // embedded chromes). Mirrors the picker's open_symbol switch but uses the
 // already-resolved pair/fmt/tick the chart handed us, so it needs no registry
 // lookup and works with no WebSocket (a /demo pack has none).
+void sync_market_view(const Terminal::Pair& pair, bool data, int hours) {
+#ifdef __EMSCRIPTEN__
+    // Only a focus/range transition touches history, never every render frame.
+    static std::string venue, symbol;
+    static int previous = -1;
+    const int next = data ? hours : 0;
+    if (!market_view_ready || market_view_navigation_pending) return;
+    if (previous == next && venue == pair.exchange && symbol == pair.symbol) return;
+    previous=next; venue=pair.exchange; symbol=pair.symbol;
+    const auto route=parse_route(url_get_current_path(),url_get_current_search());
+    if (route.exchange != venue || route.symbol != symbol) return;
+    EM_ASM({
+        const u=new URL(location.href);
+        if ($0) {u.searchParams.set('view','data');u.searchParams.set('range',$0===24?'24h':'4h');}
+        else {u.searchParams.delete('view');u.searchParams.delete('range');}
+        if (u.href!==location.href) history.pushState({},"",u);
+    },next);
+#else
+    (void)pair; (void)data; (void)hours;
+#endif
+}
+
+void request_market_data(const Terminal::Pair& pair, int hours) {
+    g_widget_add_request = {SymbolPickerState::PendingWidget::Data,pair,
+        SymbolRegistry::instance().get_formatter(pair.exchange,pair.symbol),0,true,hours};
+}
+
 void resolve_widget_add_request(
     std::vector<std::unique_ptr<Widget>>& widgets, const AppContext& ctx)
 {
@@ -952,15 +873,27 @@ void resolve_widget_add_request(
     // Market widgets have stable window IDs. Reopen/focus that window instead
     // of constructing a second widget with the same ImGui identity.
     for (auto& widget : widgets) {
+        if (widget->suspended_for_replay) continue;
         const Terminal::Pair* pair=nullptr;
         if(req.type==PW::Charts && widget->type()==WidgetType::Chart) pair=&static_cast<ChartWidget*>(widget.get())->pair();
         if(req.type==PW::DOM && widget->type()==WidgetType::DOM) pair=&static_cast<DOMWidget*>(widget.get())->pair();
         if(req.type==PW::Orderbook && widget->type()==WidgetType::Orderbook) pair=&static_cast<OrderbookWidget*>(widget.get())->pair();
         if(req.type==PW::Trades && widget->type()==WidgetType::Trades) pair=&static_cast<TradesWidget*>(widget.get())->pair();
         if(req.type==PW::Stats && widget->type()==WidgetType::Stats) pair=&static_cast<StatsWidget*>(widget.get())->pair();
+        if(req.type==PW::Data && widget->type()==WidgetType::Data) pair=&static_cast<DataWidget*>(widget.get())->pair();
         if(req.type==PW::Debug && widget->type()==WidgetType::DebugLog) pair=&static_cast<DebugWidget*>(widget.get())->pair();
         if(!pair || pair->exchange!=req.pair.exchange || pair->symbol!=req.pair.symbol)continue;
+        if (req.type==PW::Data) {
+            static_cast<DataWidget*>(widget.get())->set_hours(req.data_hours);
+            // A restored tab has no ImGui window yet on the first frame.
+            // Focus on render so an explicit ?view=data beats chart restore.
+            widget->open_centered = true;
+        }
         widget->is_open=true;
+        // Focusing a normal panel in candles must not silently pin it.
+        // Explicitly reopening an automatically hidden panel is an override.
+        if (widget->hidden_by_chart) widget->mode_companion = false;
+        widget->hidden_by_chart=false;
         ImGui::SetWindowFocus(widget->title());
         return;
     }
@@ -974,6 +907,19 @@ void resolve_widget_add_request(
             widgets.push_back(std::make_unique<TradesWidget>(req.pair, ctx, req.fmt)); break;
         case PW::Charts:
             widgets.push_back(std::make_unique<ChartWidget>(req.pair, ctx, req.tick_size)); break;
+        case PW::Data: {
+            auto data=std::make_unique<DataWidget>(req.pair,ctx);
+            data->set_hours(req.data_hours);
+            for (const auto& widget : widgets) {
+                if (!widget->is_open || widget->type()!=WidgetType::Chart) continue;
+                const auto& chart=*static_cast<const ChartWidget*>(widget.get());
+                if (chart.pair().exchange==req.pair.exchange && chart.pair().symbol==req.pair.symbol) {
+                    data->initial_dock_target=chart.title();
+                    break;
+                }
+            }
+            widgets.push_back(std::move(data)); break;
+        }
         case PW::Stats:
             widgets.push_back(std::make_unique<StatsWidget>(req.pair, ctx, req.fmt)); break;
         case PW::Debug:
@@ -1004,7 +950,22 @@ void resolve_widget_add_request(
         }
         default: break;
     }
-    if (widgets.size() > before) widgets.back()->open_centered = true;
+    if (widgets.size() > before) {
+        widgets.back()->open_centered = true;
+        widgets.back()->is_replay_widget = ctx.replay_mgr().is_active();
+        if (req.type == PW::DOM || req.type == PW::Trades) {
+            // Creating a panel while already in RT explicitly asks for both
+            // views. Creating it in candles keeps the constructor's auto-hide.
+            for (const auto& widget : widgets) {
+                if (!widget->is_open || widget->suspended_for_replay || widget->type() != WidgetType::Chart) continue;
+                const auto& chart = *static_cast<const ChartWidget*>(widget.get());
+                if (chart.pair().exchange == req.pair.exchange && chart.pair().symbol == req.pair.symbol && chart.rt_mode()) {
+                    widgets.back()->mode_companion = false;
+                    break;
+                }
+            }
+        }
+    }
 }
 
 } // namespace Menu

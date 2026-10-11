@@ -66,6 +66,12 @@ public:
         time_step_ms_ = interval;
         native_bucket_size_ = tick_size;
     }
+    void set_realtime_gap_bridge(bool on) {
+        if (realtime_gap_bridge_ == on) return;
+        realtime_gap_bridge_ = on;
+        gpu_dirty_ = true; last_sync_ms_ = 0;
+    }
+    bool bridges_observation(int64_t timestamp_ms) const;
     void invalidate_observation(int64_t timestamp_ms) {
         observation_centers_.erase(timestamp_ms);
         observation_source_ticks_.erase(timestamp_ms);
@@ -98,6 +104,11 @@ public:
                       bool show_labels = true,
                       bool extend_current_depth = false,
                       double extend_limit_ms = std::numeric_limits<double>::infinity());
+
+    // Hold last-confirmed depth across a live interruption and its margin.
+    // Draw-only: never changes the historical timeline, GPU ring or its validity.
+    void render_recovery_preview(const std::unordered_map<double, float>& prices,
+        double mid_price, float sensitivity, int64_t from_ms, double until_ms);
 
     // ── Configuration ───────────────────────────────────────────────
     enum class ColormapType { Orderbook, Liquidation };
@@ -317,14 +328,16 @@ private:
     int64_t realtime_peak_clock_ms_ = 0;
     int64_t observation_hold_until_ms_ = 0, observation_hold_source_ms_ = 0;
     int64_t realtime_hold_until() const;
-    void fill_observation_hold(int previous, int next);
+    void fill_observation_hold(int previous, int next, bool display_bridge = false);
     /// Where RT depth stops drawing: the replay cutoff, or with `extend` the held
     /// current book projected to the viewport edge, never past `limit`.
     double realtime_draw_until(double viewport_end, bool extend,
                                double limit = std::numeric_limits<double>::infinity()) const;
     std::set<int64_t> observation_boundaries_;
+    bool realtime_gap_bridge_ = false; // Chart enables only for live session views.
     float column_flags(int64_t ts) const {
-        return realtime_ ? (observation_boundaries_.contains(ts) ? 5.0f : 3.0f) + float(ts % column_interval_ms_) / float(column_interval_ms_) : 1.0f;
+        return realtime_ ? (observation_boundaries_.contains(ts) ? (bridges_observation(ts) ? 7.0f : 5.0f) : 3.0f) +
+            float(ts % column_interval_ms_) / float(column_interval_ms_) : 1.0f;
     }
     int64_t column_interval_ms_ = 60000; // Requested orderbook interval
 

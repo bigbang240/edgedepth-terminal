@@ -116,6 +116,26 @@ int main() {
     cached.resize(1200);
     append_realtime_depth_tail(cached, recent, 1201000, 1300000, 1000);
     check(cached.back()->timestamp_ms <= 1300000, "paused tail excludes future depth");
+    // Source timestamps can lag the archive request's wall clock. The query
+    // response must retain already-delivered depth even without another event.
+    {
+        std::deque<RealtimeDepthHistory::SamplePtr> snapshot, arrived;
+        for (int64_t t : {10017, 10517, 11017, 12517}) {
+            auto s = std::make_shared<RealtimeDepthHistory::Sample>();
+            s->timestamp_ms = t; s->serial = arrived.size() + 1;
+            arrived.push_back(s);
+        }
+        snapshot.push_back(arrived.front());
+        append_realtime_depth_tail(snapshot, arrived, 12000, 12300, 500);
+        check(snapshot.back() == arrived[2] && snapshot.size() == 3,
+              "archive replacement keeps delayed arrivals before its query cutoff");
+        check(!snapshot.back()->segment_start && snapshot.front() == arrived.front(),
+              "delayed arrivals neither replace the archived prefix nor invent a gap");
+        snapshot.clear();
+        append_realtime_depth_tail(snapshot, arrived, 12000, 12300, 500);
+        check(snapshot.size() == 3 && snapshot.back() == arrived[2],
+              "an empty archive snapshot still joins the observed as-of live tail");
+    }
     // The live BBO step is drawn where the price changed, not at the newest
     // ticker: tickers at an unchanged price must not move it.
     {

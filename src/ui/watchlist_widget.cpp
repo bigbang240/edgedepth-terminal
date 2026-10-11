@@ -1,17 +1,13 @@
 // ═══════════════════════════════════════════════════════════════════════════════
-// watchlist_widget.cpp - dense-grid watchlist (edgedepth v2, treatment 1b)
-//
-// Header stack (non-scrolling): title bar · filter row · category + venue
-// selectors/popovers · SYMBOL/LAST/24H% sort chips. Then a scrolling
-// list of dense rows: star · sparkline · symbol (ellipsized) · last · 24h% in
-// fixed tabular columns, plus a dim 24h-volume figure beneath. Colours resolve to
-// Theme::Tokens, numerals to PriceFormatter, rows are virtualised with
-// ImGuiListClipper; no per-row heap allocations in the hot path.
+// watchlist_widget.cpp - watchlist rail (design v3, 2026-10-11; see the header).
+// Colours resolve to Theme::Tokens, numerals to PriceFormatter, rows are
+// virtualised with ImGuiListClipper; no per-row heap allocations in the hot path.
 // ═══════════════════════════════════════════════════════════════════════════════
 #include "ui/watchlist_widget.h"
 #include "rendering/theme.h"
 #include "core/ticker_manager.h"
 #include "core/logo_manager.h"
+#include "ui/drawing/drawing_icons.h"
 #include "core/url_router.h"
 #include "imgui.h"
 #include "imgui_internal.h"          // ImGuiDockNodeFlags_NoTabBar (window class)
@@ -93,26 +89,7 @@ WatchlistWidget::WatchlistWidget(const Terminal::Pair& active_pair, const AppCon
     , ctx_(ctx)
 {}
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// Update - sample sparkline ring buffers off the always-on ticker stream
-// ═══════════════════════════════════════════════════════════════════════════════
-
-void WatchlistWidget::update() {
-    const int64_t now = now_ms();
-    if (now - last_sample_ms_ < static_cast<int64_t>(SAMPLE_MS)) return;
-    last_sample_ms_ = now;
-
-    auto& reg = SymbolRegistry::instance();
-    if (!reg.is_loaded()) return;
-    auto& tickers = TickerManager::instance();
-    if (!tickers.has_data()) return;
-
-    for (const auto& [key, meta] : reg.all()) {
-        const auto* t = tickers.get(meta.exchange, meta.symbol);
-        if (!t || t->last_price <= 0.0) continue;
-        sparks_[meta.pair_key].push(static_cast<float>(t->last_price));
-    }
-}
+void WatchlistWidget::update() {}
 
 // ── Per-category pair counts (built once with the category list) ─────────────
 void WatchlistWidget::build_category_counts() {
@@ -261,243 +238,235 @@ void WatchlistWidget::render() {
     ImGui::End();
 }
 
-// ── Title bar (h28) - live dot · WATCHLIST · [compact][count][close] ─────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// Design v3 (James 2026-10-11: "watchlist redesigned / repolished"). Title with a
+// count chip and round icon controls; a rounded search field; category and venue as
+// soft dropdowns; a quiet sort header; two-line rows (logo with a venue badge, pair,
+// volume; price over a coloured change pill), rounded hover and selection, the star
+// shown on hover or when set. The 60 s sparkline is gone: it read as a trend but
+// covered one minute of ticker prices. Sizes scale with the UI text size (WK).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+namespace {
+float WK = 1.0f;
+// The row geometry, shared by the sort header and the rows so their columns agree.
+struct RowGrid {
+    float pad, star_x, logo_x, logo, sym_x, pill_w, pill_right, price_right, h;
+    bool stacked, compact;
+};
+RowGrid row_grid(float w, bool compact) {
+    RowGrid g{};
+    g.compact = compact;
+    g.stacked = !compact && w < 420 * WK;
+    g.pad = 8 * WK;
+    g.h = compact ? 38 * WK : 58 * WK;
+    g.star_x = g.pad + 11 * WK;
+    g.logo = compact ? 22 * WK : 30 * WK;
+    g.logo_x = g.pad + 22 * WK;
+    g.sym_x = g.logo_x + g.logo + 10 * WK;
+    g.pill_w = Theme::change_pill_width((compact ? 13.0f : 13.5f) * WK);
+    g.pill_right = w - g.pad - 10 * WK;
+    g.price_right = g.stacked ? g.pill_right : g.pill_right - g.pill_w - 16 * WK;
+    return g;
+}
+// A soft dropdown button: rounded fill, chevron at the right. Returns clicked; content is drawn by the caller.
+bool dropdown_button(const char* id, ImVec2 p, ImVec2 size, bool open) {
+    ImGui::SetCursorScreenPos(p);
+    const bool clicked = ImGui::InvisibleButton(id, size);
+    const bool hot = ImGui::IsItemHovered() || open;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(p, ImVec2(p.x + size.x, p.y + size.y), Theme::u32(hot ? Theme::Tokens::CONTROL_HOVER : Theme::Tokens::CONTROL), Theme::Radius::R2);
+    drawing::draw_ui_icon(dl, open ? drawing::UiIcon::ChevronUp : drawing::UiIcon::ChevronDown,
+                          ImVec2(p.x + size.x - 14 * WK, p.y + size.y * 0.5f), 4.5f * WK, Theme::u32(Theme::Tokens::TX2), 1.4f);
+    return clicked;
+}
+}  // namespace
 
 void WatchlistWidget::render_title_bar() {
+    WK = ImGui::GetFontSize() / 18.4f;
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 p0 = ImGui::GetCursorScreenPos();
     const float w = ImGui::GetContentRegionAvail().x;
-    const float h = 28.0f;
-    const float cy = p0.y + h * 0.5f;
-
-    dl->AddLine(ImVec2(p0.x, p0.y + h - 1.0f), ImVec2(p0.x + w, p0.y + h - 1.0f),
-                Theme::u32(Theme::Tokens::BD1));                 // bottom hairline
-
-    dl->AddRectFilled(ImVec2(p0.x + 10.0f, cy - 3.0f),
-                      ImVec2(p0.x + 16.0f, cy + 3.0f),
-                      Theme::u32(Theme::Tokens::UP));            // live dot 6x6
-
-    ImGui::PushFont(Theme::Fonts::ui());
-    dl->AddText(ImVec2(p0.x + 23.0f, cy - ImGui::GetFontSize() * 0.5f),
-                Theme::u32(Theme::Tokens::TX1), "Watchlist");
-
-    const ImU32 tx3 = Theme::u32(Theme::Tokens::TX2);
-    float x = p0.x + w - 10.0f;
-
-    // close glyph (x)
-    const float k = 4.5f;
-    dl->AddLine(ImVec2(x - 9.0f, cy - k), ImVec2(x, cy + k), tx3, 1.3f);
-    dl->AddLine(ImVec2(x - 9.0f, cy + k), ImVec2(x, cy - k), tx3, 1.3f);
-    const float close_x0 = x - 9.0f;
-    x = close_x0 - 9.0f;
-
-    // pair count "N PAIRS"
-    char cnt[24]; snprintf(cnt, sizeof(cnt), "%d pairs", all_count_);
-    const float cnt_w = ImGui::CalcTextSize(cnt).x;
-    dl->AddText(ImVec2(x - cnt_w, cy - ImGui::GetFontSize() * 0.5f), tx3, cnt);
-    x -= cnt_w + 9.0f;
-    ImGui::PopFont();
-
-    // compact toggle - 3 stacked ticks (accent when on)
-    const float gx0 = x - 12.0f, gy = cy - 4.0f;
-    const ImU32 gc = Theme::u32(compact_ ? Theme::Tokens::BRAND_TX : Theme::Tokens::TX2);
-    for (int i = 0; i < 3; ++i)
-        dl->AddLine(ImVec2(gx0, gy + i * 4.0f), ImVec2(gx0 + 12.0f, gy + i * 4.0f), gc, 1.3f);
-
-    // hit targets
-    ImGui::SetCursorScreenPos(ImVec2(close_x0 - 3.0f, cy - 8.0f));
-    if (ImGui::InvisibleButton("##wl_close", ImVec2(15.0f, 16.0f))) is_open = false;
-    ImGui::SetCursorScreenPos(ImVec2(gx0 - 2.0f, cy - 8.0f));
-    if (ImGui::InvisibleButton("##wl_compact", ImVec2(16.0f, 16.0f))) compact_ = !compact_;
-    if (ImGui::IsItemHovered()) Theme::tooltip(compact_ ? "Dense rows: on" : "Compact rows");
-
+    // The header reads as a dock tab, one family with every other panel's (theme.cpp tab colours): the tab strip, a
+    // tab on the panel's surface with a leading glyph, the name and the count, the accent line while the panel has
+    // focus; its controls sit at the strip's right. Same height and type as the tabs beside it, so the panel tops line
+    // up (2026-10-11; it was a 46 px semibold title row).
+    const float h = ImGui::GetFrameHeight();
+    const float pad = ImGui::GetStyle().FramePadding.x;
+    const bool focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+    dl->AddRectFilled(p0, ImVec2(p0.x + w, p0.y + h), Theme::u32(Theme::Tokens::BASE));
+    char cnt[24]; snprintf(cnt, sizeof(cnt), "%d", all_count_);
+    const char* label = "Watchlist";
+    const float glyph = std::min(16.0f, h - 4.0f);
+    const float lw = ImGui::CalcTextSize(label).x, cw = ImGui::CalcTextSize(cnt).x;
+    const float tab_w = std::round(pad + glyph + 8.0f + lw + 8.0f + cw + pad + 2.0f);
+    dl->AddRectFilled(p0, ImVec2(p0.x + tab_w, p0.y + h), Theme::u32(Theme::Tokens::PANEL));
+    if (focused) dl->AddRectFilled(p0, ImVec2(p0.x + tab_w, p0.y + 2.0f), Theme::u32(Theme::Tokens::BRAND));
+    const float cy = p0.y + h * 0.5f, ty = std::round(cy - ImGui::GetFontSize() * 0.5f);
+    drawing::draw_ui_icon(dl, drawing::UiIcon::Star, ImVec2(p0.x + pad + glyph * 0.5f, cy), glyph * 0.36f,
+                          Theme::u32(Theme::Tokens::TX2), 1.3f);
+    float x = p0.x + pad + glyph + 8.0f;
+    dl->AddText(ImVec2(x, ty), Theme::u32(Theme::Tokens::TX1), label);
+    x += lw + 8.0f;
+    dl->AddText(ImVec2(x, ty), Theme::u32(Theme::Tokens::TX3), cnt);
+    const float ib = std::round(h - 4.0f);
+    ImGui::SetCursorScreenPos(ImVec2(p0.x + w - 4.0f - ib, p0.y + (h - ib) * 0.5f));
+    if (Theme::icon_button("##wl_close", drawing::UiIcon::Close, "Close watchlist", ib)) is_open = false;
+    ImGui::SetCursorScreenPos(ImVec2(p0.x + w - 4.0f - ib * 2 - 2.0f, p0.y + (h - ib) * 0.5f));
+    if (Theme::icon_button("##wl_density", drawing::UiIcon::Rows, compact_ ? "Comfortable rows" : "Compact rows", ib, compact_))
+        compact_ = !compact_;
     ImGui::SetCursorScreenPos(p0);
-    ImGui::Dummy(ImVec2(w, h));
+    ImGui::Dummy(ImVec2(w, h + 8.0f * WK));
 }
 
-// ── Filter row (h28 controls) - "Filter pairs" input + Vol volume-sort toggle ─
+// ── Search: a rounded field with a magnifier in its left padding ────────────
 
 void WatchlistWidget::render_filter_bar() {
-    const float pad = 10.0f;
-    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float pad = 12 * WK;
     const ImVec2 bp = ImGui::GetCursorScreenPos();
     const float ww = ImGui::GetContentRegionAvail().x;
-
-    ImGui::SetCursorPos(ImVec2(pad, ImGui::GetCursorPosY() + 8.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(9.0f, 6.0f));
+    ImGui::SetCursorScreenPos(ImVec2(bp.x + pad, bp.y));
+    Theme::push_font(Theme::Fonts::ui(), 15 * WK);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(32 * WK, 9 * WK));
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, Theme::Radius::R2);
     ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
-
-    // Full-width filter input; volume sorting lives in the sort-header chips.
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - pad);
-    ImGui::PushStyleColor(ImGuiCol_TextDisabled, Theme::Tokens::TX2);
-    ImGui::InputTextWithHint("##wl_search", "Filter pairs", search_buf_, sizeof(search_buf_));
+    ImGui::PushStyleColor(ImGuiCol_TextDisabled, Theme::Tokens::TX3);
+    ImGui::SetNextItemWidth(ww - pad * 2);
+    ImGui::InputTextWithHint("##wl_search", "Search pairs", search_buf_, sizeof(search_buf_));
+    const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+    drawing::draw_ui_icon(ImGui::GetWindowDrawList(), drawing::UiIcon::Search, ImVec2(a.x + 16 * WK, (a.y + b.y) * 0.5f),
+                          6 * WK, Theme::u32(ImGui::IsItemActive() ? Theme::Tokens::TX1 : Theme::Tokens::TX3), 1.4f);
     ImGui::PopStyleColor();
-
     ImGui::PopStyleVar(3);
-
-    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 8.0f);
-    const float hy = ImGui::GetCursorScreenPos().y;
-    dl->AddLine(ImVec2(bp.x, hy), ImVec2(bp.x + ww, hy), Theme::u32(Theme::Tokens::BD1));
-    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 1.0f);
+    ImGui::PopFont();
+    ImGui::SetCursorScreenPos(ImVec2(bp.x, b.y));
+    ImGui::Dummy(ImVec2(ww, 8 * WK));
 }
 
-// ── Category + venue selectors (h28) with compact popovers ───────────────────────
+// ── Category and venue: soft dropdowns with popovers ────────────────────────
 
 void WatchlistWidget::render_category_selector() {
-    const float pad = 10.0f;
+    const float pad = 12 * WK;
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 bp = ImGui::GetCursorScreenPos();
     const float ww = ImGui::GetContentRegionAvail().x;
-    const float h = 28.0f;
+    const float h = 36 * WK, gap = 8 * WK;
+    const float w = ww - pad * 2;
+    const float venue_w = std::clamp(w * 0.44f, 128 * WK, 180 * WK);
+    const float category_w = w - gap - venue_w;
+    const ImVec2 p0(bp.x + pad, bp.y);
+    const ImVec2 venue_p(p0.x + category_w + gap, p0.y);
 
-    ImGui::SetCursorPos(ImVec2(pad, ImGui::GetCursorPosY() + 8.0f));
-    const float w = ImGui::GetContentRegionAvail().x - pad;   // inset both sides
-    const ImVec2 p0 = ImGui::GetCursorScreenPos();
-    const float selector_gap = 6.0f;
-    const float venue_w = std::clamp(w * 0.48f, 126.0f, 150.0f);
-    const float category_w = w - selector_gap - venue_w;
-    const ImVec2 venue_p(p0.x + category_w + selector_gap, p0.y);
-
-    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0, 0, 0, 0));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::Tokens::ELEV);
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  Theme::Tokens::ELEV);
-    ImGui::PushStyleColor(ImGuiCol_Border,        Theme::Tokens::BD2);
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, Theme::Radius::R2);
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
-    if (ImGui::Button("##wl_cat", ImVec2(category_w, h))) ImGui::OpenPopup("##wl_cat_pop");
-    ImGui::SetCursorScreenPos(venue_p);
-    if (ImGui::Button("##wl_venue", ImVec2(venue_w, h))) ImGui::OpenPopup("##wl_venue_pop");
-    ImGui::PopStyleVar(2);
-    ImGui::PopStyleColor(4);
-
-    // Category overlay: icon, clipped label, right-aligned count, and caret.
-    // The reserved count column prevents narrow-rail label collisions.
-    const float ix = p0.x + 10.0f, iy = p0.y + h * 0.5f - 6.0f;
-    const ImU32 ac = Theme::u32(Theme::Tokens::BRAND_TX);
-    for (int r = 0; r < 2; ++r) for (int c = 0; c < 2; ++c)
-        dl->AddRectFilled(ImVec2(ix + c*7.0f, iy + r*7.0f),
-                          ImVec2(ix + c*7.0f + 5.0f, iy + r*7.0f + 5.0f), ac);
-
-    const bool category_valid = selected_category_ >= 0 &&
-                                selected_category_ < static_cast<int>(categories_.size());
-    const char* name = category_valid ? categories_[selected_category_].c_str() : "All";
+    // Category: grid glyph, name, count.
+    if (dropdown_button("##wl_cat", p0, ImVec2(category_w, h), ImGui::IsPopupOpen("##wl_cat_pop"))) ImGui::OpenPopup("##wl_cat_pop");
+    const bool category_valid = selected_category_ >= 0 && selected_category_ < static_cast<int>(categories_.size());
+    const char* name = category_valid ? categories_[selected_category_].c_str() : "All pairs";
     const int ct = category_valid && selected_category_ < static_cast<int>(category_counts_.size())
                    ? category_counts_[selected_category_] : scoped_count_;
+    drawing::draw_ui_icon(dl, drawing::UiIcon::Grid, ImVec2(p0.x + 16 * WK, p0.y + h * 0.5f), 5.5f * WK, Theme::u32(Theme::Tokens::TX2), 1.4f);
     char cbuf[16]; snprintf(cbuf, sizeof(cbuf), "%d", ct);
-    ImGui::PushFont(Theme::Fonts::ui());
+    Theme::push_font(Theme::Fonts::ui(), 13 * WK);
     const float count_w = ImGui::CalcTextSize(cbuf).x;
-    const float count_x = p0.x + category_w - 27.0f - count_w;
+    const float count_x = p0.x + category_w - 28 * WK - count_w;
+    dl->AddText(ImVec2(count_x, p0.y + (h - ImGui::GetFontSize()) * 0.5f), Theme::u32(Theme::Tokens::TX3), cbuf);
     ImGui::PopFont();
-    ImGui::PushFont(Theme::Fonts::ui_semibold());
-    dl->PushClipRect(ImVec2(p0.x + 31.0f, p0.y),
-                     ImVec2(std::max(p0.x + 32.0f, count_x - 6.0f), p0.y + h), true);
-    dl->AddText(ImVec2(p0.x + 31.0f, p0.y + h*0.5f - ImGui::GetFontSize()*0.5f),
-                Theme::u32(Theme::Tokens::TX1), name);
+    Theme::push_font(Theme::Fonts::ui_semibold(), 15 * WK);
+    dl->PushClipRect(ImVec2(p0.x + 30 * WK, p0.y), ImVec2(std::max(p0.x + 31 * WK, count_x - 6 * WK), p0.y + h), true);
+    dl->AddText(ImVec2(p0.x + 30 * WK, p0.y + (h - ImGui::GetFontSize()) * 0.5f), Theme::u32(Theme::Tokens::TX1), name);
     dl->PopClipRect();
     ImGui::PopFont();
-    ImGui::PushFont(Theme::Fonts::ui());
-    dl->AddText(ImVec2(count_x, p0.y + h*0.5f - ImGui::GetFontSize()*0.5f),
-                Theme::u32(Theme::Tokens::TX2), cbuf);
-    ImGui::PopFont();
 
-    const float qx = p0.x + category_w - 15.0f, qy = p0.y + h*0.5f;
-    dl->AddTriangleFilled(ImVec2(qx, qy-2.0f), ImVec2(qx+7.0f, qy-2.0f),
-                          ImVec2(qx+3.5f, qy+3.0f), Theme::u32(Theme::Tokens::TX2));
-
-    // Venue overlay. A compact exchange mark is useful here; the top-level
-    // symbol selector remains coin-only as requested.
+    // Venue: its logo (or a globe for all venues) and name.
+    if (dropdown_button("##wl_venue", venue_p, ImVec2(venue_w, h), ImGui::IsPopupOpen("##wl_venue_pop"))) ImGui::OpenPopup("##wl_venue_pop");
     const WatchlistVenue* selected_venue = nullptr;
-    for (const auto& venue : kWatchlistVenues) {
+    for (const auto& venue : kWatchlistVenues)
         if (selected_exchange_ == venue.id) { selected_venue = &venue; break; }
-    }
-    const char* venue_label = selected_venue ? selected_venue->compact_label : "All venues";
-    float venue_text_x = venue_p.x + 8.0f;
-    if (selected_venue) {
-        constexpr float logo_size = 13.0f;
-        LogoManager::instance().draw_exchange(dl, selected_venue->id,
-            ImVec2(venue_p.x + 8.0f, venue_p.y + (h - logo_size) * 0.5f), logo_size);
-        venue_text_x += logo_size + 5.0f;
-    } else {
-        const float gx = venue_p.x + 9.0f, gy = venue_p.y + h * 0.5f - 4.0f;
-        for (int i = 0; i < 3; ++i)
-            dl->AddLine(ImVec2(gx, gy + i * 4.0f), ImVec2(gx + 10.0f, gy + i * 4.0f),
-                        Theme::u32(Theme::Tokens::TX2), 1.0f);
-        venue_text_x += 16.0f;
-    }
-    ImGui::PushFont(Theme::Fonts::ui());
-    dl->PushClipRect(ImVec2(venue_text_x, venue_p.y),
-                     ImVec2(venue_p.x + venue_w - 17.0f, venue_p.y + h), true);
-    dl->AddText(ImVec2(venue_text_x, venue_p.y + h*0.5f - ImGui::GetFontSize()*0.5f),
-                Theme::u32(Theme::Tokens::TX2), venue_label);
+    const float logo = 16 * WK;
+    if (selected_venue) LogoManager::instance().draw_exchange(dl, selected_venue->id, ImVec2(venue_p.x + 10 * WK, venue_p.y + (h - logo) * 0.5f), logo);
+    else drawing::draw_ui_icon(dl, drawing::UiIcon::Globe, ImVec2(venue_p.x + 10 * WK + logo * 0.5f, venue_p.y + h * 0.5f), 6 * WK, Theme::u32(Theme::Tokens::TX2), 1.3f);
+    Theme::push_font(Theme::Fonts::ui(), 14.5f * WK);
+    const float vtx = venue_p.x + 10 * WK + logo + 8 * WK;
+    dl->PushClipRect(ImVec2(vtx, venue_p.y), ImVec2(venue_p.x + venue_w - 24 * WK, venue_p.y + h), true);
+    dl->AddText(ImVec2(vtx, venue_p.y + (h - ImGui::GetFontSize()) * 0.5f), Theme::u32(Theme::Tokens::TX1),
+                selected_venue ? selected_venue->compact_label : "All venues");
     dl->PopClipRect();
     ImGui::PopFont();
-    const float vqx = venue_p.x + venue_w - 14.0f;
-    dl->AddTriangleFilled(ImVec2(vqx, qy-2.0f), ImVec2(vqx+6.0f, qy-2.0f),
-                          ImVec2(vqx+3.0f, qy+2.5f), Theme::u32(Theme::Tokens::TX2));
 
-    // taxonomy popover - searchable 2-column grid of name+count chips
-    // It spans the full rail and is opaque so the selector underneath cannot
-    // leak into the first All / AI row at the popup margins.
-    ImGui::SetNextWindowPos(ImVec2(bp.x, p0.y + h + 4.0f));
-    ImGui::SetNextWindowSize(ImVec2(std::min(std::max(ww, 440.0f), ImGui::GetMainViewport()->Size.x - 20.0f), 0.0f));
-    ImGui::SetNextWindowBgAlpha(1.0f);
-    ImGui::PushStyleColor(ImGuiCol_PopupBg, Theme::Tokens::PANEL);
-    ImGui::PushStyleColor(ImGuiCol_Border,  Theme::Tokens::BD2);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(9.0f, 9.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, Theme::Radius::R3);
-    ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1.0f);
-    if (Theme::begin_popup("##wl_cat_pop")) {
+    // Popovers share the floating chrome: elevated, rounded, hairlined.
+    auto begin_pop = [&](const char* id, ImVec2 pos, float width, ImVec2 padding) {
+        ImGui::SetNextWindowPos(pos);
+        ImGui::SetNextWindowSize(ImVec2(width, 0.0f));
+        ImGui::SetNextWindowBgAlpha(1.0f);
+        ImGui::PushStyleColor(ImGuiCol_PopupBg, Theme::Tokens::ELEV);
+        ImGui::PushStyleColor(ImGuiCol_Border, Theme::Tokens::BD2);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, padding);
+        ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, Theme::Radius::R3);
+        ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1.0f);
+        const bool open = Theme::begin_popup(id);
+        ImGui::PopStyleVar(3);
+        ImGui::PopStyleColor(2);
+        return open;
+    };
+    // One selectable row: rounded hover, filled when active; label, optional logo, count.
+    auto option = [&](const char* id_label, const char* label, int count, bool active, float rw, const char* venue_id) {
+        const ImVec2 rp = ImGui::GetCursorScreenPos();
+        const float rh = 32 * WK;
+        const bool clicked = ImGui::InvisibleButton(id_label, ImVec2(rw, rh));
+        const bool hovered = ImGui::IsItemHovered();
+        ImDrawList* pdl = ImGui::GetWindowDrawList();
+        if (active || hovered)
+            pdl->AddRectFilled(rp, ImVec2(rp.x + rw, rp.y + rh), Theme::u32(active ? Theme::Tokens::CONTROL_ACTIVE : Theme::Tokens::CONTROL), Theme::Radius::R2);
+        float tx = rp.x + 10 * WK;
+        if (venue_id && venue_id[0]) {
+            const float lg = 15 * WK;
+            LogoManager::instance().draw_exchange(pdl, venue_id, ImVec2(tx, rp.y + (rh - lg) * 0.5f), lg);
+            tx += lg + 8 * WK;
+        }
+        Theme::push_font(Theme::Fonts::ui(), 14 * WK);
+        char nb[16]; snprintf(nb, sizeof(nb), "%d", count);
+        const float nbw = ImGui::CalcTextSize(nb).x;
+        pdl->PushClipRect(ImVec2(tx, rp.y), ImVec2(rp.x + rw - nbw - 16 * WK, rp.y + rh), true);
+        pdl->AddText(ImVec2(tx, rp.y + (rh - ImGui::GetFontSize()) * 0.5f), Theme::u32(active || hovered ? Theme::Tokens::TX1 : Theme::Tokens::TX2), label);
+        pdl->PopClipRect();
+        pdl->AddText(ImVec2(rp.x + rw - 10 * WK - nbw, rp.y + (rh - ImGui::GetFontSize()) * 0.5f), Theme::u32(Theme::Tokens::TX3), nb);
+        ImGui::PopFont();
+        return clicked;
+    };
+
+    // Categories: a search field over a two-column grid.
+    if (begin_pop("##wl_cat_pop", ImVec2(bp.x + pad, p0.y + h + 6 * WK),
+                  std::min(std::max(w, 420 * WK), ImGui::GetMainViewport()->Size.x - 20.0f), ImVec2(10 * WK, 10 * WK))) {
+        Theme::push_font(Theme::Fonts::ui(), 14 * WK);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(30 * WK, 7 * WK));
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, Theme::Radius::R2);
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
+        ImGui::PushStyleColor(ImGuiCol_TextDisabled, Theme::Tokens::TX3);
         ImGui::SetNextItemWidth(-FLT_MIN);
-        ImGui::PushStyleColor(ImGuiCol_TextDisabled, Theme::Tokens::TX2);
         ImGui::InputTextWithHint("##wl_cat_search", "Search categories", cat_search_, sizeof(cat_search_));
+        const ImVec2 sa = ImGui::GetItemRectMin(), sb = ImGui::GetItemRectMax();
+        drawing::draw_ui_icon(ImGui::GetWindowDrawList(), drawing::UiIcon::Search, ImVec2(sa.x + 15 * WK, (sa.y + sb.y) * 0.5f), 5.5f * WK, Theme::u32(Theme::Tokens::TX3), 1.3f);
         ImGui::PopStyleColor();
         ImGui::PopStyleVar(2);
-        ImGui::Dummy(ImVec2(0, 3.0f));
-
-        ImGui::BeginChild("##wl_cat_grid", ImVec2(0, 224.0f));
-        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.0f, 5.0f));
-        // Reserve the always-present vertical scrollbar (~19 categories overflow the
-        // 224px child) BEFORE splitting into two columns. Without this, cw is sized
-        // to the full width and the right chip collides with the scrollbar / its
-        // neighbour on the frame the scrollbar first appears.
-        constexpr float chip_gap = 7.0f;
-        const float cw = (ImGui::GetContentRegionAvail().x
-                          - ImGui::GetStyle().ScrollbarSize - chip_gap) * 0.5f;
+        ImGui::PopFont();
+        ImGui::Dummy(ImVec2(0, 6 * WK));
+        // Fit the grid to the full list (not the filtered one, so typing does not resize it),
+        // scrolling only past 320 px.
+        const int grid_rows = (static_cast<int>(categories_.size()) + 2) / 2;
+        const float grid_full = grid_rows * 34 * WK, grid_h = std::min(grid_full, 320 * WK);
+        const bool grid_scrolls = grid_full > grid_h + 0.5f;
+        ImGui::BeginChild("##wl_cat_grid", ImVec2(0, grid_h));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.0f, 2.0f * WK));
+        const float chip_gap = 6 * WK;
+        const float cw = (ImGui::GetContentRegionAvail().x - (grid_scrolls ? ImGui::GetStyle().ScrollbarSize : 0.0f) - chip_gap) * 0.5f;
         int col = 0;
         auto chip = [&](const char* label, int count, bool active, int catidx) {
             if (col == 1) ImGui::SameLine(0.0f, chip_gap);
             ImGui::PushID(catidx + 2);
-            const ImVec2 cp = ImGui::GetCursorScreenPos();
-            const float ch = 28.0f;
-            ImDrawList* cdl = ImGui::GetWindowDrawList();
-            const bool clicked = ImGui::InvisibleButton("##c", ImVec2(cw, ch));
-            const bool hov = ImGui::IsItemHovered();
-            cdl->AddRectFilled(cp, ImVec2(cp.x+cw, cp.y+ch),
-                Theme::u32(active ? Theme::Tokens::BRAND_SOFT
-                                  : (hov ? Theme::Tokens::ELEV : Theme::Tokens::PANEL)), Theme::Radius::R2);
-            if (active)
-                cdl->AddLine(ImVec2(cp.x + 8, cp.y + ch - 1), ImVec2(cp.x + cw - 8, cp.y + ch - 1),
-                    Theme::u32(Theme::Tokens::BRAND), 2);
-            ImGui::PushFont(Theme::Fonts::ui());
-            char nb[16]; snprintf(nb, sizeof(nb), "%d", count);
-            const float nbw = ImGui::CalcTextSize(nb).x;
-            cdl->PushClipRect(ImVec2(cp.x + 9.0f, cp.y),
-                              ImVec2(cp.x + cw - 17.0f - nbw, cp.y + ch), true);
-            cdl->AddText(ImVec2(cp.x+9.0f, cp.y+ch*0.5f-ImGui::GetFontSize()*0.5f),
-                Theme::u32(active ? Theme::Tokens::BRAND_TX : Theme::Tokens::TX2), label);
-            cdl->PopClipRect();
-            cdl->AddText(ImVec2(cp.x+cw-9.0f-nbw, cp.y+ch*0.5f-ImGui::GetFontSize()*0.5f),
-                Theme::u32(Theme::Tokens::TX2), nb);
-            ImGui::PopFont();
+            if (option("##c", label, count, active, cw, nullptr)) { selected_category_ = catidx; ImGui::CloseCurrentPopup(); }
             ImGui::PopID();
-            if (clicked) { selected_category_ = catidx; ImGui::CloseCurrentPopup(); }
             col ^= 1;
         };
-        if (!cat_search_[0] || contains_ci(std::string("All"), cat_search_))
-            chip("All", scoped_count_, selected_category_ < 0, -1);
+        if (!cat_search_[0] || contains_ci(std::string("All pairs"), cat_search_))
+            chip("All pairs", scoped_count_, selected_category_ < 0, -1);
         for (int i = 0; i < static_cast<int>(categories_.size()); ++i) {
             if (cat_search_[0] && !contains_ci(categories_[i], cat_search_)) continue;
             chip(categories_[i].c_str(), category_counts_[i], selected_category_ == i, i);
@@ -506,192 +475,92 @@ void WatchlistWidget::render_category_selector() {
         ImGui::EndChild();
         ImGui::EndPopup();
     }
-    ImGui::PopStyleVar(3);
-    ImGui::PopStyleColor(2);
 
-    // Venue popover - a compact three-row filter, defaulting to All venues.
-    // Reserve both text and count columns, plus logo, gutters and popup padding.
-    ImGui::PushFont(Theme::Fonts::ui());
-    const float venue_popup_w = std::max(220.0f,
-        ImGui::CalcTextSize("Hyperliquid").x + ImGui::CalcTextSize("9999").x + 75.0f);
-    ImGui::PopFont();
-    ImGui::SetNextWindowPos(ImVec2(bp.x + ww - venue_popup_w, p0.y + h + 4.0f));
-    ImGui::SetNextWindowSize(ImVec2(venue_popup_w, 0.0f));
-    ImGui::SetNextWindowBgAlpha(1.0f);
-    ImGui::PushStyleColor(ImGuiCol_PopupBg, Theme::Tokens::PANEL);
-    ImGui::PushStyleColor(ImGuiCol_Border,  Theme::Tokens::BD2);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6.0f, 6.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, Theme::Radius::R3);
-    ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1.0f);
-    if (Theme::begin_popup("##wl_venue_pop")) {
-        ImDrawList* venue_dl = ImGui::GetWindowDrawList();
-        auto venue_row = [&](const char* id, const char* label, int count, int row_id) {
-            const bool active = selected_exchange_ == id;
-            const ImVec2 rp = ImGui::GetCursorScreenPos();
-            const float rw = ImGui::GetContentRegionAvail().x;
-            const float rh = 27.0f;
-            ImGui::PushID(row_id);
-            const bool clicked = ImGui::InvisibleButton("##venue_row", ImVec2(rw, rh));
-            const bool hovered = ImGui::IsItemHovered();
-            ImGui::PopID();
-            venue_dl->AddRectFilled(rp, ImVec2(rp.x + rw, rp.y + rh),
-                Theme::u32(active ? Theme::Tokens::BRAND_SOFT
-                                  : (hovered ? Theme::Tokens::ELEV : Theme::Tokens::PANEL)),
-                Theme::Radius::R2);
-            if (active)
-                venue_dl->AddRectFilled(rp, ImVec2(rp.x + 2.0f, rp.y + rh),
-                                        Theme::u32(Theme::Tokens::BRAND), Theme::Radius::R2);
-
-            float tx = rp.x + 8.0f;
-            if (id[0]) {
-                constexpr float logo_size = 13.0f;
-                LogoManager::instance().draw_exchange(venue_dl, id,
-                    ImVec2(tx, rp.y + (rh - logo_size) * 0.5f), logo_size);
-                tx += logo_size + 6.0f;
-            }
-            ImGui::PushFont(Theme::Fonts::ui());
-            char nb[16]; snprintf(nb, sizeof(nb), "%d", count);
-            const float nbw = ImGui::CalcTextSize(nb).x;
-            venue_dl->PushClipRect(ImVec2(tx, rp.y), ImVec2(rp.x + rw - nbw - 15.0f, rp.y + rh), true);
-            venue_dl->AddText(ImVec2(tx, rp.y + (rh - ImGui::GetFontSize()) * 0.5f),
-                              Theme::u32(active ? Theme::Tokens::BRAND_TX : Theme::Tokens::TX2), label);
-            venue_dl->PopClipRect();
-            venue_dl->AddText(ImVec2(rp.x + rw - 8.0f - nbw, rp.y + (rh - ImGui::GetFontSize()) * 0.5f),
-                              Theme::u32(Theme::Tokens::TX2), nb);
-            ImGui::PopFont();
-
-            if (clicked) {
-                selected_exchange_ = id;
-                selected_category_ = -1;
-                cat_search_[0] = '\0';
-                build_category_counts();
-                ImGui::CloseCurrentPopup();
-            }
+    // Venues: All, then each venue with its logo and count.
+    const float venue_popup_w = std::max(240 * WK, venue_w);
+    if (begin_pop("##wl_venue_pop", ImVec2(bp.x + ww - pad - venue_popup_w, p0.y + h + 6 * WK), venue_popup_w, ImVec2(6 * WK, 6 * WK))) {
+        const float rw = ImGui::GetContentRegionAvail().x;
+        auto pick = [&](const char* id) {
+            selected_exchange_ = id;
+            selected_category_ = -1;
+            cat_search_[0] = '\0';
+            build_category_counts();
+            ImGui::CloseCurrentPopup();
         };
-        venue_row("", "All venues", all_count_, 0);
-        for (size_t i = 0; i < exchange_counts_.size(); ++i)
-            venue_row(kWatchlistVenues[i].id, kWatchlistVenues[i].label,
-                      exchange_counts_[i], static_cast<int>(i) + 1);
+        if (option("##venue_all", "All venues", all_count_, selected_exchange_.empty(), rw, nullptr)) pick("");
+        for (size_t i = 0; i < exchange_counts_.size(); ++i) {
+            ImGui::PushID(static_cast<int>(i));
+            if (option("##venue", kWatchlistVenues[i].label, exchange_counts_[i], selected_exchange_ == kWatchlistVenues[i].id, rw, kWatchlistVenues[i].id))
+                pick(kWatchlistVenues[i].id);
+            ImGui::PopID();
+        }
         ImGui::EndPopup();
     }
-    ImGui::PopStyleVar(3);
-    ImGui::PopStyleColor(2);
 
-    // advance band (8 top + 28 + 8 bottom) + bottom hairline
     ImGui::SetCursorScreenPos(bp);
-    ImGui::Dummy(ImVec2(ww, 8.0f + h + 8.0f));
-    const float hy = bp.y + 8.0f + h + 8.0f - 1.0f;
-    dl->AddLine(ImVec2(bp.x, hy), ImVec2(bp.x + ww, hy), Theme::u32(Theme::Tokens::BD1));
+    ImGui::Dummy(ImVec2(ww, h + 8 * WK));
 }
 
-// ── Sort header - one flat row in the list's own column grid ─────────────────
-// SYMBOL and VOL sit where the rows print the name and its 24h volume, LAST and
-// 24H% right-align on the same edges as the row figures. Every column carries
-// the up/down sort chevrons; the active direction is bright. No chip boxes:
-// this reads as the first line of the list, not as a toolbar above it.
+// ── Sort header: quiet labels on the row grid; the active one bright with its direction ──
 
 void WatchlistWidget::render_sort_header() {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 bp = ImGui::GetCursorScreenPos();
     const float w = ImGui::GetContentRegionAvail().x;
-    const float hh = 24.0f;
+    const float hh = 28 * WK;
     const float cy = bp.y + hh * 0.5f;
-
-    // Same grid as render_rows (keep the two in step).
-    const float pad_l = 8.0f, pad_r = 10.0f, gap = 8.0f;
-    const float star_w = 15.0f, spark_w = 52.0f, chg_w = 88.0f;
-    const bool  compact = compact_ || w < 410.0f;
-    const bool  show_spark = !compact;
-    const bool  stacked = w < 410.0f;
-    const float chg_right  = w - pad_r;
-    const float last_right = stacked ? chg_right : chg_right - chg_w - gap;
-    const float sym_left   = show_spark ? (pad_l + star_w + gap + spark_w + gap)
-                                        : (pad_l + star_w + gap);
-
-    ImGui::PushFont(Theme::Fonts::label());
+    const RowGrid g = row_grid(w, compact_);
+    Theme::push_font(Theme::Fonts::ui(), 13 * WK);
     const float fs = ImGui::GetFontSize();
-
-    // label + chevron pair; `x` is the left edge (or the right edge when
-    // right_align). Returns the drawn width. Click toggles / switches the sort.
     auto cell = [&](const char* label, Sort col, float x, bool right_align) -> float {
-        const bool active = (sort_ == col);
+        const bool active = sort_ == col;
         const float lw = ImGui::CalcTextSize(label).x;
-        const float chev_w = 7.0f, chev_gap = 5.0f;
-        const float cw = lw + chev_gap + chev_w;
+        const float chev = active ? 12 * WK : 0.0f;
+        const float cw = lw + chev;
         const float x0 = right_align ? x - cw : x;
-        ImGui::SetCursorScreenPos(ImVec2(x0 - 4.0f, bp.y));
+        ImGui::SetCursorScreenPos(ImVec2(x0 - 4 * WK, bp.y));
         ImGui::PushID(static_cast<int>(col) + 40);
-        const bool clk = ImGui::InvisibleButton("##sc", ImVec2(cw + 8.0f, hh));
+        const bool clk = ImGui::InvisibleButton("##sc", ImVec2(cw + 8 * WK, hh));
         const bool hov = ImGui::IsItemHovered();
         ImGui::PopID();
-        dl->AddText(ImVec2(x0, cy - fs * 0.5f),
-                    Theme::u32(active || hov ? Theme::Tokens::TX1 : Theme::Tokens::TX3), label);
-        const float chx = x0 + lw + chev_gap;
-        const ImU32 hot = Theme::u32(Theme::Tokens::TX1);
-        const ImU32 dim = Theme::u32(hov ? Theme::Tokens::TX3 : Theme::Tokens::TX4);
-        dl->AddTriangleFilled(ImVec2(chx, cy - 1.5f), ImVec2(chx + chev_w, cy - 1.5f),
-                              ImVec2(chx + chev_w * 0.5f, cy - 5.5f), (active && !sort_desc_) ? hot : dim);
-        dl->AddTriangleFilled(ImVec2(chx, cy + 1.5f), ImVec2(chx + chev_w, cy + 1.5f),
-                              ImVec2(chx + chev_w * 0.5f, cy + 5.5f), (active && sort_desc_) ? hot : dim);
+        dl->AddText(ImVec2(x0, cy - fs * 0.5f), Theme::u32(active ? Theme::Tokens::TX1 : hov ? Theme::Tokens::TX2 : Theme::Tokens::TX3), label);
+        if (active)
+            drawing::draw_ui_icon(dl, sort_desc_ ? drawing::UiIcon::ChevronDown : drawing::UiIcon::ChevronUp,
+                                  ImVec2(x0 + lw + 7 * WK, cy + 0.5f), 3.5f * WK, Theme::u32(Theme::Tokens::TX1), 1.3f);
         if (clk) {
             if (sort_ == col) sort_desc_ = !sort_desc_;
             else { sort_ = col; sort_desc_ = (col != Sort::Symbol); }
         }
         return cw;
     };
-
-    const float sym_w = cell("SYMBOL", Sort::Symbol, bp.x + sym_left, false);
-    cell("VOL", Sort::Volume, bp.x + sym_left + sym_w + 14.0f, false);
-    const float chg_cell_w = cell("24H%", Sort::Change, bp.x + chg_right, true);
-    // Narrow rail: the rows print LAST under 24H%, so the header keeps LAST
-    // sortable just left of 24H% instead of on its own column edge.
-    cell("LAST", Sort::Price, stacked ? bp.x + chg_right - chg_cell_w - 14.0f
-                                      : bp.x + last_right, true);
-
+    const float pair_w = cell("Pair", Sort::Symbol, bp.x + g.sym_x, false);
+    cell("Volume", Sort::Volume, bp.x + g.sym_x + pair_w + 16 * WK, false);
+    const float chg_w = cell("24h", Sort::Change, bp.x + g.pill_right, true);
+    cell("Price", Sort::Price, g.stacked ? bp.x + g.pill_right - chg_w - 18 * WK : bp.x + g.price_right, true);
     ImGui::PopFont();
-
     ImGui::SetCursorScreenPos(bp);
     ImGui::Dummy(ImVec2(w, hh));
-    dl->AddLine(ImVec2(bp.x, bp.y + hh - 1.0f), ImVec2(bp.x + w, bp.y + hh - 1.0f),
-                Theme::u32(Theme::Tokens::BD1));
+    dl->AddLine(ImVec2(bp.x + 12 * WK, bp.y + hh - 1.0f), ImVec2(bp.x + w - 12 * WK, bp.y + hh - 1.0f), Theme::u32(Theme::Tokens::BD1));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Rows - star · sparkline · symbol (ellipsized) · last · 24h% + a dim 24h-volume
-// figure. A compact toggle (or a narrow rail, < 300px) drops the sparkline.
+// Rows: [star] logo (venue badge) pair / volume ... price / change pill. Compact
+// rows are one line: pair, price, pill.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 void WatchlistWidget::render_rows() {
     auto& tickers = TickerManager::instance();
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
-    ImGui::BeginChild("##wl_list", ImVec2(0, 0), false);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 4.0f * WK));
+    ImGui::BeginChild("##wl_list", ImVec2(0, 0), ImGuiChildFlags_AlwaysUseWindowPadding);
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.0f, 0.0f));
-
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const float w = ImGui::GetContentRegionAvail().x;
-
-    const float pad_l = 8.0f, pad_r = 10.0f, gap = 8.0f;
-    // These four move as one set. The non-symbol chrome below adds up to a
-    // fixed ~215px regardless of panel width, so at the old default rail the
-    // symbol column got about 30 to 41px and every row rendered nameless with
-    // LAST and 24H% pushed off-panel. Widening the rail alone would not have
-    // fixed it: LAST and 24H% were also too narrow for a real price and a
-    // signed percentage, and the condense threshold sat below the new default,
-    // so the rail would have opened already condensed.
-    const float star_w = 15.0f, spark_w = 52.0f, last_w = 92.0f, chg_w = 88.0f;
-    const bool  compact = compact_ || w < 410.0f;
-    const bool  show_spark = !compact;
-    const bool stacked = w < 410.0f;
-    const float content_h = compact ? 24.0f : 27.0f;
-    const float vol_h = 20.0f;                      // dim 24h-volume figure line
-    const float pitch = content_h + vol_h + 1.0f;   // content + volume + 1px hairline
-
-    const float chg_right  = w - pad_r;
-    const float last_right = stacked ? chg_right : chg_right - chg_w - gap;
-    const float last_left  = last_right - last_w;
-    const float sym_left   = show_spark ? (pad_l + star_w + gap + spark_w + gap)
-                                        : (pad_l + star_w + gap);
-    const float sym_right = stacked ? chg_right - chg_w - gap : last_left - gap;
+    const RowGrid g = row_grid(w, compact_);
+    const float pitch = g.h + 2 * WK;
+    ImFont* sym_font = Theme::Fonts::ui_semibold();
+    ImFont* ui_font = Theme::Fonts::ui();
+    ImFont* mono_font = Theme::Fonts::mono();
+    const float sym_px = (g.compact ? 15.5f : 16.5f) * WK, sub_px = 13.5f * WK, price_px = (g.compact ? 15 : 16) * WK, pill_px = 13.5f * WK;
 
     ImGuiListClipper clipper;
     clipper.Begin(static_cast<int>(visible_.size()), pitch);
@@ -699,158 +568,103 @@ void WatchlistWidget::render_rows() {
         for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
             const auto* meta = visible_[i];
             const auto* t = tickers.get(meta->exchange, meta->symbol);
-            const bool selected = (meta->exchange == active_pair_.exchange &&
-                                   meta->symbol == active_pair_.symbol);
+            const bool selected = meta->exchange == active_pair_.exchange && meta->symbol == active_pair_.symbol;
             const bool fav = favorites_.find(meta->pair_key) != favorites_.end();
             ImGui::PushID(i);
-
             const ImVec2 row_min = ImGui::GetCursorScreenPos();
             const bool clicked = ImGui::InvisibleButton("##row", ImVec2(w, pitch));
             const bool hovered = ImGui::IsItemHovered();
-            if (hovered) Theme::tooltip("%s · %s", meta->symbol.c_str(), widget_venue_label(meta->exchange));
-            const float cy_line = row_min.y + content_h * 0.5f;
-
+            const ImVec2 a(row_min.x + g.pad, row_min.y + 1 * WK), b(row_min.x + w - g.pad, row_min.y + pitch - 1 * WK);
+            const float mid = (a.y + b.y) * 0.5f;
             if (selected) {
-                dl->AddRectFilled(row_min, ImVec2(row_min.x + w, row_min.y + pitch - 1.0f),
-                                  Theme::u32(Theme::Tokens::BRAND_SOFT));
-                dl->AddRectFilled(row_min, ImVec2(row_min.x + 2.0f, row_min.y + pitch - 1.0f),
-                                  Theme::u32(Theme::Tokens::BRAND));
+                dl->AddRectFilled(a, b, Theme::u32(Theme::Tokens::CONTROL_HOVER), Theme::Radius::R2);
+                dl->AddRectFilled(ImVec2(a.x, mid - 9 * WK), ImVec2(a.x + 3 * WK, mid + 9 * WK), Theme::u32(Theme::Tokens::BRAND), 1.5f * WK);
             } else if (hovered) {
-                dl->AddRectFilled(row_min, ImVec2(row_min.x + w, row_min.y + pitch - 1.0f),
-                                  Theme::u32(Theme::Tokens::ELEV));
+                dl->AddRectFilled(a, b, Theme::u32(Theme::Tokens::CONTROL), Theme::Radius::R2);
             }
-
+            const float mx = ImGui::GetIO().MousePos.x;
+            const bool on_star = mx <= row_min.x + g.logo_x - 2 * WK;
             if (clicked) {
-                const float mx = ImGui::GetIO().MousePos.x;
-                if (mx <= row_min.x + pad_l + star_w + 4.0f) {   // star cell → toggle favourite
+                if (on_star) {
                     auto it = favorites_.find(meta->pair_key);
                     if (it == favorites_.end()) favorites_.insert(meta->pair_key);
                     else favorites_.erase(it);
                 } else if (!selected) {
 #ifdef __EMSCRIPTEN__
-                    // url_navigate carries ?ws= (and any other user params)
-                    // across the reload; a bare location.href would drop a
-                    // self-hosted feed here.
+                    // url_navigate carries ?ws= (and any other user params) across the reload.
                     url_navigate(build_terminal_path(meta->exchange, meta->symbol));
 #endif
                 }
             }
-
-            const ImVec4 chg_col = (t && t->change_pct_24h < 0.0)
-                                   ? Theme::Tokens::DOWN : Theme::Tokens::UP;
-
-            draw_star(dl, ImVec2(row_min.x + pad_l + star_w * 0.5f, cy_line), 5.0f, fav,
-                      Theme::u32(fav ? Theme::Tokens::TX1 : Theme::Tokens::TX2));
-
-            if (show_spark) {
-                auto sit = sparks_.find(meta->pair_key);
-                if (sit != sparks_.end() && sit->second.count >= 2)
-                    draw_sparkline(sit->second,
-                        ImVec2(row_min.x + pad_l + star_w + gap, cy_line - 7.0f),
-                        spark_w, 14.0f, chg_col);
-            }
-
-            // symbol - base (bright) + /quote (dim), ellipsized to its column so
-            // long tickers (SKHYNIX/USDT, 1000PEPE/USDT) never reach the price cols
-            {
-                const char* base = meta->base_asset.empty() ? meta->symbol.c_str()
-                                                             : meta->base_asset.c_str();
-                char quote[16] = {};
-                if (!meta->base_asset.empty())
-                    snprintf(quote, sizeof(quote), "/%s", meta->quote_asset.c_str());
-                // coin logo immediately left of the symbol (monogram fallback)
-                const float logo_w = 16.0f;
-                LogoManager::instance().draw_coin(dl, meta->base_asset,
-                    ImVec2(row_min.x + sym_left, cy_line - logo_w * 0.5f), logo_w);
-                if (selected_exchange_.empty()) {
-                    // When venues are mixed, badge the coin rather than spending
-                    // another crowded text column on exchange identity.
-                    ImTextureID exchange_logo = LogoManager::instance().exchange(meta->exchange);
-                    if (exchange_logo) {
-                        constexpr float badge_w = 8.0f;
-                        const ImVec2 badge(row_min.x + sym_left + logo_w - badge_w + 1.0f,
-                                           cy_line + logo_w * 0.5f - badge_w + 1.0f);
-                        dl->AddCircleFilled(ImVec2(badge.x + badge_w * 0.5f,
-                                                   badge.y + badge_w * 0.5f),
-                                            badge_w * 0.65f, Theme::u32(Theme::Tokens::PANEL));
-                        dl->AddImage(exchange_logo, badge,
-                                     ImVec2(badge.x + badge_w, badge.y + badge_w));
-                    }
+            // Star: shown when set (amber) or while the row is hovered.
+            if (fav || hovered)
+                draw_star(dl, ImVec2(row_min.x + g.star_x, mid), 5.5f * WK, fav,
+                          Theme::u32(fav ? Theme::Tokens::WARN : (on_star && hovered ? Theme::Tokens::TX1 : Theme::Tokens::TX3)));
+            // Logo, with the venue's badge when venues are mixed.
+            LogoManager::instance().draw_coin(dl, meta->base_asset, ImVec2(row_min.x + g.logo_x, mid - g.logo * 0.5f), g.logo);
+            if (selected_exchange_.empty()) {
+                if (ImTextureID ex = LogoManager::instance().exchange(meta->exchange)) {
+                    const float bw = std::round(g.logo * 0.46f);
+                    const ImVec2 bc(row_min.x + g.logo_x + g.logo - bw * 0.35f, mid + g.logo * 0.5f - bw * 0.35f);
+                    dl->AddCircleFilled(bc, bw * 0.62f, Theme::u32(selected ? Theme::Tokens::CONTROL_HOVER : hovered ? Theme::Tokens::CONTROL : Theme::Tokens::PANEL));
+                    dl->AddImage(ex, ImVec2(bc.x - bw * 0.5f, bc.y - bw * 0.5f), ImVec2(bc.x + bw * 0.5f, bc.y + bw * 0.5f));
                 }
-                const float sxl   = row_min.x + sym_left + logo_w + 6.0f;
-                const float avail = sym_right - sym_left - logo_w - 6.0f;
-                const char* ell   = "\xE2\x80\xA6";   // horizontal ellipsis
-
-                ImGui::PushFont(Theme::Fonts::ui_semibold());
-                const float base_w = ImGui::CalcTextSize(base).x;
-                const float ell_w  = ImGui::CalcTextSize(ell).x;
-                const float by     = cy_line - ImGui::GetFontSize() * 0.5f;
+            }
+            // Price and change, measured first so the pair can ellipsize into what is left.
+            char pbuf[32] = "", cbuf[16] = "";
+            if (t && t->last_price > 0.0) meta->fmt.format_price(pbuf, sizeof(pbuf), t->last_price);
+            if (t) snprintf(cbuf, sizeof(cbuf), "%+.2f%%", t->change_pct_24h);
+            const float price_w = pbuf[0] ? mono_font->CalcTextSizeA(price_px, FLT_MAX, 0, pbuf).x : 0.0f;
+            const float right_block = g.stacked ? std::max(price_w, g.pill_w) : (g.pill_right - g.price_right) + price_w;
+            const float sym_right = row_min.x + g.pill_right - right_block - 12 * WK;
+            const bool two_line = !g.compact;
+            const float line1 = two_line ? mid - 11 * WK : mid;   // centre of the first line
+            const float line2 = mid + 12 * WK;
+            // Pair: base bright, /quote dim; ellipsized on a character boundary (CJK names are 3 bytes a glyph).
+            {
+                const char* base = meta->base_asset.empty() ? meta->symbol.c_str() : meta->base_asset.c_str();
+                char quote[16] = {};
+                if (!meta->base_asset.empty()) snprintf(quote, sizeof(quote), "/%s", meta->quote_asset.c_str());
+                const float sx = row_min.x + g.sym_x, avail = sym_right - sx;
+                const char* ell = "\xE2\x80\xA6";
+                const float base_w = sym_font->CalcTextSizeA(sym_px, FLT_MAX, 0, base).x;
+                const float by = line1 - sym_px * 0.58f;
                 if (base_w <= avail) {
-                    dl->AddText(ImVec2(sxl, by), Theme::u32(Theme::Tokens::TX1), base);
-                    ImGui::PopFont();
+                    dl->AddText(sym_font, sym_px, ImVec2(sx, by), Theme::u32(Theme::Tokens::TX1), base);
                     if (quote[0]) {
-                        ImGui::PushFont(Theme::Fonts::ui());
-                        const float qy = cy_line - ImGui::GetFontSize() * 0.5f;
-                        const float qw = ImGui::CalcTextSize(quote).x;
-                        dl->AddText(ImVec2(sxl + base_w + 1.0f, qy), Theme::u32(Theme::Tokens::TX2),
-                                    (base_w + qw <= avail) ? quote : ell);
-                        ImGui::PopFont();
+                        const float qw = ui_font->CalcTextSizeA(sym_px, FLT_MAX, 0, quote).x;
+                        if (base_w + qw <= avail) dl->AddText(ui_font, sym_px, ImVec2(sx + base_w + 1.0f, by), Theme::u32(Theme::Tokens::TX3), quote);
                     }
                 } else {
-                    // Ellipsize on a CHARACTER boundary, not a byte one. The
-                    // Chinese-named perps (龙虾USDT, 牛来USDT) are three bytes
-                    // per glyph, and they are also the widest names here now
-                    // that they render, so they are the ones that reach this
-                    // branch. Cutting mid-sequence hands ImGui half a code
-                    // point to draw. Walk k back off any continuation byte.
+                    const float ell_w = sym_font->CalcTextSizeA(sym_px, FLT_MAX, 0, ell).x;
                     int k = static_cast<int>(strlen(base));
-                    while (k > 0 && ImGui::CalcTextSize(base, base + k).x + ell_w > avail) {
+                    while (k > 0 && sym_font->CalcTextSizeA(sym_px, FLT_MAX, 0, base, base + k).x + ell_w > avail) {
                         --k;
-                        while (k > 0 &&
-                               (static_cast<unsigned char>(base[k]) & 0xC0) == 0x80) --k;
+                        while (k > 0 && (static_cast<unsigned char>(base[k]) & 0xC0) == 0x80) --k;
                     }
-                    dl->AddText(ImVec2(sxl, by), Theme::u32(Theme::Tokens::TX1), base, base + k);
-                    dl->AddText(ImVec2(sxl + ImGui::CalcTextSize(base, base + k).x, by),
-                                Theme::u32(Theme::Tokens::TX1), ell);
-                    ImGui::PopFont();
+                    dl->AddText(sym_font, sym_px, ImVec2(sx, by), Theme::u32(Theme::Tokens::TX1), base, base + k);
+                    dl->AddText(sym_font, sym_px, ImVec2(sx + sym_font->CalcTextSizeA(sym_px, FLT_MAX, 0, base, base + k).x, by), Theme::u32(Theme::Tokens::TX1), ell);
+                }
+                if (two_line && t && t->volume_quote > 0.0) {
+                    char vbuf[24], line[32];
+                    fmt_volume(vbuf, sizeof(vbuf), t->volume_quote);
+                    snprintf(line, sizeof(line), "Vol %s", vbuf);
+                    dl->AddText(ui_font, sub_px, ImVec2(sx, line2 - sub_px * 0.58f), Theme::u32(Theme::Tokens::TX3), line);
                 }
             }
-
-            // last · 24h% - mono, right-aligned in their fixed columns
-            ImGui::PushFont(Theme::Fonts::mono());
-            const float ly = cy_line - ImGui::GetFontSize() * 0.5f;
-            if (t && t->last_price > 0.0) {
-                char pbuf[32];
-                meta->fmt.format_price(pbuf, sizeof(pbuf), t->last_price);
-                const float price_y = stacked ? row_min.y + content_h +
-                    (vol_h - ImGui::GetFontSize()) * 0.5f : ly;
-                dl->AddText(ImVec2(row_min.x + last_right - ImGui::CalcTextSize(pbuf).x, price_y),
-                            Theme::u32(Theme::Tokens::TX1), pbuf);
+            // Price: stacked on the first line at the right, else its own column.
+            if (pbuf[0]) {
+                const float py = (g.stacked ? line1 : mid) - price_px * 0.58f;
+                const float px = row_min.x + (g.stacked ? g.pill_right : g.price_right) - price_w;
+                dl->AddText(mono_font, price_px, ImVec2(px, py), Theme::u32(Theme::Tokens::TX1), pbuf);
             }
-            if (t) {
-                char cbuf[16];
-                snprintf(cbuf, sizeof(cbuf), "%+.2f%%", t->change_pct_24h);
-                dl->AddText(ImVec2(row_min.x + chg_right - ImGui::CalcTextSize(cbuf).x, ly),
-                            Theme::u32(chg_col), cbuf);
+            // Change pill: under the price when stacked, else beside it.
+            if (cbuf[0]) {
+                Theme::change_pill(dl, row_min.x + g.pill_right, g.stacked ? line2 : mid, t->change_pct_24h,
+                                   g.compact ? 13.0f * WK : pill_px);
             }
-            ImGui::PopFont();
-
-            // 24h volume - compact grey figure left-aligned directly under the
-            // symbol (Binance-style); never interrupts the 24h% read on the right.
-            if (t && t->volume_quote > 0.0) {
-                char vbuf[16];
-                fmt_volume(vbuf, sizeof(vbuf), t->volume_quote);
-                ImGui::PushFont(Theme::Fonts::mono_sm());
-                const float vy = row_min.y + content_h + (vol_h - ImGui::GetFontSize()) * 0.5f;
-                dl->AddText(ImVec2(row_min.x + sym_left, vy),
-                            Theme::u32(Theme::Tokens::TX2), vbuf);
-                ImGui::PopFont();
-            }
-
-            dl->AddLine(ImVec2(row_min.x, row_min.y + pitch - 1.0f),
-                        ImVec2(row_min.x + w, row_min.y + pitch - 1.0f),
-                        Theme::u32(Theme::Tokens::BD1));
-
+            if (hovered && !on_star && mx <= row_min.x + g.sym_x)
+                Theme::tooltip("%s / %s", meta->symbol.c_str(), widget_venue_label(meta->exchange));
             ImGui::PopID();
         }
     }
@@ -858,29 +672,4 @@ void WatchlistWidget::render_rows() {
     ImGui::PopStyleVar();   // ItemSpacing
     ImGui::EndChild();
     ImGui::PopStyleVar();   // WindowPadding
-}
-
-// ── Sparkline - polyline of ring-buffer samples, min/max normalized ──────────
-
-void WatchlistWidget::draw_sparkline(const Spark& s, ImVec2 p0, float w, float h,
-                                     const ImVec4& col) const {
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-
-    float lo = 1e30f, hi = -1e30f;
-    for (int i = 0; i < s.count; ++i) {
-        const float v = s.v[(s.head - s.count + i + SPARK_N * 2) % SPARK_N];
-        lo = std::min(lo, v);
-        hi = std::max(hi, v);
-    }
-    const float range = (hi - lo) > 1e-12f ? (hi - lo) : 1.0f;
-
-    ImVec2 prev{};
-    for (int i = 0; i < s.count; ++i) {
-        const float v = s.v[(s.head - s.count + i + SPARK_N * 2) % SPARK_N];
-        const float x = p0.x + (s.count > 1 ? (w * i / (s.count - 1)) : 0.0f);
-        const float y = p0.y + h - ((v - lo) / range) * h;
-        const ImVec2 pt(x, y);
-        if (i > 0) dl->AddLine(prev, pt, Theme::u32(col, 0.9f), 1.25f);
-        prev = pt;
-    }
 }

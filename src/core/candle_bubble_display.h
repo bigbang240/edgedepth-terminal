@@ -16,7 +16,7 @@ struct Marker { size_t index; float x, y, radius; };
 // Input is strongest first with stable identity tie-breaks. A screen budget and
 // disc separation reveal more detail on zoom without moving or summing prints.
 inline bool retain(std::vector<Marker>& selected, Marker next, float width) {
-    const size_t budget = size_t(std::clamp(int(width/14), 12, 180));
+    const size_t budget = size_t(std::clamp(int(width/20), 12, 120));
     if (selected.size() >= budget) return false;
     for (const auto& old : selected) {
         const float dx=next.x-old.x, dy=next.y-old.y;

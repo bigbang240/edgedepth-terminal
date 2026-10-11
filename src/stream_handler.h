@@ -126,6 +126,9 @@ public:
     void request_replay_preview_candles(const Terminal::Pair& pair, int64_t timeframe) const;
 
     bool request_historical_liq_levels(const Terminal::Pair& pair, int64_t start_ms, int64_t end_ms) const;
+    bool request_historical_liqmap2(const Terminal::Pair& pair, int64_t start_ms, int64_t end_ms) const;
+    bool request_liqmap2_scorecard(const Terminal::Pair& pair) const;
+    bool request_historical_liqmap2_rails(const Terminal::Pair& pair, int64_t start_ms, int64_t end_ms) const;
     void request_historical_oi(const Terminal::Pair& pair, int64_t timeframe, int count) const;
     void request_historical_funding(const Terminal::Pair& pair, int64_t timeframe, int count) const;
     // Indicators V1 (F3 absolute range): vpin_buckets history. start_ms/end_ms
@@ -134,6 +137,11 @@ public:
     void request_historical_vpin(const Terminal::Pair& pair, int64_t start_ms,
                                  int64_t end_ms, int count) const;
 
+    uint64_t connection_generation() const { return connection_generation_; }
+    bool connected() const {
+        unsigned short state = 0;
+        return ws_ > 0 && emscripten_websocket_get_ready_state(ws_, &state) == EMSCRIPTEN_RESULT_SUCCESS && state == 1;
+    }
     void send_message(const std::string& message) const;
     void send_subscribe(const StreamKey& key) const;
     void send_unsubscribe(const StreamKey& key) const;
@@ -165,6 +173,7 @@ private:
 
 private:
     EMSCRIPTEN_WEBSOCKET_T ws_;
+    uint64_t connection_generation_ = 1;
     DispatchQueue* dispatch_queue_ = nullptr;
     bool replay_mode_ = false;  // When true, no server-side subscribe/unsubscribe
     bool live_subscriptions_paused_ = false;

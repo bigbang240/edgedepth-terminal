@@ -168,14 +168,19 @@ int main() {
     history.observe(book, 1111);
     history.copy_since(0, samples);
     expect(samples.size() == 2 && !samples.back()->segment_start, "continuation stays in same segment");
-    history.check_delta(102, 105, 106, 104);
+    history.check_delta(102, 105, 106, 104, 1217);
     expect(!history.valid(), "even a small sequence gap invalidates RT evidence");
+    expect(history.failure().count == 1 && history.failure().timestamp_ms == 1217 &&
+        history.failure().prior == 102 && history.failure().previous == 104,
+        "gap diagnostics retain the source clock and mismatched sequence IDs");
     history.observe(book, 1217);
     history.check_delta(106, 107, 108, 106);
     history.observe(book, 1317);
     history.copy_since(0, samples);
     expect(samples.size() == 2, "apparently contiguous later deltas cannot heal missing depth");
     history.seed(); history.observe(book, 1417);
+    expect(history.failure().count == 1 && history.failure().timestamp_ms == 1217,
+        "a rapid re-seed retains the failure without counting every subsequent delta");
     history.copy_since(0, samples);
     expect(samples.back()->segment_start && samples.back()->timestamp_ms == 1417, "new seed starts new observed segment");
     const auto serial = samples.back()->serial;
@@ -198,6 +203,8 @@ int main() {
     book.bids.insert_or_assign(102, 1);
     other.seed(); other.observe(book, 1234);
     expect(!other.valid(), "crossed source is not RT evidence");
+    expect(other.failure().count == 1 && other.failure().bid == 102 && other.failure().ask == 101,
+        "crossed-book failure retains the offending quotes");
 
     // SOPH hosted seed at 2026-09-08 09:42 UTC lagged its exchange chain.
     // These real IDs/times reproduce the reader dropping pre-seed overlap.
@@ -378,6 +385,31 @@ int main() {
     expect(frame.fresh(), "paused DOM uses frozen chart clock instead of wall clock");
     frame.synchronized = false;
     expect(!frame.fresh(), "seek or sequence failure withholds linked DOM despite retained book");
+    frame.paused = false;
+    linked_book->bid = 100; linked_book->ask = 101;
+    frame.quote.timestamp_ms = 1200; frame.quote.best_bid = 102; frame.quote.best_ask = 103;
+    frame.clock_ms = 2500;
+    expect(frame.recovery_visible() && !frame.fresh(), "brief live recovery is visible but never fresh evidence");
+    expect(frame.bid() == 100 && frame.ask() == 101, "held depth cannot be mixed with a newer quote");
+    frame.clock_ms = 7300;
+    expect(frame.recovery_visible(), "a slow resync does not time out to a black display");
+    frame.clock_ms = 16001; frame.synchronized = true;
+    expect(!frame.fresh() && frame.recovery_visible(), "a stale source remains labelled held, never fresh");
+    frame.clock_ms = 301000; frame.synchronized = false;
+    expect(frame.recovery_visible() && !frame.fresh(), "a prolonged disconnect preserves only the held display");
+    frame.clock_ms = 999;
+    expect(!frame.recovery_visible(), "recovery never displays future depth");
+    frame.clock_ms = 1200; frame.replay = true;
+    expect(!frame.recovery_visible(), "replay gaps never receive a live recovery hold");
+    frame.replay = false; frame.paused = true;
+    expect(frame.recovery_visible() && !frame.fresh(), "pausing during resync preserves the labelled frozen view");
+    frame.paused = false; frame.synchronized = true;
+    expect(frame.fresh() && !frame.recovery_visible() && frame.bid() == 102,
+        "a synchronized book immediately restores the normal live quote");
+    frame.synchronized = false; frame.recovery_enabled = false;
+    expect(!frame.recovery_visible(), "strict display mode disables the live hold");
+    frame.recovery_enabled = true; frame.book.reset();
+    expect(!frame.recovery_visible(), "initial join has no fabricated fallback book");
     if (!failures) std::puts("PASS: RT sequence, clocks, gaps, retention, rewind and trade multiplicity");
     return failures ? 1 : 0;
 }

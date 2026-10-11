@@ -1,5 +1,6 @@
 #pragma once
 #include "core/liq_field_brackets.h"
+#include "core/liq_field_venue_caps.h"
 #include <array>
 #include <cstdint>
 #include <string_view>
@@ -8,18 +9,28 @@ namespace liq_field {
 inline constexpr std::string_view kModelVersion = "lf.v2";
 inline constexpr std::array<double, 6> kLeverages{5, 10, 25, 50, 75, 100};
 
-// Match the pinned Go model. Other venues and unknown symbols retain the
-// legacy uncapped assumptions, explicitly identified in the layer details.
-inline double max_leverage(std::string_view exchange, std::string_view symbol) {
-    if (exchange != "binancef") return 0;
-    size_t lo = 0, hi = kLeverageCaps.size();
+template <size_t N>
+inline double find_cap(const std::array<LeverageCap, N>& caps, std::string_view symbol) {
+    size_t lo = 0, hi = caps.size();
     while (lo < hi) {
         const auto mid = lo + (hi - lo) / 2;
-        if (kLeverageCaps[mid].symbol < symbol) lo = mid + 1;
+        if (caps[mid].symbol < symbol) lo = mid + 1;
         else hi = mid;
     }
-    return lo < kLeverageCaps.size() && kLeverageCaps[lo].symbol == symbol
-        ? kLeverageCaps[lo].leverage : 0;
+    return lo < caps.size() && caps[lo].symbol == symbol ? caps[lo].leverage : 0;
+}
+
+// Binance matches the pinned Go model (July 2026 brackets). Hyperliquid and Bybit use the
+// 2026-10-02 venue snapshots, a display rule only: backend research evaluates Binance alone.
+// Unknown symbols keep the legacy uncapped assumptions, identified in the layer details.
+inline double max_leverage(std::string_view exchange, std::string_view symbol) {
+    if (exchange == "binancef") return find_cap(kLeverageCaps, symbol);
+    if (exchange == "hl") return find_cap(kHlLeverageCaps, symbol);
+    if (exchange == "bybit") return find_cap(kBybitLeverageCaps, symbol);
+    return 0;
+}
+inline const char* cap_snapshot(std::string_view exchange) {
+    return exchange == "binancef" ? "July 2026" : exchange == "hl" || exchange == "bybit" ? "October 2026" : "";
 }
 
 struct TierSelection { uint8_t enabled = 0; uint8_t floor = 0; };

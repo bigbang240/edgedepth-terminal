@@ -1,5 +1,8 @@
 #pragma once
 #include "core/census_history.h"
+#include "core/liqmap2_store.h"
+#include "core/liqmap2_rails.h"
+#include "core/reported_liquidation_history.h"
 
 #include "types/types.h"
 #include "rendering/shader_heatmap_renderer.h"
@@ -41,6 +44,21 @@ public:
     using CensusHistory = census_history::History<Terminal::LiquidationHeatmapSnapshot>;
     const CensusHistory* get_census_history(const Terminal::Pair& pair) const;
 
+    // ─── V2 modelled map (stream 38, history 39) ─────────────────
+    // Keyed by the venue pair the frame names (hub naming: {"bybit","btcusdt"}, {"hl","BTC"}); its own
+    // store, never mixed with the census or the scenario map. A frame liqmap2::valid refuses is dropped.
+    bool apply_liqmap2_frame(const Terminal::Pair& pair, const pb::LiqMapV2Frame& frame_pb);
+    const liqmap2::History* get_liqmap2_history(const Terminal::Pair& pair) const;
+
+    // ─── V2 rails admin preview (stream 40, history 41) ─────────
+    // One liqmap2_rails::Store per venue pair (hub naming), at most liqmap2_rails::kMaxMarkets.
+    void apply_liqmap2_rails(const Terminal::Pair& pair, const pb::LiqMapV2Rails& msg);
+    void apply_liqmap2_rails_history(const Terminal::Pair& pair, const pb::LiqMapV2RailsHistory& history);
+    const liqmap2_rails::Store* get_liqmap2_rails(const Terminal::Pair& pair) const;
+private:
+    liqmap2_rails::Store& rails_store(const Terminal::Pair& pair);
+public:
+
 
     // ─── Timeline mode (historical GPU heatmap) ──────────────────
     // Called from message_handler for each historical snapshot in the batch
@@ -62,6 +80,8 @@ public:
     // next to the estimated Field. Fed by the live LIQUIDATIONS stream; in
     // replay by the archive bundle / the liquidation_events DB seed (same
     // STREAM_LIQUIDATIONS payload). Bounded per symbol (oldest dropped).
+    using ReportHistory = ReportedLiquidationHistory<Terminal::Liquidation>;
+    ReportHistory& reported_history(const Terminal::Pair& pair) { return observed_events_[{pair.exchange,pair.symbol}]; }
     void add_observed_event(const Terminal::Pair& pair, const Terminal::Liquidation& liq);
     const std::vector<Terminal::Liquidation>& observed_events(const Terminal::Pair& pair) const;
     // Replay rewind (<<): drop events past the rewind target - they are the
@@ -86,6 +106,8 @@ public:
 
 private:
     std::map<LiqHeatmapKey, CensusHistory> census_history_; // at most four markets
+    std::map<LiqHeatmapKey, liqmap2::History> liqmap2_history_; // at most liqmap2::kMaxMarkets
+    std::map<LiqHeatmapKey, liqmap2_rails::Store> liqmap2_rails_; // at most liqmap2_rails::kMaxMarkets
     // Profile mode: latest snapshot per symbol
     std::map<LiqHeatmapKey, Terminal::LiquidationHeatmapSnapshot> snapshots_;
 
@@ -107,7 +129,7 @@ private:
     // WS4 Observed markers: time-ordered discrete events per symbol.
     // Stream order is near-monotonic; a short back-scan insert keeps the
     // vector sorted so the renderer can binary-search the visible window.
-    std::map<LiqHeatmapKey, std::vector<Terminal::Liquidation>> observed_events_;
+    std::map<LiqHeatmapKey, ReportHistory> observed_events_;
     static constexpr size_t kMaxObservedEvents = 50000;   // per symbol; ~28d of BTC
 
     // Timeline mode: GPU shader renderer per symbol

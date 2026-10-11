@@ -59,6 +59,13 @@ namespace Terminal {
         LiquidationLevels = 34,
         // Admin-scoped live pattern geometry (PatternDetected payload).
         PatternAdmin = 35,
+        IcebergState = 37, // 36 belongs to RT history
+        // V2 modelled liquidation map (LiqMapV2Frame) and its history (LiqMapV2History).
+        LiqMapV2 = 38,
+        HistoricalLiqMapV2 = 39,
+        // V2 rails admin preview (LiqMapV2Rails) and its history (LiqMapV2RailsHistory); admin only.
+        LiqMapV2Rails = 40,
+        HistoricalLiqMapV2Rails = 41,
     };
 
     constexpr std::string_view stream_to_string(Stream s) {
@@ -97,6 +104,11 @@ namespace Terminal {
         case Stream::ReplayPreviewCandles: return "ReplayPreviewCandles";
         case Stream::LiquidationLevels: return "LiquidationLevels";
         case Stream::PatternAdmin: return "PatternAdmin";
+        case Stream::IcebergState: return "IcebergState";
+        case Stream::LiqMapV2: return "LiqMapV2";
+        case Stream::HistoricalLiqMapV2: return "HistoricalLiqMapV2";
+        case Stream::LiqMapV2Rails: return "LiqMapV2Rails";
+        case Stream::HistoricalLiqMapV2Rails: return "HistoricalLiqMapV2Rails";
         default: return "Unknown";
         }
     }
@@ -197,6 +209,7 @@ namespace Terminal {
     };
 
     struct Stat {
+        bool historical = false; // batch origin; never a live window snapshot
         int64_t timeframe;
         double mark_price;
         double funding;
@@ -234,6 +247,8 @@ namespace Terminal {
         double qty;
         bool is_buy;
         int64_t timestamp_ms;
+        int64_t trade_timestamp_ms = 0;
+        double filled_qty = 0;
     };
 
     // Live admin pattern overlay. The server sends exactly two swing-high

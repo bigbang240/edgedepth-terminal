@@ -172,13 +172,32 @@ extern "C" {
 // Construction
 // ═══════════════════════════════════════════════════════════════════════════════
 
+#ifdef __EMSCRIPTEN__
+// Event-driven, so it runs while the tab is hidden and the frame loop (rAF) is
+// not: the pause has to reach the box before the tab stops draining the socket.
+// Registered once; it reaches whichever manager is current via g_replay_instance.
+static EM_BOOL replay_visibility_cb(int, const EmscriptenVisibilityChangeEvent* e, void*) {
+    if (g_replay_instance && e) g_replay_instance->on_visibility_change(e->hidden);
+    return EM_FALSE;
+}
+#endif
+
 ReplayManager::ReplayManager(WebSocketClient* nats_lane, WebSocketClient* archive_lane)
     : nats_lane_(nats_lane), archive_lane_(archive_lane)
 {
     g_replay_instance = this;
+#ifdef __EMSCRIPTEN__
+    static bool visibility_registered = false;
+    if (!visibility_registered) {
+        visibility_registered = true;
+        emscripten_set_visibilitychange_callback(nullptr, EM_FALSE, replay_visibility_cb);
+    }
+#endif
 }
 
-ReplayManager::~ReplayManager() = default;
+ReplayManager::~ReplayManager() {
+    if (g_replay_instance == this) g_replay_instance = nullptr;
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Replay Initiation
@@ -192,6 +211,11 @@ void ReplayManager::request_replay(
     int64_t timeframe_seconds,
     int64_t anchor_ms)
 {
+    if (!reconnect_issuing_) cancel_reconnect();   // a new replay replaces any recovery
+    usage::dispatch_detail(json{{"event", "replay_attempt"}, {"mode", usage_source()},
+        {"props", {{"source", usage_source()}, {"exchange", exchange_},
+                   {"symbol", symbols.empty() ? "" : symbols.front()},
+                   {"start_ms", start_time_ms}, {"end_ms", end_time_ms}}}}.dump());
     // ── Free-tier pre-gate (UX funnel; the Go backend is the real enforcer) ──
     // Runs BEFORE tearing down any active replay, so a blocked attempt never kills
     // the current session. A doomed request opens the upsell here instead of
@@ -201,14 +225,16 @@ void ReplayManager::request_replay(
     // rules do not apply (a free-to-all lesson on old data must play).
     if (!Entitlements::is_pro() && !EducationBoot::instance().is_embedded()) {
         for (const auto& s : symbols) {
-            if (!Entitlements::symbol_replay_allowed(s)) {
+            if (!Entitlements::market_replay_allowed(exchange_, s)) {
                 ui::UpsellModal::instance().open(ui::UpsellModal::Trigger::Symbol);
                 return;
             }
         }
         const int64_t end_probe = (end_time_ms == 0)
-            ? start_time_ms + (2LL * 3600LL * 1000LL) : end_time_ms;
-        if (!Entitlements::range_replayable(start_time_ms, end_probe, now_ms())) {
+            ? std::min(now_ms(), start_time_ms + (2LL * 3600LL * 1000LL)) : end_time_ms;
+        const bool btc_preview = symbols.size() == 1 && Entitlements::btc_preview_range(
+            exchange_, symbols.front(), start_time_ms, end_probe, now_ms());
+        if (!btc_preview && !Entitlements::range_replayable(start_time_ms, end_probe, now_ms())) {
             ui::UpsellModal::instance().open(ui::UpsellModal::Trigger::Range);
             return;
         }
@@ -240,10 +266,10 @@ void ReplayManager::request_replay(
 
     // Default end time: start + 2 hours
     if (end_time_ms == 0) {
-        end_time_ms = start_time_ms + (2LL * 3600LL * 1000LL);
+        end_time_ms = std::min(now_ms(), start_time_ms + (2LL * 3600LL * 1000LL));
     }
 
-    // Clamp speed - tier cap first (free ≤2×, silent, mirrors the server clamp),
+    // Clamp speed - tier cap first (free ≤1×, silent, mirrors the server clamp),
     // then the absolute preset range.
     speed = static_cast<float>(Entitlements::clamp_speed_for_tier(speed));
     speed = std::clamp(speed, MIN_SPEED, MAX_SPEED);
@@ -398,6 +424,7 @@ void ReplayManager::request_archive_replay(
     const std::string& symbol,
     float speed)
 {
+    if (!reconnect_issuing_) cancel_reconnect();   // a new replay replaces any recovery
     if (is_active()) {
         stop();
         reset();
@@ -533,6 +560,7 @@ void ReplayManager::request_pack_replay(
     const std::string& symbol_hint,
     float speed)
 {
+    cancel_reconnect();
     if (is_active()) {
         stop();
         reset();
@@ -787,13 +815,199 @@ void ReplayManager::flush_pending_join() {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 void ReplayManager::on_transport_interrupted(const WebSocketClient* socket) {
-    if (pack_mode_ || !is_active() || info_.state == State::Creating ||
+    if (pack_mode_ || is_completed() || !is_active() || info_.state == State::Creating ||
         active_socket() != socket) return;
     info_.current_time_ms = interpolated_time_ms();
     info_.last_status_update = now_ms();
+    // Before the latch: arm_reconnect reads the play/pause state being lost.
+    const bool recovering = reconnect_.active || arm_reconnect();
     transport_interrupted_ = true;
-    info_.error_message = "Connection lost. Reopen replay to continue from recorded data.";
+    info_.error_message = recovering
+        ? "Connection lost. Reconnecting to resume where you were."
+        : "Connection lost. Reopen replay to continue from recorded data.";
+    // Mid-recovery drops land here too; tick_reconnect counts that attempt as dead.
     transition(State::Paused);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Transport-loss recovery
+// ═══════════════════════════════════════════════════════════════════════════════
+
+bool ReplayManager::arm_reconnect() {
+    if (EducationBoot::instance().is_lesson()) return false;
+    ReconnectPlan plan;
+    plan.is_archive = info_.session_type == "archive" || pending_.is_archive;
+    plan.event_id   = pending_.event_id;
+    plan.symbols    = info_.symbols.empty() ? pending_.symbols : info_.symbols;
+    plan.start_ms   = info_.start_time_ms;
+    plan.end_ms     = info_.end_time_ms;
+    if (plan.symbols.empty() || plan.end_ms <= plan.start_ms) return false;
+    if (plan.is_archive && plan.event_id.empty()) return false;
+    plan.speed = info_.speed > 0.0f ? info_.speed : 1.0f;
+    plan.timeframe_seconds = std::max<int64_t>(1, info_.timeframe_ms / 1000);
+    // A replay paused only because the tab was hidden was playing as far as the
+    // viewer is concerned; one they paused stays paused after the resume.
+    plan.resume_playing = paused_for_hidden_ || info_.state == State::Playing ||
+                          info_.state == State::Buffering || info_.state == State::Seeking;
+    plan.lost_at_ms     = now_ms();
+    plan.next_try_at_ms = plan.lost_at_ms;   // as soon as the lane is back
+    reconnect_plan_ = std::move(plan);
+
+    // Resume at the playhead, but never inside the window's last minute: there is
+    // little left to watch, and an end-of-window open could not prime its book on
+    // replay servers before 2026-10-11.
+    const int64_t last = std::max(reconnect_plan_.start_ms, reconnect_plan_.end_ms - 60000);
+    const int resumes = reconnect_.resumes;
+    reconnect_ = ReconnectStatus{};
+    reconnect_.active       = true;
+    reconnect_.max_attempts = RECONNECT_MAX_ATTEMPTS;
+    reconnect_.resume_at_ms = std::clamp(info_.current_time_ms, reconnect_plan_.start_ms, last);
+    reconnect_.resumes      = resumes;
+    emit_reconnect_usage("lost");
+    return true;
+}
+
+void ReplayManager::tick_reconnect() {
+    if (!reconnect_.active) return;
+    ReconnectPlan& plan = reconnect_plan_;
+    const int64_t now = now_ms();
+
+    if (plan.in_flight) {
+        const bool live = !transport_interrupted_ &&
+            (info_.state == State::Playing || info_.state == State::Paused);
+        if (live) {
+            if (plan.seek_pending) {
+                // Archive sessions open at the event start; take them to the
+                // playhead once primed (the event deep-link contract). replay_seeked
+                // brings the state back to Playing for the success check.
+                plan.seek_pending = false;
+                seek(reconnect_.resume_at_ms, /*deliberate=*/true);
+                return;
+            }
+            if (!plan.resume_playing && info_.state == State::Playing) pause();
+            finish_reconnect(true);
+            return;
+        }
+        if (info_.state == State::Error && plan.joined) {
+            // The connection came back and the box refused the data at this
+            // position (a recorded depth gap, say). Another attempt would get the
+            // same answer, so leave that error and its message on screen.
+            plan.in_flight = false;
+            reconnect_.active = false;
+            emit_reconnect_usage("data_error");
+            return;
+        }
+        if (info_.state == State::Idle) {
+            // Refused before any request went out (this window or plan no longer
+            // allows it, and the upsell has said so). Retrying cannot change that.
+            finish_reconnect(false);
+            return;
+        }
+        // Dropped again, failed to create or join, or never reached the box. The
+        // timeout stops at the join: priming has its own bound, and archive
+        // sessions can take a while to open.
+        const bool dead = transport_interrupted_ || info_.state == State::Error ||
+                          (!plan.joined && now - plan.attempt_at_ms > RECONNECT_ATTEMPT_TIMEOUT_MS);
+        if (!dead) return;
+        if (reconnect_.attempt >= reconnect_.max_attempts) {
+            finish_reconnect(false);
+            return;
+        }
+        plan.in_flight = false;
+        plan.next_try_at_ms = now + (reconnect_.attempt == 1 ? 2000 : 5000);
+        return;
+    }
+
+    // A new session can only join once the lane it rides is back.
+    WebSocketClient* lane = plan.is_archive ? archive_lane_ : nats_lane_;
+    if (now < plan.next_try_at_ms || !lane || !lane->is_connected()) return;
+    begin_reconnect_attempt();
+}
+
+void ReplayManager::begin_reconnect_attempt() {
+    ReconnectPlan& plan = reconnect_plan_;
+    ++reconnect_.attempt;
+    plan.in_flight     = true;
+    plan.joined        = false;
+    plan.attempt_at_ms = now_ms();
+    plan.seek_pending  = plan.is_archive;
+    emit_reconnect_usage("attempt");
+
+    // The old session died with its socket on the box, so there is nothing to
+    // stop(); reset() retires the frozen context and clears the interrupted latch.
+    reset();
+    reconnect_issuing_ = true;
+    if (plan.is_archive) {
+        request_archive_replay(plan.event_id, plan.symbols.front(), plan.speed);
+    } else {
+        request_replay(plan.symbols, plan.start_ms, plan.end_ms, plan.speed,
+                       plan.timeframe_seconds, reconnect_.resume_at_ms);
+    }
+    reconnect_issuing_ = false;
+}
+
+void ReplayManager::finish_reconnect(bool resumed) {
+    reconnect_plan_.in_flight = false;
+    reconnect_.active = false;
+    if (resumed) {
+        reconnect_.failed = false;
+        ++reconnect_.resumes;
+        info_.error_message.clear();
+        emit_reconnect_usage("resumed");
+        // Embedded hosts show their own notice from reconnect_status().resumes.
+        if (!EducationBoot::instance().is_embedded()) {
+            char at[32];
+            format_timestamp(reconnect_.resume_at_ms, at, sizeof(at));
+            char msg[96];
+            snprintf(msg, sizeof(msg), "Reconnected. Replay resumed at %s.", at);
+            ui::UpsellModal::instance().toast(msg);
+        }
+        return;
+    }
+    reconnect_.failed = true;
+    emit_reconnect_usage("failed");
+    char at[32];
+    format_timestamp(reconnect_.resume_at_ms, at, sizeof(at));
+    char msg[160];
+    snprintf(msg, sizeof(msg),
+             "Couldn't reconnect to the replay server after %d tries. Reload to resume at %s.",
+             reconnect_.attempt, at);
+    info_.error_message = msg;
+    transport_interrupted_ = true;
+    if (info_.state != State::Error) transition(State::Error);
+}
+
+void ReplayManager::cancel_reconnect() {
+    reconnect_plan_ = ReconnectPlan{};
+    const int resumes = reconnect_.resumes;
+    reconnect_ = ReconnectStatus{};
+    reconnect_.resumes = resumes;
+}
+
+void ReplayManager::emit_reconnect_usage(const char* phase) {
+    const ReconnectPlan& plan = reconnect_plan_;
+    usage::dispatch_detail(json{{"event", "replay_reconnect"}, {"mode", usage_source()},
+        {"symbol", plan.symbols.empty() ? "" : plan.symbols.front()},
+        {"props", {{"phase", phase}, {"attempt", reconnect_.attempt},
+                   {"archive", plan.is_archive},
+                   {"gap_ms", plan.lost_at_ms > 0 ? now_ms() - plan.lost_at_ms : 0},
+                   {"resume_at_ms", reconnect_.resume_at_ms}}}}.dump());
+}
+
+void ReplayManager::on_visibility_change(bool hidden) {
+    if (hidden) {
+        // Playing only: Buffering is the box priming its book, and a pause there
+        // would hold the priming clock against its own timeout.
+        if (info_.state == State::Playing && !transport_interrupted_) {
+            pause();
+            paused_for_hidden_ = true;
+        }
+        return;
+    }
+    if (!paused_for_hidden_) return;
+    paused_for_hidden_ = false;
+    // A drop while hidden is tick_reconnect's to resume, at the right play state.
+    if (info_.state == State::Paused && !transport_interrupted_) resume();
 }
 
 void ReplayManager::pause() {
@@ -808,7 +1022,12 @@ void ReplayManager::pause() {
 }
 
 void ReplayManager::resume() {
-    if (transport_interrupted_) return;
+    if (transport_interrupted_) {
+        // Waiting for the socket: Play means "play when you're back".
+        if (reconnect_.active && !reconnect_plan_.in_flight) reconnect_plan_.resume_playing = true;
+        return;
+    }
+    if (is_completed()) { seek(info_.start_time_ms, true); return; }
     if (info_.state != State::Paused) return;
     // Re-anchor the interpolation clock. While paused, wall time advanced
     // but market time didn't. Without this, interpolated_time_ms() would
@@ -820,13 +1039,19 @@ void ReplayManager::resume() {
 }
 
 void ReplayManager::toggle_pause() {
+    if (reconnect_.active && !reconnect_plan_.in_flight) {
+        reconnect_plan_.resume_playing = !reconnect_plan_.resume_playing;
+        return;
+    }
     if (info_.state == State::Playing) pause();
-    else if (info_.state == State::Paused) resume();
+    else if (info_.state == State::Paused || is_completed()) resume();
 }
 
 void ReplayManager::stop() {
+    cancel_reconnect();   // the viewer closed it; nothing to come back to
     if (!is_active()) return;
     send_control("stop");
+    if (is_completed()) { reset(); return; }
     transition(State::Stopped);
 }
 
@@ -871,6 +1096,13 @@ void ReplayManager::speed_down() {
 }
 
 void ReplayManager::seek(int64_t timestamp_ms, bool deliberate) {
+    if (transport_interrupted_ && reconnect_.active && !reconnect_plan_.in_flight) {
+        // Scrubbing while the socket is down moves where the replay resumes.
+        const int64_t last = std::max(reconnect_plan_.start_ms, reconnect_plan_.end_ms - 60000);
+        reconnect_.resume_at_ms = std::clamp(timestamp_ms, reconnect_plan_.start_ms, last);
+        info_.current_time_ms = reconnect_.resume_at_ms;
+        return;
+    }
     if (transport_interrupted_) {
         // A historical replay parked on a depth error keeps its session; a
         // deliberate seek retries from another position (the backend, or the
@@ -991,6 +1223,7 @@ static constexpr int64_t kLargeSkipThresholdMs = 2 * 60 * 1000;  // 2 minutes
 
 void ReplayManager::skip_forward_to(int64_t timestamp_ms) {
     if (transport_interrupted_) return;
+    if (is_completed()) { seek(timestamp_ms, true); return; }
     if (!is_active()) return;
     timestamp_ms = std::clamp(timestamp_ms, info_.start_time_ms, info_.end_time_ms);
     // Seek ceiling (lesson scrub-forward lock): >> stops at the ceiling.
@@ -1063,6 +1296,7 @@ void ReplayManager::skip_forward_to(int64_t timestamp_ms) {
 
 void ReplayManager::skip_backward_to(int64_t timestamp_ms) {
     if (transport_interrupted_) return;
+    if (is_completed()) { seek(timestamp_ms, true); return; }
     if (!is_active()) return;
     timestamp_ms = std::clamp(timestamp_ms, info_.start_time_ms, info_.end_time_ms);
 
@@ -1234,6 +1468,8 @@ bool ReplayManager::is_active() const {
         case State::Paused:
         case State::Seeking:
             return true;
+        case State::Stopped:
+            return info_.completed && replay_ctx_ != nullptr;
         case State::Error:
             return replay_ctx_ != nullptr;
         default:
@@ -1590,6 +1826,13 @@ bool ReplayManager::handle_ws_message(const std::string& type, const void* json_
     }
 
     if (type == "replay_finished") {
+        if (!is_active() || info_.state == State::Seeking || info_.state == State::Error || !replay_ctx_) return true;
+        if (data.contains("session_id") && data["session_id"].get<std::string>() != info_.session_id) return true;
+        info_.completed = true;
+        info_.current_time_ms = info_.end_time_ms;
+        info_.confirmed_time_ms = info_.end_time_ms;
+        info_.progress = 1.0f;
+        info_.last_status_update = now_ms();
         transition(State::Stopped);
         return true;
     }
@@ -1685,7 +1928,13 @@ void ReplayManager::transition(State new_state) {
     if (info_.state == new_state) return;
 
     State old_state = info_.state;
+    if (new_state != State::Stopped) info_.completed = false;
     info_.state = new_state;
+    if (new_state == State::Buffering && reconnect_plan_.in_flight) reconnect_plan_.joined = true;
+    if (new_state == State::Error) {
+        usage::dispatch_detail(json{{"event", "replay_error"}, {"mode", usage_source()},
+            {"props", {{"source", usage_source()}, {"exchange", exchange_}, {"symbol", usage_symbol()}}}}.dump());
+    }
 
     // Usage instrumentation (design §3): replay_start on the first Playing of a
     // run; a single cumulative replay_end on the terminal state. Watch-seconds
@@ -1696,9 +1945,8 @@ void ReplayManager::transition(State new_state) {
         usage_begin_run();
     } else if (usage_run_active_ &&
                (new_state == State::Stopped || new_state == State::Error)) {
-        const bool completed = info_.end_time_ms > 0 &&
-                               interpolated_time_ms() >= (info_.end_time_ms - 1500);
-        usage_emit_replay_end(completed);
+        // Completion comes from source exhaustion, never proximity to the end.
+        usage_emit_replay_end(is_completed());
     }
 
     // Reserve space at bottom of dockspace for the control bar - but NOT in
@@ -1730,7 +1978,7 @@ void ReplayManager::transition(State new_state) {
     // Navigation owns teardown; swapping to live here would be a silent fallback.
     const auto& boot = EducationBoot::instance();
     const bool retain_historical_frame =
-        new_state == State::Stopped && (boot.is_event() || boot.is_lesson());
+        new_state == State::Stopped && (info_.completed || boot.is_event() || boot.is_lesson());
     if (new_state == State::Error) {
         // Keep the failed replay isolated and frozen until Close replay. Never
         // replace a recording gap with a live chart behind an error notice.
@@ -1761,6 +2009,7 @@ void ReplayManager::reset() {
     depth_gap_from_ms_ = depth_gap_at_ms_ = depth_gap_to_ms_ = 0;
     primed_since_seek_ = false;
     transport_interrupted_ = false;
+    paused_for_hidden_ = false;
     pending_ = PendingRequest{};
     scrubber_dragging_ = false;
     last_seek_time_ms_ = 0;
@@ -2615,8 +2864,11 @@ void ReplayManager::open_focused_replay_at(const std::string& exchange, const st
                                            int64_t anchor_ms, const std::vector<std::string>& with) {
     const int64_t lead_ms = 30LL * 60000;      // 30 min before
     const int64_t span_ms = 4LL * 60 * 60000;  // 4h total window
-    const int64_t from_ms = anchor_ms - lead_ms;
-    open_focused_replay(exchange, symbol, from_ms, from_ms + span_ms, anchor_ms, with);
+    const int64_t now = now_ms();
+    int64_t from_ms = anchor_ms - lead_ms;
+    if (!Entitlements::is_pro() && Entitlements::btc_preview_market(exchange, symbol))
+        from_ms = std::max(from_ms, now - 72LL * 3600000 + 60000);
+    open_focused_replay(exchange, symbol, from_ms, std::min(now, from_ms + span_ms), anchor_ms, with);
 }
 
 bool ReplayManager::render_chart_context_menu(
@@ -2637,12 +2889,12 @@ bool ReplayManager::render_chart_context_menu(
         // Section label (redesign 1f: the replay actions live under a REPLAY group).
         Theme::menu_section("REPLAY");
 
-        // Plan gate: a non-Pro user can only replay the recent window + the major
-        // symbols. Rather than hide the item (confusing), show WHY it's locked and
-        // route to upgrade. The Go backend still enforces the real cap on the
-        // session request - this is the friendly front door, not the lock itself.
-        const bool sym_ok  = Entitlements::symbol_replay_allowed(symbol);
-        const bool time_ok = Entitlements::time_replayable(hovered_time_ms, now_ms());
+        // Plan gate: a non-Pro user can only replay BTCUSDT on Binance Futures,
+        // within the last 3 days. Rather than hide the item (confusing), show WHY
+        // it's locked and route to upgrade. The Go backend still enforces the real
+        // cap on the session request - this is the friendly front door, not the lock.
+        const bool sym_ok  = Entitlements::market_replay_allowed(exchange, symbol);
+        const bool time_ok = Entitlements::time_replayable(hovered_time_ms, now_ms(), exchange, symbol);
 
         if (sym_ok && time_ok) {
             // Replay from the clicked bar → the FOCUSED research-replay viewer
@@ -2696,17 +2948,15 @@ bool ReplayManager::render_chart_context_menu(
             // under "Replay your free day", which read as two unrelated items.
             // The Go backend still enforces every cap on the session request;
             // this is the explanation, not the lock itself.
-            const std::string free_day = Entitlements::free_window_short_label();
             char reason[128];
             if (!sym_ok) {
-                // Not one of the free majors: the free day cannot rescue it.
-                snprintf(reason, sizeof(reason), "Free replay covers 6 majors. Pro replays every pair.");
+                // Not the free market: the free window cannot rescue it.
+                snprintf(reason, sizeof(reason), "Free replay covers BTCUSDT");
                 if (Theme::menu_item_locked("Replay from here", reason, /*pro=*/true))
                     ui::UpsellModal::instance().open(ui::UpsellModal::Trigger::Symbol);
                 if (ImGui::IsItemHovered())
-                    Theme::tooltip("Free replay covers 6 majors (%s).\n"
-                                   "Pro replays every recorded pair.",
-                                   Entitlements::free_symbols_label());
+                    Theme::tooltip("Free replays BTCUSDT on Binance Futures, past 3 days.\n"
+                                   "Pro replays every recorded market.");
             } else if (Entitlements::before_book_record(hovered_time_ms)) {
                 // Older than the recorded ORDER BOOK: a data limit, not a plan
                 // limit. No tier can replay it, so nothing is offered.
@@ -2722,35 +2972,22 @@ bool ReplayManager::render_chart_context_menu(
                 // Pro, but older than the account's replay window.
                 snprintf(reason, sizeof(reason), "Older than your %d-day replay window",
                          Entitlements::pro_lookback_days());
-                if (Theme::menu_item_locked("Replay from here", reason, /*pro=*/false))
+                if (Theme::menu_item_locked("Replay from here", reason, /*pro=*/true))
                     ui::UpsellModal::instance().open(ui::UpsellModal::Trigger::Range);
             } else {
-                // Free tier, free symbol, outside the free day.
-                snprintf(reason, sizeof(reason), "Outside your free replay day (%s)", free_day.c_str());
-                if (Theme::menu_item_locked("Replay from here", reason, /*pro=*/true)) {
-                    char detail[192];
-                    snprintf(detail, sizeof(detail),
-                             "This chart minute is outside your free replay day (%s). "
-                             "Pro replays any minute in the last %d days, on every recorded pair.",
-                             free_day.c_str(), Entitlements::pro_lookback_days());
-                    ui::UpsellModal::instance().open(ui::UpsellModal::Trigger::Range, detail);
-                }
+                // Free tier, BTCUSDT, older than the 3-day free window.
+                snprintf(reason, sizeof(reason), "Older than the free 3 days");
+                if (Theme::menu_item_locked("Replay from here", reason, /*pro=*/true))
+                    ui::UpsellModal::instance().open(ui::UpsellModal::Trigger::Range);
             }
-            // The free day stays one click away wherever it can help.
+            // The free market stays one click away: its latest hour.
             if (sym_ok && !Entitlements::is_pro()) {
-                char free_hint[64];
-                snprintf(free_hint, sizeof(free_hint), "%s \xc2\xb7 24h", free_day.c_str());
                 // Same navigation, same refusal: disable rather than render a dead row.
-                if (Theme::menu_item(UiIcon::Play, "Replay your free day", free_hint,
+                if (Theme::menu_item(UiIcon::Play, "Replay the last hour", "free",
                                      focused_replay_nav_allowed())) {
-                    int64_t fw_s = 0, fw_e = 0;
-                    Entitlements::free_window_range(now_ms(), fw_s, fw_e);
-                    open_focused_replay(exchange, symbol, fw_s, fw_e, fw_s);
+                    open_focused_replay_at(exchange, symbol, now_ms() - 3600000LL);
                     initiated = true;
                 }
-                if (ImGui::IsItemHovered())
-                    Theme::tooltip("Opens the full Free replay day: %s.",
-                                   Entitlements::free_window_label().c_str());
             }
         }
 
@@ -2791,8 +3028,8 @@ void ReplayManager::render_control_bar() {
         return;
     }
 
-    // Completed playback dismisses; errors remain until explicitly closed.
-    if (info_.state == State::Stopped) {
+    // Explicitly stopped playback dismisses. Completed recordings remain inspectable.
+    if (info_.state == State::Stopped && !is_completed()) {
         int64_t elapsed = now_ms() - info_.last_status_update;
         if (info_.last_status_update == 0) {
             info_.last_status_update = now_ms();
@@ -2836,6 +3073,18 @@ void ReplayManager::render_control_bar() {
 
         if (info_.state == State::Error) {
             ImGui::SetCursorPosY(12);
+            if (reconnect_.failed) {
+                // Same window, same playhead, a fresh round of attempts.
+                if (ImGui::Button("Try again")) {
+                    reconnect_.failed  = false;
+                    reconnect_.active  = true;
+                    reconnect_.attempt = 0;
+                    reconnect_plan_.in_flight = false;
+                    reconnect_plan_.next_try_at_ms = now_ms();
+                    info_.error_message = "Reconnecting to resume where you were.";
+                }
+                ImGui::SameLine();
+            }
             if (ImGui::Button("Close replay")) { stop(); reset(); }
             ImGui::SameLine();
             ImGui::TextWrapped("%s", info_.error_message.c_str());
@@ -2921,12 +3170,19 @@ void ReplayManager::render_status_badge() {
         case State::Playing:   label = "REPLAY";     color = Theme::Tokens::BRAND; break;
         case State::Paused:    label = "PAUSED";     color = Theme::Tokens::TX2;   break;
         case State::Seeking:   label = "SEEKING";    color = Theme::Tokens::BRAND; break;
-        case State::Stopped:   label = "STOPPED";    color = Theme::Tokens::TX3;   break;
+        case State::Stopped:   label = is_completed() ? "COMPLETED" : "STOPPED";    color = Theme::Tokens::TX3;   break;
         case State::Error:     label = "ERROR";      color = Theme::Tokens::DOWN;  break;
         default:               return;
     }
 
-    if (transport_interrupted_) {
+    char reconnect_label[64];
+    if (reconnect_.active) {
+        char at[32];
+        format_timestamp(reconnect_.resume_at_ms, at, sizeof(at));
+        snprintf(reconnect_label, sizeof(reconnect_label), "RECONNECTING · RESUMES %s", at);
+        label = reconnect_label;
+        color = Theme::Tokens::WARN;
+    } else if (transport_interrupted_) {
         label = "CONNECTION LOST: REOPEN REPLAY";
         color = Theme::Tokens::WARN;
     } else if (info_.state == State::Playing && depth_gap().interrupted) {
@@ -2950,7 +3206,7 @@ void ReplayManager::render_status_badge() {
     dl->AddRect(p, pmax, tok(color, 0.45f), Theme::Radius::R1, 0, 1.0f);
     // Status dot - gentle pulse while connecting/buffering/seeking.
     float dot_a = 1.0f;
-    if (info_.state == State::Creating || info_.state == State::Joining ||
+    if (reconnect_.active || info_.state == State::Creating || info_.state == State::Joining ||
         info_.state == State::Buffering || info_.state == State::Seeking) {
         dot_a = 0.45f + 0.55f * (0.5f + 0.5f * sinf((float)ImGui::GetTime() * 4.0f));
     }
@@ -2977,7 +3233,7 @@ void ReplayManager::render_status_badge() {
 // ─── Transport Controls ─────────────────────────────────────────────────────
 
 void ReplayManager::render_transport_controls() {
-    const bool can_control = (info_.state == State::Playing || info_.state == State::Paused);
+    const bool can_control = (info_.state == State::Playing || info_.state == State::Paused || is_completed());
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
     // << uses logical position (info_.current_time_ms) so rapid presses accumulate.
@@ -3632,11 +3888,10 @@ void ReplayManager::render_buffer_indicator() {
 // ═══════════════════════════════════════════════════════════════════════════════
 // Replay Range Picker (free-window launcher) - design §8.1-8.2
 //
-// The primary free-tier surface: frame free replay as "a new free window unlocks
-// every day", not a locked archive. The FREE band (48-72h ago - always archived
-// parquet days, never the warm DB) is the hero; RECENT + ARCHIVE are visible,
-// labelled and locked; locked bands / presets / speeds all funnel into the ONE
-// upsell modal. Opened from the chart right-click "Replay range…".
+// NOT REACHABLE: nothing calls open_replay_launcher since the right-click menu
+// moved to the focused viewer and shift-drag ranges. Kept compiling against the
+// 2026-10-04 free policy (BTCUSDT, past 3 days); retire it or rewire it before
+// reuse - the rail still reflects the older archived-day design.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 void ReplayManager::open_replay_launcher(const std::string& symbol, int64_t timeframe_seconds) {
@@ -3680,6 +3935,14 @@ void ReplayManager::render_replay_launcher() {
             dl->AddRectFilled(ImVec2(lx - 2.5f, ly - 1.0f), ImVec2(lx + 2.5f, ly + 3.0f), c, 1.0f);
         };
 
+        if (!pro && Entitlements::btc_preview_market(exchange_, launcher_symbol_)) {
+            ImGui::TextWrapped("BTC preview: replay the past 3 days at 1x. Right-click a candle to choose a moment.");
+            if (ImGui::Button("Replay BTC last 30 minutes", ImVec2(CW, 38.0f))) {
+                launcher_open_ = false;
+                request_replay({launcher_symbol_}, now - 30LL * 60000, now, 1.0f, launcher_tf_seconds_);
+            }
+            ImGui::Separator();
+        }
         // ── Header: symbol + free-symbol strip ───────────────────────────────
         std::string su = launcher_symbol_;
         std::transform(su.begin(), su.end(), su.begin(),
@@ -3696,7 +3959,7 @@ void ReplayManager::render_replay_launcher() {
                      Entitlements::pro_lookback_days());
             ImGui::TextUnformatted(reach);
         }
-        else     ImGui::Text("Free replay: %s \xc2\xb7 new window daily.", Entitlements::free_symbols_label());
+        else     ImGui::Text("Free replay: %s.", Entitlements::free_window_label().c_str());
         ImGui::PopStyleColor();
 
         // ── replay rail: RECENT (locked) · FREE band (hero) · ARCHIVE (locked)
@@ -3734,7 +3997,7 @@ void ReplayManager::render_replay_launcher() {
         };
         const ImU32 lock_c = tok(Tokens::TX3, 0.6f + 0.4f * pulse);
         band_text(aT0, aT1, "RECENT", "PRO \xc2\xb7 48h", lock_c, lock_c);
-        band_text(aF0, aF1, "FREE \xc2\xb7 2 DAYS AGO", "full fidelity",
+        band_text(aF0, aF1, "FREE \xc2\xb7 BTC", "past 3 days",
                   tok(Tokens::BRAND_TX), tok(Tokens::TX2));
         band_text(aG0, aG1, "ARCHIVE", "PRO \xc2\xb7 30d", lock_c, lock_c);
         mini_lock(aT1.x - 9.0f, aT0.y + 9.0f, lock_c);
@@ -3756,7 +4019,7 @@ void ReplayManager::render_replay_launcher() {
 
         // ── Countdown caption ────────────────────────────────────────────────
         ImGui::PushStyleColor(ImGuiCol_Text, Tokens::TX2);
-        ImGui::TextUnformatted("A new free window unlocks every day.");
+        ImGui::TextUnformatted("Free replays BTCUSDT's last 3 days.");
         ImGui::PopStyleColor();
         ImGui::PushStyleColor(ImGuiCol_Text, Tokens::BRAND_TX);
         ImGui::Text("Free window: %s", Entitlements::free_window_label().c_str());
@@ -3881,10 +4144,7 @@ void ReplayManager::render_replay_launcher() {
             case 2: sms = now - 24LL * 3600000LL; ems = now; break;             // Last 24h (Pro)
             case 3: ems = now - static_cast<int64_t>(launcher_days_ago_) * DAY; // Pick any day (Pro)
                     sms = ems - DAY; break;
-            default: {  // Free window - request EXACTLY the window Entitlements resolves:
-                        // the backend's archived-day bounds when known (server-authoritative,
-                        // so the modal requests precisely what the backend enforces), else the
-                        // static [72h,48h] band inset for clock drift. One source of truth.
+            default: {  // Free window: the last 72h, as Entitlements resolves it.
                 Entitlements::free_window_range(now, sms, ems);
             } break;
         }

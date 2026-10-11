@@ -9,6 +9,41 @@ using json = nlohmann::json;
 // managers before the WebSocket; see stream_handler.h.
 std::function<bool(const std::string&)> StreamManager::pack_request_hook_;
 
+// Recorded-microstructure history methods that the backend gates to the
+// viewer's replay entitlement (footprint, heatmap, OI, funding, VPIN). The
+// backend decides access from the signed token; the client simply attaches the
+// one the host holds, as it already does for liqmap2 and liq-levels history.
+// Candles are deliberately absent: OHLCV history stays open for the free chart.
+static bool is_gated_history_method(const std::string& m) {
+    return m == "get_footprint_history" || m == "get_historical_heatmap" ||
+           m == "get_historical_oi" || m == "get_historical_funding" ||
+           m == "get_historical_vpin";
+}
+
+// attach_history_token returns message unchanged unless it is a gated-history
+// request, in which case it stamps data.entitlement_token with the host's
+// current replay token. Harmless when the backend gate is off (the field is
+// ignored), required once it is on.
+static std::string attach_history_token(const std::string& message) {
+    // Cheap guard: only parse when a gated method name is present at all.
+    if (message.find("get_footprint_history") == std::string::npos &&
+        message.find("get_historical_heatmap") == std::string::npos &&
+        message.find("get_historical_oi") == std::string::npos &&
+        message.find("get_historical_funding") == std::string::npos &&
+        message.find("get_historical_vpin") == std::string::npos) {
+        return message;
+    }
+    auto request = json::parse(message, nullptr, false);
+    if (request.is_discarded() || !request.contains("method") ||
+        !request["method"].is_string() ||
+        !is_gated_history_method(request["method"].get<std::string>())) {
+        return message;
+    }
+    const char* token = emscripten_run_script_string("window.__EDGEDEPTH_REPLAY_TOKEN__ || ''");
+    request["data"]["entitlement_token"] = token ? token : "";
+    return request.dump();
+}
+
 void StreamManager::send_message(const std::string& message) const {
     // Pack replay: the engine owns every replay-context request (candle
     // backfills etc.) - nothing may leak to the box from a pack session.
@@ -24,7 +59,7 @@ void StreamManager::send_message(const std::string& message) const {
     if (ready_state != 1) {  // 1 = OPEN
         return;
     }
-    emscripten_websocket_send_utf8_text(ws_, message.c_str());
+    emscripten_websocket_send_utf8_text(ws_, attach_history_token(message).c_str());
 }
 // void StreamManager::send_message(const std::string& message) const {
 //     if (ws_ == 0) {
@@ -122,8 +157,8 @@ void StreamManager::subscribe_stats(const StreamKey& key, StreamHandler<Terminal
 }
 
 void StreamManager::subscribe_volume(const StreamKey& key, StreamHandler<Terminal::Volume> handler) {
-    // Volume stream is already subscribed by default - don't re-subscribe.
-    // Just register the callback for dispatch.
+    // Volume is a distinct sampler subscription, shared by chart and Stats.
+    if (!volume_subs_.contains(key)) send_subscribe(key);
     volume_subs_[key].push_back(handler);
 }
 
@@ -488,12 +523,24 @@ void StreamManager::send_subscribe(const StreamKey& key) const {
     // Presence tracking keys off live subscriptions only: replay data comes
     // from the pack or the box and its gaps are not the feed's fault.
     StreamPresence::instance().note_subscribed(static_cast<uint32_t>(key.stream_type));
-    const auto msg = Terminal::create_subscribe_message(
+    auto msg = Terminal::create_subscribe_message(
         key.pair.exchange,
         key.pair.symbol,
         key.stream_type,
         key.timeframe
     );
+    if (key.stream_type == Terminal::Stream::LiquidationLevels ||
+        key.stream_type == Terminal::Stream::PatternAdmin ||
+        key.stream_type == Terminal::Stream::IcebergState ||
+        key.stream_type == Terminal::Stream::LiqMapV2 ||
+        key.stream_type == Terminal::Stream::LiqMapV2Rails) {
+        // The host seeds this before boot and refreshes it. Re-read on every
+        // subscribe, including reconnect and return from replay.
+        const char* token = emscripten_run_script_string("window.__EDGEDEPTH_REPLAY_TOKEN__ || ''");
+        auto request = json::parse(msg);
+        request["data"]["entitlement_token"] = token ? token : "";
+        msg = request.dump();
+    }
     emscripten_websocket_send_utf8_text(ws_, msg.c_str());
 }
 
@@ -509,13 +556,7 @@ void StreamManager::send_subscribe(const StreamKey& key) const {
 //   candles                                   one subscribe covers candle_subs_ and
 //                                             candle_batch_subs_, so the two are
 //                                             unioned and visited once
-//   volumes                                   subscribe_volume deliberately never
-//                                             sends one ("already subscribed by
-//                                             default"), so it is NOT in this set.
-//                                             Unsubscribing it was a no-op on the
-//                                             box; re-subscribing it on resume
-//                                             would have created a consumer the
-//                                             client never asked for.
+//   volumes                                   subscribes on the first handler too
 template <typename Fn>
 void StreamManager::for_each_server_subscription(Fn&& fn) const {
     auto visit_handlers = [&](const auto& subs) {
@@ -526,6 +567,7 @@ void StreamManager::for_each_server_subscription(Fn&& fn) const {
     visit_handlers(direct_subs_);
     visit_handlers(trade_subs_);
     visit_handlers(stats_subs_);
+    visit_handlers(volume_subs_);
     visit_handlers(liquidation_subs_);
     visit_handlers(pattern_subs_);
     // Presence, not size: the vector is always empty here by design.
@@ -546,6 +588,7 @@ void StreamManager::for_each_server_subscription(Fn&& fn) const {
 }
 
 void StreamManager::update_websocket_handle(EMSCRIPTEN_WEBSOCKET_T ws) {
+    ++connection_generation_;
     ws_ = ws;
     if (ws_ <= 0 || live_subscriptions_paused_) return;
     // Re-establish everything the box knew about on the OLD socket. Same set as
@@ -555,11 +598,13 @@ void StreamManager::update_websocket_handle(EMSCRIPTEN_WEBSOCKET_T ws) {
 }
 
 void StreamManager::pause_live_subscriptions() {
+    ++connection_generation_;
     live_subscriptions_paused_ = true;
     for_each_server_subscription([this](const StreamKey& key) { send_unsubscribe(key); });
 }
 
 void StreamManager::resume_live_subscriptions() {
+    ++connection_generation_;
     live_subscriptions_paused_ = false;
     for_each_server_subscription([this](const StreamKey& key) { send_subscribe(key); });
 }
@@ -590,6 +635,47 @@ template void StreamManager::unsubscribe_impl(
 template void StreamManager::unsubscribe_impl(
     std::map<StreamKey, std::vector<StreamHandler<Terminal::PatternOverlay>>>&,
     StreamKey, void*);
+
+// V2 map history (get_historical_liqmap2, at most six hours). Free BTC markets need no token, so the
+// request goes out with whatever token the host holds and the server decides.
+bool StreamManager::request_historical_liqmap2(const Terminal::Pair& pair, int64_t start_ms, int64_t end_ms) const {
+    unsigned short ready = 0;
+    if (ws_ <= 0 || emscripten_websocket_get_ready_state(ws_, &ready) != EMSCRIPTEN_RESULT_SUCCESS || ready != 1) return false;
+    const char* token = emscripten_run_script_string("window.__EDGEDEPTH_REPLAY_TOKEN__ || ''");
+    json request = {{"method", "get_historical_liqmap2"}, {"data", {
+        {"pair", {{"exchange", pair.exchange}, {"symbol", pair.symbol}}},
+        {"start_ms", start_ms}, {"end_ms", end_ms}, {"entitlement_token", token ? token : ""}
+    }}};
+    send_message(request.dump());
+    return true;
+}
+
+// V2 rails history (get_historical_liqmap2_rails, at most seven days a read): the map's access split.
+bool StreamManager::request_historical_liqmap2_rails(const Terminal::Pair& pair, int64_t start_ms, int64_t end_ms) const {
+    unsigned short ready = 0;
+    if (ws_ <= 0 || emscripten_websocket_get_ready_state(ws_, &ready) != EMSCRIPTEN_RESULT_SUCCESS || ready != 1) return false;
+    // Public since 2026-10-11: free markets (BTC) need no token, so an anonymous viewer still asks; the server
+    // refuses a paid market without one.
+    const char* token = emscripten_run_script_string("window.__EDGEDEPTH_REPLAY_TOKEN__ || ''");
+    json request = {{"method", "get_historical_liqmap2_rails"}, {"data", {
+        {"pair", {{"exchange", pair.exchange}, {"symbol", pair.symbol}}},
+        {"start_ms", start_ms}, {"end_ms", end_ms}, {"entitlement_token", token ? token : ""}
+    }}};
+    send_message(request.dump());
+    return true;
+}
+
+// The market's rolling V2 scorecard (get_liqmap2_scorecard); same access as the map, answered as JSON.
+bool StreamManager::request_liqmap2_scorecard(const Terminal::Pair& pair) const {
+    unsigned short ready = 0;
+    if (ws_ <= 0 || emscripten_websocket_get_ready_state(ws_, &ready) != EMSCRIPTEN_RESULT_SUCCESS || ready != 1) return false;
+    const char* token = emscripten_run_script_string("window.__EDGEDEPTH_REPLAY_TOKEN__ || ''");
+    json request = {{"method", "get_liqmap2_scorecard"}, {"data", {
+        {"pair", {{"exchange", pair.exchange}, {"symbol", pair.symbol}}}, {"entitlement_token", token ? token : ""}
+    }}};
+    send_message(request.dump());
+    return true;
+}
 
 bool StreamManager::request_historical_liq_levels(const Terminal::Pair& pair, int64_t start_ms, int64_t end_ms) const {
     unsigned short ready = 0;

@@ -300,6 +300,45 @@ int test_archive_capture() {
     archive.receive_seed(malformed);archive.bubbles_.advance(100100);
     expect(archive.seed_.empty() && archive.bubbles().size()==0,
         "invalid startup response cannot partially publish bubbles");
+    {
+        OrderbookManager refresh_books;
+        RealtimeArchive refresh(refresh_books, pair);
+        const auto source_generation = refresh.generation;
+        const std::vector<double> depth{1, 1000, 11, 1, 100, 101, 2, 100, 4, 101, 6};
+        const auto pending_view = [&] {
+            EM_ASM({const s=Module['rtArchive'].state(UTF8ToString($0));
+                s.pending=true;s.view=({buffer:new Float64Array([3,1000,3]).buffer});
+            }, refresh.id_.c_str());
+        };
+        const auto cancelled = [&] {
+            return EM_ASM_INT({const s=Module['rtArchive'].state(UTF8ToString($0));
+                return !s.pending && !s.view;
+            }, refresh.id_.c_str());
+        };
+        pending_view();
+        refresh.seed_ = depth;
+        refresh.update(2000);
+        expect(refresh.seed_.empty() && cancelled() && refresh.view_revision == 1,
+            "accepted startup cancels the obsolete query and requests a display refresh");
+        expect(refresh.generation == source_generation,
+            "startup backfill must not clear the displayed source history");
+        for (int i = 0; i < 3; ++i) {
+            pending_view();
+            refresh.recovered_ = depth;
+            EM_ASM({Module['archiveBlocked']=true;});
+            refresh.update(2000);
+            expect(!refresh.recovered_.empty() && !cancelled() && refresh.generation == source_generation && refresh.view_revision == uint64_t(i + 1),
+                "pending recovery preserves the display and its in-flight query under backpressure");
+            EM_ASM({Module['archiveBlocked']=false;});
+            refresh.update(2000);
+            expect(refresh.recovered_.empty() && cancelled() && refresh.view_revision == uint64_t(i + 2),
+                "accepted recovery cancels the obsolete query and requests a display refresh");
+            expect(refresh.generation == source_generation,
+                "repeated gap recovery must not clear the displayed source history");
+        }
+        refresh.reset();
+        expect(refresh.generation > source_generation, "explicit history clear still invalidates the displayed source history");
+    }
     RealtimeDepthHistory::Sample native_sample;
     expect(native_sample.source_bucket_ticks==1,"native observations retain one native tick source width");
     return failures;

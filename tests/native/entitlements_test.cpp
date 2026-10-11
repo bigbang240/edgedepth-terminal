@@ -56,8 +56,7 @@ void expect_eq(const std::string& got, const std::string& want, const char* what
 constexpr int64_t kDay = 86400000LL;
 constexpr int64_t kHour = 3600000LL;
 
-// 2026-08-23T13:45:30.123Z. Deliberately mid-day and not on any round boundary,
-// so a window that accidentally tracks "now" instead of the calendar day shows.
+// 2026-08-23T13:45:30.123Z. Deliberately mid-day and not on any round boundary.
 constexpr int64_t kNow = 1787492730123LL;
 
 // Every test owns its own tier + window state; nothing is inherited from the
@@ -65,9 +64,6 @@ constexpr int64_t kNow = 1787492730123LL;
 void reset_state() {
     Entitlements::current() = Entitlements::Tier::Pro;
     Entitlements::pro_lookback_ms() = Entitlements::PRO_REPLAY_LOOKBACK_MS;
-    Entitlements::free_window_dynamic() = false;
-    Entitlements::free_window_start_ms() = 0;
-    Entitlements::free_window_end_ms() = 0;
     Entitlements::user_email().clear();
     Entitlements::hosted() = true;
     // The recorded-book floor is a data limit layered over every tier; tier
@@ -115,106 +111,46 @@ void test_tier_is_a_superset_chain() {
     Entitlements::current() = T::Admin;    expect_eq(Entitlements::tier_label(), "ADMIN", "admin label");
 }
 
-void test_static_free_window_is_one_whole_utc_calendar_day() {
+// Free replay (2026-10-04): Binance Futures BTCUSDT over the trailing 72h,
+// mirroring the backend's free-tier check. Nothing else is free to replay.
+void test_free_window_is_btcusdt_over_the_last_72h() {
     reset_state();
     Entitlements::current() = Entitlements::Tier::Free;
 
     int64_t start = 0, end = 0;
     Entitlements::free_window_range(kNow, start, end);
-
-    // Exactly 24h, both ends on a UTC midnight. The old rolling [72h,48h] band
-    // satisfied neither, and the backend's calendar-day check would 4xx it.
-    expect_i64(end - start, kDay, "the free window is exactly one day long");
-    expect_i64(start % kDay, 0, "the window starts at a UTC midnight");
-    expect_i64(end % kDay, 0, "the window ends at a UTC midnight");
-    expect_i64(start, (kNow / kDay) * kDay - 2 * kDay, "the window is the day before yesterday");
-    expect_true(end <= kNow, "the window is entirely in the past");
-
-    // The window must NOT drift with the time of day. A user scrubbing just
-    // after midnight and one scrubbing just before it get the same day, which is
-    // the entire point of anchoring to a calendar day instead of a rolling band.
-    const int64_t day_start = (kNow / kDay) * kDay;
-    for (const int64_t offset : {int64_t{0}, int64_t{1}, kHour, 12 * kHour, kDay - 1}) {
-        int64_t s = 0, e = 0;
-        Entitlements::free_window_range(day_start + offset, s, e);
-        expect_i64(s, start, "the free window does not move within a UTC day");
-        expect_i64(e, end, "the free window end does not move within a UTC day");
-    }
-    // ...and it advances by exactly one day at the boundary, not by some fraction.
-    int64_t next_s = 0, next_e = 0;
-    Entitlements::free_window_range(day_start + kDay, next_s, next_e);
-    expect_i64(next_s - start, kDay, "the window advances one whole day at UTC midnight");
-    expect_i64(next_e - end, kDay, "the window end advances one whole day too");
-}
-
-void test_dynamic_free_window_overrides_the_client_guess() {
-    reset_state();
-    Entitlements::current() = Entitlements::Tier::Free;
-
-    // The backend told us which day is actually archived. That answer wins
-    // verbatim, with no client-side inset: the server enforces the same bounds,
-    // so a client that "helpfully" trimmed them would refuse its own valid range.
-    const int64_t served_start = 1787184000000LL;  // 2026-08-18T00:00:00Z
-    const int64_t served_end = served_start + kDay;
-    Entitlements::free_window_dynamic() = true;
-    Entitlements::free_window_start_ms() = served_start;
-    Entitlements::free_window_end_ms() = served_end;
-
-    int64_t start = 0, end = 0;
-    Entitlements::free_window_range(kNow, start, end);
-    expect_i64(start, served_start, "the served window start is used verbatim");
-    expect_i64(end, served_end, "the served window end is used verbatim");
-
-    // And it is used regardless of the client clock, which is the whole reason
-    // the backend supplies it.
-    Entitlements::free_window_range(kNow + 30 * kDay, start, end);
-    expect_i64(start, served_start, "a skewed client clock does not move the served window");
-
-    // Dropping back to the static fallback restores the computed day.
-    Entitlements::free_window_dynamic() = false;
-    Entitlements::free_window_range(kNow, start, end);
-    expect_i64(start, (kNow / kDay) * kDay - 2 * kDay, "clearing the override restores the fallback");
-}
-
-void test_free_range_gate_matches_the_window_exactly() {
-    reset_state();
-    Entitlements::current() = Entitlements::Tier::Free;
-
-    int64_t start = 0, end = 0;
-    Entitlements::free_window_range(kNow, start, end);
-
-    // The bounds are inclusive on both ends: the modal requests exactly the
-    // advertised window, so an exclusive comparison here would reject the one
-    // range the UI itself offers.
-    expect_true(Entitlements::range_replayable(start, end, kNow),
-                "the advertised window is replayable");
-    expect_true(Entitlements::range_replayable(start, start, kNow), "a zero-width range at the start");
-    expect_true(Entitlements::range_replayable(end, end, kNow), "a zero-width range at the end");
-    expect_true(Entitlements::range_replayable(start + kHour, end - kHour, kNow),
-                "an interior range is replayable");
-
-    // One millisecond outside on either side is refused. The whole range has to
-    // fit; a range that merely OVERLAPS the window is not enough.
-    expect_true(!Entitlements::range_replayable(start - 1, end, kNow),
-                "a range starting one ms early is refused");
-    expect_true(!Entitlements::range_replayable(start, end + 1, kNow),
-                "a range ending one ms late is refused");
-    expect_true(!Entitlements::range_replayable(start - kDay, start + kHour, kNow),
-                "a range straddling the start is refused");
-    expect_true(!Entitlements::range_replayable(end - kHour, end + kDay, kNow),
-                "a range straddling the end is refused");
-    expect_true(!Entitlements::range_replayable(kNow - kHour, kNow, kNow),
-                "free cannot replay the live edge");
-
-    // A single timestamp gate agrees with the range gate at every boundary.
-    expect_true(Entitlements::time_replayable(start, kNow), "the window start is replayable");
-    expect_true(Entitlements::time_replayable(end, kNow), "the window end is replayable");
-    expect_true(!Entitlements::time_replayable(start - 1, kNow), "one ms before the start is not");
-    expect_true(!Entitlements::time_replayable(end + 1, kNow), "one ms after the end is not");
+    expect_i64(end, kNow, "the free window ends at the live edge");
+    expect_i64(start, kNow - Entitlements::FREE_WINDOW_MS + Entitlements::FREE_WINDOW_INSET_MS,
+               "the free window starts 72h back, inset for clock drift");
     expect_i64(Entitlements::replay_start_floor_ms(kNow), start, "the floor is the window start");
-    expect_i64(Entitlements::replay_end_ceil_ms(kNow), end, "the ceiling is the window end");
+    expect_i64(Entitlements::replay_end_ceil_ms(kNow), kNow, "the ceiling is the live edge");
     expect_i64(Entitlements::replay_floor_ms(kNow), Entitlements::replay_start_floor_ms(kNow),
                "the legacy floor alias agrees with the floor");
+
+    // A point is replayable only on the free market.
+    expect_true(Entitlements::time_replayable(kNow - kHour, kNow, "binancef", "btcusdt"),
+                "an hour ago on BTCUSDT is replayable");
+    expect_true(Entitlements::time_replayable(kNow - 72 * kHour, kNow, "binancef", "btcusdt"),
+                "the 72h boundary is replayable");
+    expect_true(!Entitlements::time_replayable(kNow - 72 * kHour - 1, kNow, "binancef", "btcusdt"),
+                "older than 72h is not");
+    expect_true(!Entitlements::time_replayable(kNow - kHour, kNow, "binancef", "ethusdt"),
+                "ETH is not free to replay (the archived majors day is retired)");
+    expect_true(!Entitlements::time_replayable(kNow - kHour, kNow, "bybit", "btcusdt"),
+                "Bybit BTC is not the free market");
+    expect_true(!Entitlements::time_replayable(kNow - 2 * kDay - kHour, kNow),
+                "an unnamed market is not replayable on free");
+
+    // range_replayable cannot see the market, so it never admits a free range;
+    // callers admit the free market through btc_preview_range.
+    expect_true(!Entitlements::range_replayable(kNow - kHour, kNow, kNow),
+                "a free range needs the market check");
+
+    expect_true(Entitlements::market_replay_allowed("binancef", "BTCUSDT"), "binancef BTCUSDT is the free market");
+    expect_true(!Entitlements::market_replay_allowed("bybit", "btcusdt"), "bybit BTCUSDT is not");
+    expect_true(!Entitlements::market_replay_allowed("binancef", "ethusdt"), "ETH is not");
+    Entitlements::current() = Entitlements::Tier::Pro;
+    expect_true(Entitlements::market_replay_allowed("bybit", "linkusdt"), "pro replays any market");
 }
 
 void test_pro_reach_follows_the_backend_injected_lookback() {
@@ -250,7 +186,7 @@ void test_pro_reach_follows_the_backend_injected_lookback() {
     expect_true(Entitlements::pro_lookback_days() == 90, "the default Pro reach is 90 days");
     expect_eq(Entitlements::archive_label(), "90d archive", "the default caption reads 90d");
     Entitlements::current() = Entitlements::Tier::Free;
-    expect_eq(Entitlements::archive_label(), "free window", "free advertises the window, not a depth");
+    expect_eq(Entitlements::archive_label(), "free replay", "free advertises the free replay, not a depth");
 
     // Research and admin reach at least as far as pro at the same settings.
     reset_state();
@@ -284,14 +220,15 @@ void test_symbol_and_speed_gates() {
     reset_state();
     Entitlements::current() = Entitlements::Tier::Free;
 
-    // The six majors, matched case-insensitively so a link written in any case
-    // resolves the same way the route parser resolves it.
+    // The free symbol (BTCUSDT), matched case-insensitively so a link written in
+    // any case resolves the same way the route parser resolves it.
     for (const char* sym : Entitlements::FREE_REPLAY_SYMBOLS) {
         expect_true(Entitlements::symbol_replay_allowed(sym), "a listed free symbol is allowed");
     }
     expect_true(Entitlements::symbol_replay_allowed("BTCUSDT"), "uppercase matches the free list");
     expect_true(Entitlements::symbol_replay_allowed("BtcUsdt"), "mixed case matches the free list");
     expect_true(!Entitlements::symbol_replay_allowed("linkusdt"), "an unlisted symbol is refused");
+    expect_true(!Entitlements::symbol_replay_allowed("ethusdt"), "a former free major is refused");
     expect_true(!Entitlements::symbol_replay_allowed(""), "an empty symbol is refused");
     expect_true(!Entitlements::symbol_replay_allowed("btc"), "a partial symbol is refused");
     expect_true(!Entitlements::symbol_replay_allowed("btcusdtx"), "a superstring symbol is refused");
@@ -357,6 +294,23 @@ void test_pricing_href_preserves_billing_choice() {
               "https://edgedepth.com/pricing?billing=yearly", "unknown period defaults yearly");
 }
 
+void test_checkout_href_goes_straight_to_card_checkout() {
+    expect_eq(Entitlements::checkout_href("yearly"),
+              "/pricing?plan=yearly&rail=card&source=terminal-upsell", "annual card checkout");
+    expect_eq(Entitlements::checkout_href("monthly"),
+              "/pricing?plan=monthly&rail=card&source=terminal-upsell", "monthly card checkout");
+    expect_eq(Entitlements::checkout_href(nullptr),
+              "/pricing?plan=yearly&rail=card&source=terminal-upsell", "unknown period defaults yearly");
+}
+
+void test_coin_label_names_the_market() {
+    expect_eq(Entitlements::coin_label("ognusdt"), "OGN", "USDT perp");
+    expect_eq(Entitlements::coin_label("1000pepeusdt"), "1000PEPE", "multiplier prefix kept");
+    expect_eq(Entitlements::coin_label("ethusdc"), "ETH", "USDC perp");
+    expect_eq(Entitlements::coin_label("BTC"), "BTC", "Hyperliquid coin unchanged");
+    expect_eq(Entitlements::coin_label("usdt"), "USDT", "never strips to nothing");
+}
+
 void test_self_hosted_venues_follow_the_feed() {
     reset_state();
 
@@ -379,14 +333,22 @@ void test_self_hosted_venues_follow_the_feed() {
 
 int main() {
     test_tier_is_a_superset_chain();
-    test_static_free_window_is_one_whole_utc_calendar_day();
-    test_dynamic_free_window_overrides_the_client_guess();
-    test_free_range_gate_matches_the_window_exactly();
+    test_free_window_is_btcusdt_over_the_last_72h();
     test_pro_reach_follows_the_backend_injected_lookback();
     test_book_floor_clamps_every_tier();
     test_symbol_and_speed_gates();
+    reset_state();
+    Entitlements::current() = Entitlements::Tier::Free;
+    expect_true(Entitlements::btc_preview_range("binancef", "btcusdt", kNow-72*kHour, kNow, kNow), "BTC 72h boundary allowed");
+    expect_true(!Entitlements::btc_preview_range("binancef", "btcusdt", kNow-72*kHour-1, kNow, kNow), "BTC older denied");
+    expect_true(!Entitlements::btc_preview_range("bybit", "btcusdt", kNow-kHour, kNow, kNow), "other venue denied");
+    expect_true(!Entitlements::btc_preview_range("binancef", "xrpusdt", kNow-kHour, kNow, kNow), "other coin denied");
+    expect_true(!Entitlements::btc_preview_range("binancef", "btcusdt", kNow-kHour, kNow+1, kNow), "future denied");
+    expect_true(!Entitlements::speed_allowed(2), "free preview cannot speed up");
     test_authentication_is_not_the_same_question_as_tier();
     test_pricing_href_preserves_billing_choice();
+    test_checkout_href_goes_straight_to_card_checkout();
+    test_coin_label_names_the_market();
     test_self_hosted_venues_follow_the_feed();
 
     if (failures != 0) {

@@ -89,9 +89,9 @@ void main() {
     vec4 meta = texelFetch(u_meta, ivec2(tex_col, 0), 0);
     // Between adjacent synchronized observations, hold the preceding state
     // until the new event's original timestamp. No future book paints backward.
-    // A segment boundary or an absent bin stops this hold.
+    // Flags 6/7 permit a labelled live display bridge; unbridged boundaries still stop it.
     if (!held_tail && meta.a >= 3.0 && fract(col_offset_f) < fract(meta.a)) {
-        if (meta.a >= 5.0 || col_offset == 0) discard;
+        if ((meta.a >= 5.0 && meta.a < 7.0) || col_offset == 0) discard;
         tex_col = (tex_col + u_ring_size - 1) % u_ring_size;
         meta = texelFetch(u_meta, ivec2(tex_col, 0), 0);
         if (meta.a < 3.0) discard;

@@ -43,6 +43,7 @@ add_terminal_native_test(url_router_test url_router_test.cpp)
 add_terminal_native_test(lead_lag_tracker_test lead_lag_tracker_test.cpp)
 add_terminal_native_test(trade_identity_test trade_identity_test.cpp)
 add_terminal_native_test(entitlements_test entitlements_test.cpp)
+add_terminal_native_test(realtime_preview_test realtime_preview_test.cpp)
 add_terminal_native_test(dispatch_drain_test dispatch_drain_test.cpp)
 add_terminal_native_test(double_buffer_test double_buffer_test.cpp)
 add_terminal_native_test(tpo_manager_test tpo_manager_test.cpp)
@@ -62,6 +63,8 @@ include(FetchContent)
 FetchContent_Declare(workspace_json
     URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz)
 FetchContent_MakeAvailable(workspace_json)
+add_terminal_native_test(reported_liquidations_test reported_liquidations_test.cpp)
+target_link_libraries(reported_liquidations_test PRIVATE nlohmann_json::nlohmann_json)
 add_terminal_native_test(workspace_document_test workspace_document_test.cpp)
 target_link_libraries(workspace_document_test PRIVATE nlohmann_json::nlohmann_json)
 
@@ -102,8 +105,38 @@ add_terminal_native_test(compression_geometry_test compression_geometry_test.cpp
 
 add_terminal_native_test(touch_odds_test touch_odds_test.cpp)
 add_terminal_native_test(touch_zones_test touch_zones_test.cpp)
+add_terminal_native_test(liq_rails_test liq_rails_test.cpp)
+add_terminal_native_test(liqmap2_store_test liqmap2_store_test.cpp)
+add_terminal_native_test(liqmap2_release_test liqmap2_release_test.cpp)
+add_terminal_native_test(liqmap2_scorecard_test liqmap2_scorecard_test.cpp)
+add_terminal_native_test(liqmap2_rails_test liqmap2_rails_test.cpp)
+target_link_libraries(liqmap2_scorecard_test PRIVATE nlohmann_json::nlohmann_json)
 target_link_libraries(touch_odds_test PRIVATE nlohmann_json::nlohmann_json)
 
-# Appearance preferences: v2 read, v1 -> v2 migration and bad-value rejection.
-add_terminal_native_test(appearance_preferences_test appearance_preferences_test.cpp)
-target_link_libraries(appearance_preferences_test PRIVATE nlohmann_json::nlohmann_json)
+add_terminal_native_test(stats_snapshot_test stats_snapshot_test.cpp)
+target_link_libraries(stats_snapshot_test PRIVATE nlohmann_json::nlohmann_json)
+
+add_terminal_native_test(iceberg_snapshot_test iceberg_snapshot_test.cpp)
+
+add_terminal_native_test(stats_oi_history_test stats_oi_history_test.cpp)
+
+add_terminal_native_test(market_context_test market_context_test.cpp)
+target_link_libraries(market_context_test PRIVATE nlohmann_json::nlohmann_json)
+
+add_terminal_native_test(stats_ratio_history_test stats_ratio_history_test.cpp)
+target_link_libraries(stats_ratio_history_test PRIVATE nlohmann_json::nlohmann_json)
+
+add_terminal_native_test(market_data_history_test market_data_history_test.cpp)
+target_link_libraries(market_data_history_test PRIVATE nlohmann_json::nlohmann_json)
+
+add_terminal_native_test(market_data_view_test market_data_view_test.cpp)
+target_link_libraries(market_data_view_test PRIVATE nlohmann_json::nlohmann_json)
+
+add_terminal_native_test(activity_strip_test activity_strip_test.cpp)
+target_link_libraries(activity_strip_test PRIVATE nlohmann_json::nlohmann_json)
+
+add_terminal_native_test(research_readings_test research_readings_test.cpp)
+target_link_libraries(research_readings_test PRIVATE nlohmann_json::nlohmann_json)
+
+add_terminal_native_test(market_data_overview_test market_data_overview_test.cpp)
+target_link_libraries(market_data_overview_test PRIVATE nlohmann_json::nlohmann_json)

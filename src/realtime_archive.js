@@ -127,11 +127,11 @@ function archiveWorker() {
             if (++columns>2048) return;
             // The boundary clips rendering within this bin. Keep its first observed
             // timestamp, not the last sample used by the aggregate.
-            const boundary=bin.boundary || bin.b-previous>m.step;
+            const boundary=bin.boundary || bin.first-previous>Math.max(1000,m.step);
             out.set([1,boundary?bin.first:bin.t,7+bin.values.size*2,boundary?1:0,
                 bin.bid,bin.ask,bin.values.size],used);used+=7;
             for (const [k,v] of bin.values) {out[used++]=k*m.tick;out[used++]=v/bin.count;}
-            previous=bin.b;
+            previous=bin.t;
         }
         function consumeDepth(a,p) {
             const kind=a[p],t=a[p+1],n=a[p+2];
@@ -242,7 +242,14 @@ function start() {
         worker=new Worker(URL.createObjectURL(new Blob(['('+archiveWorker.toString()+')()'],{type:'text/javascript'})));
         worker.onmessage=e=>{
             const m=e.data,s=states.get(m.id);
-            if (m.type==='ack') {inflight=Math.max(0,inflight-m.bytes);if(m.request){pendingQueries=Math.max(0,pendingQueries-1);if(s && m.request===s.request)s.pending=false;}return;}
+            if (m.type==='ack') {
+                inflight=Math.max(0,inflight-m.bytes);
+                if(m.request){pendingQueries=Math.max(0,pendingQueries-1);if(s && m.request===s.request)s.pending=false;}
+                // Continue bounded catch-up after a throttled background timer.
+                // The native owner checks visibility and excludes replay.
+                if(Module['_capture_background_live']) Module['_capture_background_live']();
+                return;
+            }
             if (!s) return;
             if(m.type==='status') Object.assign(s,m);
             if(m.type==='error') {s.error=m.message;s.pending=false;}

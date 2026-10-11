@@ -1,10 +1,12 @@
 #include "types/frame_profiler.h"
 #include "ui/dom_widget.h"
 #include "rendering/theme.h"
+#include "ui/drawing/drawing_icons.h"
 #include "imgui.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 
 #include "core/orderbook_manager.h"
 #include "core/symbol_metadata.h"
@@ -29,19 +31,7 @@ ImVec4 ocean_vec4(float t) {
                   a.z + (b.z - a.z) * fr, 1.0f);
 }
 
-ImU32 ocean_u32(float t) {
-    const ImVec4 c = ocean_vec4(t);
-    return IM_COL32(static_cast<int>(c.x * 255.0f),
-                    static_cast<int>(c.y * 255.0f),
-                    static_cast<int>(c.z * 255.0f), 255);
-}
-
-// Relative luminance - decides light vs dark ink over a depth bar
-float luminance(const ImVec4& c) {
-    return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
-}
-
-// Right/center-aligned text within the current table cell
+// Right-aligned text within the current table cell
 void cell_text_right(const char* txt) {
     const float w = ImGui::GetContentRegionAvail().x;
     const float tw = ImGui::CalcTextSize(txt).x;
@@ -49,49 +39,8 @@ void cell_text_right(const char* txt) {
     ImGui::TextUnformatted(txt);
 }
 
-void cell_text_center(const char* txt) {
-    const float w = ImGui::GetContentRegionAvail().x;
-    const float tw = ImGui::CalcTextSize(txt).x;
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (w > tw ? (w - tw) * 0.5f : 0.0f));
-    ImGui::TextUnformatted(txt);
-}
-
-// Text over a depth bar - dark ink when the bar is bright AND covers the text,
-// otherwise TX1 with a 1px drop shadow so it reads over partial/dark bars.
-void depth_cell_text(ImDrawList* dl, const char* txt, bool right_align,
-                     float bar_w, float bar_t) {
-    const ImVec2 cur = ImGui::GetCursorScreenPos();
-    const float w = ImGui::GetContentRegionAvail().x;
-    const ImVec2 ts = ImGui::CalcTextSize(txt);
-    const float x_off = right_align ? (w > ts.x ? w - ts.x : 0.0f) : 0.0f;
-    const bool covered = bar_w >= ts.x + 4.0f;
-    const bool bright = luminance(ocean_vec4(bar_t)) > 0.45f;
-
-    if (!(covered && bright)) {
-        // shadow pass (skipped on bright bars - dark ink needs no shadow)
-        dl->AddText(ImVec2(cur.x + x_off + 1.0f, cur.y + 1.0f),
-                    IM_COL32(0, 0, 0, 170), txt);
-    }
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + x_off);
-    ImGui::PushStyleColor(ImGuiCol_Text,
-        (covered && bright) ? Theme::Tokens::BRAND_INK : Theme::Tokens::TX1);
-    ImGui::TextUnformatted(txt);
-    ImGui::PopStyleColor();
-}
-
-// Segmented pill button - active = brand-soft fill, brand text
-bool seg_button(const char* label, bool active) {
-    // De-cyaned (2026-07-17): selected = monochrome raised (bg-2 + text-1),
-    // slim ~24px. Teal is reserved for CTAs / links / live data, never on-states.
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f, 5.0f));
-    ImGui::PushStyleColor(ImGuiCol_Button,        active ? Theme::Tokens::ELEV : ImVec4(0, 0, 0, 0));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::Tokens::ELEV);
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  Theme::Tokens::ELEV);
-    ImGui::PushStyleColor(ImGuiCol_Text,          active ? Theme::Tokens::TX1 : Theme::Tokens::TX2);
-    const bool clicked = ImGui::Button(label);
-    ImGui::PopStyleColor(4);
-    ImGui::PopStyleVar();
-    return clicked;
+ImU32 with_alpha(const ImVec4& c, float a) {
+    return ImGui::GetColorU32(ImVec4(c.x, c.y, c.z, a));
 }
 
 } // namespace
@@ -111,6 +60,7 @@ DOMWidget::DOMWidget(const Terminal::Pair& pair, const AppContext& ctx,
     , levels_per_side_(levels_per_side)
     , fmt_(SymbolRegistry::instance().get_formatter(pair.exchange, pair.symbol))
 {
+    mode_companion = true; // A normal standalone panel follows its market chart.
     subscribed_streams_ = &ctx_.stream_mgr();
     subscribed_streams_->subscribe_orderbook(stream_key_);
     trade_accumulator_.init(pair, ctx_.stream_mgr(), tick_size);
@@ -242,11 +192,27 @@ void DOMWidget::build_row_models(const Terminal::Orderbook& ob) {
 
     rows_ask_.resize(levels_per_side_);
     rows_bid_.resize(levels_per_side_);
+    // The current price's text: a row's digits that differ from it are what the eye reads.
+    char current_txt[24];
+    snprintf(current_txt, sizeof(current_txt), fmt_.price_fmt, ob.last_price);
+    const double best_bid = ob.bids.empty() ? 0.0 : ob.bids.begin()->first;
+    const double best_ask = ob.asks.empty() ? 0.0 : ob.asks.begin()->first;
+    const double half_tick = tick_size_ * 0.5;
 
     auto fill = [&](RowModel& rm, double price, bool is_ask) {
         rm = RowModel{};
         rm.price = price;
         snprintf(rm.price_txt, sizeof(rm.price_txt), fmt_.price_fmt, price);
+        {
+            const size_t n = std::strlen(rm.price_txt);
+            size_t k = 0;
+            while (k < n && rm.price_txt[k] == current_txt[k]) ++k;
+            rm.bright_from = static_cast<uint8_t>(std::min(k, n >= 2 ? n - 2 : size_t{0}));
+        }
+        // A grouped ask band runs up from its price, a bid band down from it.
+        rm.is_best = is_ask
+            ? best_ask > 0.0 && best_ask > price - half_tick && best_ask < price + et - half_tick
+            : best_bid > 0.0 && best_bid < price + half_tick && best_bid > price - et + half_tick;
 
         const double size = dom_band_size(ob, price, is_ask, tick_size_, group_mult_);
         if (size > 0.0 && max_size > 0.0) {
@@ -410,7 +376,7 @@ void DOMWidget::render() {
         return;
     }
 
-    render_controls();
+    render_controls(*ob);
     render_ladder(*ob);
     handle_mouse_input();
 
@@ -421,52 +387,113 @@ void DOMWidget::render() {
 // Controls bar - grouping · Auto/Reset · USD/COIN · flow hint (window via r-click)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-void DOMWidget::render_controls() {
+void DOMWidget::render_controls(const Terminal::Orderbook& ob) {
     using namespace Theme;
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(9, 5));
-    if (choice_button("Auto center", auto_center_)) {
+    using drawing::UiIcon;
+    // One slim toolbar (design v3, 2026-10-11): units, grouping and the flow window on the left; the spread and
+    // the centre / settings icons on the right. The menus hold the rest.
+    const float K = ImGui::GetFontSize() / 18.4f;
+    const float pad = 10.0f * K, h = 26.0f * K, top = 6.0f * K, ib = 26.0f * K;
+    const float ww = ImGui::GetWindowWidth();
+    const ImVec2 origin = ImGui::GetCursorPos();
+    push_font(Fonts::ui(), 13.5f * K);
+    ImGui::SetCursorPos(ImVec2(origin.x + pad, origin.y + top));
+    static const char* const kUnits[] = {"Coin", "USD"};
+    const int units = segmented("dom_units", kUnits, 2, display_usd_ ? 1 : 0, h);
+    display_usd_ = units == 1;
+    ImGui::SameLine(0.0f, 6.0f * K);
+    char group_label[32];
+    snprintf(group_label, sizeof(group_label), fmt_.price_fmt, tick_size_ * group_mult_);
+    if (button(group_label, ButtonKind::Ghost, ImVec2(0, h), UiIcon::ChevronDown, true)) ImGui::OpenPopup("##dom_group");
+    if (ImGui::IsItemHovered()) tooltip("Price grouping");
+    const auto reset_mode = trade_accumulator_.reset_mode();
+    const int64_t interval = trade_accumulator_.reset_interval_sec();
+    const int flow = reset_mode == AccumulatorResetMode::Manual ? 4 : reset_mode == AccumulatorResetMode::Session ? 3 :
+                     interval <= 300 ? 0 : interval <= 900 ? 1 : 2;
+    static const char* const kFlowShort[] = {"Flow 5m", "Flow 15m", "Flow 1h", "Flow session", "Flow manual"};
+    ImGui::SameLine(0.0f, 2.0f * K);
+    if (show_trade_columns_) {
+        if (button(kFlowShort[flow], ButtonKind::Ghost, ImVec2(0, h), UiIcon::ChevronDown, true)) ImGui::OpenPopup("##dom_flow");
+        if (ImGui::IsItemHovered()) tooltip("When the Buys, Sells and Delta columns start counting again");
+        ImGui::SameLine(0.0f, 0.0f);
+    }
+    const float left_end = ImGui::GetCursorPosX();
+
+    // Right: settings, then centre, then the spread when there is room.
+    const float icons_x = ww - pad - ib * 2.0f - 2.0f * K;
+    ImGui::SetCursorPos(ImVec2(icons_x, origin.y + top));
+    if (icon_button("##dom_center", UiIcon::Target, auto_center_ ? "Following the price (Home). Scroll to look away." :
+                                                                  "Back to the price (Home)", ib, auto_center_)) {
         auto_center_ = !auto_center_;
         if (auto_center_) scroll_offset_ = 0;
     }
-    ImGui::SameLine();
-    char settings_label[64];
-    const auto reset_mode = trade_accumulator_.reset_mode();
-    const int64_t interval = trade_accumulator_.reset_interval_sec();
-    const char* flow = reset_mode == AccumulatorResetMode::Manual ? "Manual" :
-        reset_mode == AccumulatorResetMode::Session ? "Session" :
-        interval <= 300 ? "5m" : interval <= 900 ? "15m" : "1h";
-    snprintf(settings_label, sizeof(settings_label), "%s / %s  Settings", display_usd_ ? "USD" : "Coin", flow);
-    if (ImGui::Button(settings_label)) ImGui::OpenPopup("##book_settings");
-    ImGui::PopStyleVar();
-    if (Theme::begin_popup("##book_settings")) {
-        section_label("PRICE GROUPING");
+    ImGui::SameLine(0.0f, 2.0f * K);
+    if (icon_button("##dom_settings", UiIcon::Gear, "Settings", ib)) ImGui::OpenPopup("##dom_settings");
+    if (!ob.bids.empty() && !ob.asks.empty() && tick_size_ > 0.0) {
+        const double bid = ob.bids.begin()->first, ask = ob.asks.begin()->first, spread = ask - bid;
+        const long ticks = std::lround(spread / tick_size_);
+        const double mid = (ask + bid) * 0.5;
+        char spread_txt[64];
+        if (ticks >= 1 && ticks <= 999) snprintf(spread_txt, sizeof(spread_txt), "Spread %ld tick%s", ticks, ticks == 1 ? "" : "s");
+        else snprintf(spread_txt, sizeof(spread_txt), "Spread -");
+        float sw = ImGui::CalcTextSize(spread_txt).x;
+        if (icons_x - 10.0f * K - sw <= left_end + 12.0f * K) {   // tight: drop the word, the tooltip says it
+            std::memmove(spread_txt, spread_txt + 7, std::strlen(spread_txt + 7) + 1);
+            sw = ImGui::CalcTextSize(spread_txt).x;
+        }
+        const float sx = icons_x - 10.0f * K - sw;
+        if (sx > left_end + 12.0f * K) {
+            ImGui::SetCursorPos(ImVec2(sx, origin.y + top + (h - ImGui::GetFontSize()) * 0.5f));
+            ImGui::TextColored(Tokens::TX3, "%s", spread_txt);
+            if (ImGui::IsItemHovered() && mid > 0.0) {
+                char a[32], b[32];
+                snprintf(a, sizeof(a), fmt_.price_fmt, bid);
+                snprintf(b, sizeof(b), fmt_.price_fmt, ask);
+                tooltip("Spread: best bid %s, best ask %s\n%.2f bp of the mid", a, b, spread / mid * 1e4);
+            }
+        }
+    }
+    ImGui::PopFont();
+    ImGui::SetCursorPos(ImVec2(origin.x, origin.y + top + h + top));
+    // The toolbar's bottom hairline.
+    {
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        ImGui::GetWindowDrawList()->AddLine(ImVec2(p.x, p.y - 0.5f), ImVec2(p.x + ww, p.y - 0.5f), u32(Tokens::BD1));
+    }
+
+    if (begin_menu("##dom_group", 200.0f)) {
+        menu_section("PRICE GROUPING");
         const int multipliers[] = {1, 10, 100};
+        static const char* const kHints[] = {"1 tick", "10 ticks", "100 ticks"};
         for (int i = 0; i < 3; ++i) {
-            if (i) ImGui::SameLine();
             char label[32];
             snprintf(label, sizeof(label), fmt_.price_fmt, tick_size_ * multipliers[i]);
-            if (choice_button(label, group_mult_ == multipliers[i])) {
+            if (menu_item(group_mult_ == multipliers[i] ? UiIcon::Check : UiIcon::None, label, kHints[i])) {
                 group_mult_ = multipliers[i]; auto_center_ = true; scroll_offset_ = 0;
             }
         }
-        section_label("DISPLAY UNITS");
-        if (choice_button("Coin", !display_usd_)) display_usd_ = false;
-        ImGui::SameLine();
-        if (choice_button("USD", display_usd_)) display_usd_ = true;
-        section_label("CUMULATIVE FLOW");
-        const auto mode = trade_accumulator_.reset_mode();
-        int selection = mode == AccumulatorResetMode::Manual ? 0 :
-            mode == AccumulatorResetMode::Session ? 4 :
-            trade_accumulator_.reset_interval_sec() <= 300 ? 1 :
-            trade_accumulator_.reset_interval_sec() <= 900 ? 2 : 3;
-        ImGui::SetNextItemWidth(240);
-        if (ImGui::Combo("##flow_window", &selection, "Manual\0Every 5 minutes\0Every 15 minutes\0Every hour\0Session\0")) {
-            if (selection == 0) trade_accumulator_.set_reset_mode(AccumulatorResetMode::Manual);
-            else if (selection == 4) trade_accumulator_.set_reset_mode(AccumulatorResetMode::Session);
+        ImGui::EndPopup();
+    }
+    if (begin_menu("##dom_flow", 240.0f)) {
+        menu_section("BUYS, SELLS AND DELTA RESET");
+        static const char* const kFlow[] = {"Every 5 minutes", "Every 15 minutes", "Every hour", "Each session", "Only when I reset"};
+        for (int i = 0; i < 5; ++i) {
+            if (!menu_item(flow == i ? UiIcon::Check : UiIcon::None, kFlow[i])) continue;
+            if (i == 4) trade_accumulator_.set_reset_mode(AccumulatorResetMode::Manual);
+            else if (i == 3) trade_accumulator_.set_reset_mode(AccumulatorResetMode::Session);
             else trade_accumulator_.set_reset_mode(AccumulatorResetMode::Periodic,
-                selection == 1 ? ResetPresets::FIVE_MIN : selection == 2 ? ResetPresets::FIFTEEN_MIN : ResetPresets::ONE_HOUR);
+                i == 0 ? ResetPresets::FIVE_MIN : i == 1 ? ResetPresets::FIFTEEN_MIN : ResetPresets::ONE_HOUR);
         }
-        if (ImGui::Button("Reset accumulated flow")) trade_accumulator_.reset();
+        menu_separator();
+        if (menu_item(UiIcon::Refresh, "Reset now")) trade_accumulator_.reset();
+        ImGui::EndPopup();
+    }
+    if (begin_menu("##dom_settings", 260.0f)) {
+        if (menu_toggle("Buys, sells and delta columns", show_trade_columns_)) show_trade_columns_ = !show_trade_columns_;
+        bool pinned = !mode_companion;
+        if (menu_toggle("Keep visible in real-time", pinned)) mode_companion = pinned;
+        menu_separator();
+        if (menu_item(UiIcon::Target, "Back to the price", "Home")) { auto_center_ = true; scroll_offset_ = 0; }
         ImGui::EndPopup();
     }
 }
@@ -476,8 +503,9 @@ void DOMWidget::render_controls() {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 void DOMWidget::render_ladder(const Terminal::Orderbook& ob) {
-    ImGui::PushFont(Theme::Fonts::mono_sm());
-    const float row_h = Theme::row_h_dense();   // DOM/tape density (18px @ default dial)
+    using namespace Theme;
+    ImGui::PushFont(Fonts::mono_sm());
+    const float row_h = row_h_dense();   // DOM/tape density (18px @ default dial)
     const float pad_y = std::max(0.0f, (row_h - ImGui::GetFontSize()) * 0.5f);
 
     ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(6.0f, pad_y));
@@ -492,53 +520,58 @@ void DOMWidget::render_ladder(const Terminal::Orderbook& ob) {
         ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ScrollbarSize,
         ImGui::CalcTextSize(measured_price).x + 24 + (num_columns - 1) * (number_w + 12));
 
-    // Reserve a fixed band at the bottom for the book-imbalance meter (drawn after).
     const ImVec2 tbl_size(0.0f, std::max(60.0f, ImGui::GetContentRegionAvail().y));
+    ImGui::PushStyleColor(ImGuiCol_TableRowBg, ImVec4(0, 0, 0, 0));
     if (!ImGui::BeginTable("DOMTable", num_columns, flags, tbl_size, inner_width)) {
+        ImGui::PopStyleColor();
         ImGui::PopStyleVar();
         ImGui::PopFont();
         return;
     }
 
-    // Column grid (design: 44px · 1fr · 58px · 1fr · 44px · 42px, scaled to font)
     if (show_trade_columns_)
-        ImGui::TableSetupColumn("BUYS", ImGuiTableColumnFlags_WidthFixed, number_w);
-    ImGui::TableSetupColumn("BIDS",  ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        ImGui::TableSetupColumn("Buys", ImGuiTableColumnFlags_WidthFixed, number_w);
+    ImGui::TableSetupColumn("Bids",  ImGuiTableColumnFlags_WidthStretch, 1.0f);
     char price_label[32];
     fmt_.format_price(price_label, sizeof(price_label), ob.last_price);
-    ImGui::TableSetupColumn("PRICE", ImGuiTableColumnFlags_WidthFixed,
-                            ImGui::CalcTextSize(price_label).x + 12);
-    ImGui::TableSetupColumn("ASKS",  ImGuiTableColumnFlags_WidthStretch, 1.0f);
+    ImGui::TableSetupColumn("Price", ImGuiTableColumnFlags_WidthFixed,
+                            ImGui::CalcTextSize(price_label).x + 16);
+    ImGui::TableSetupColumn("Asks",  ImGuiTableColumnFlags_WidthStretch, 1.0f);
     if (show_trade_columns_) {
-        ImGui::TableSetupColumn("SELLS", ImGuiTableColumnFlags_WidthFixed, number_w);
-        ImGui::TableSetupColumn("DELTA", ImGuiTableColumnFlags_WidthFixed, number_w);
+        ImGui::TableSetupColumn("Sells", ImGuiTableColumnFlags_WidthFixed, number_w);
+        ImGui::TableSetupColumn("Delta", ImGuiTableColumnFlags_WidthFixed, number_w);
     }
     ImGui::TableSetupScrollFreeze(0, 1);
 
-    // Custom header row - uppercase micro-labels, TX4, ELEV bg
+    // Header: quiet sentence-case labels over a hairline.
     {
-        ImGui::TableNextRow(ImGuiTableRowFlags_Headers, 22.0f);
-        ImGui::PushStyleColor(ImGuiCol_Text, Theme::Tokens::TX3);
+        ImGui::TableNextRow(ImGuiTableRowFlags_Headers, 24.0f);
+        ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, u32(Tokens::PANEL));
+        push_font(Fonts::ui(), 12.5f);
         int c = 0;
-        auto head = [&](const char* t, int align, bool mono) {
+        float y_bottom = 0.0f, x0 = 0.0f, x1 = 0.0f;
+        auto head = [&](const char* t, int align) {
             ImGui::TableSetColumnIndex(c++);
-            if (!mono) ImGui::PushFont(Theme::Fonts::label());
+            const ImVec2 cur = ImGui::GetCursorScreenPos();
+            if (c == 1) { x0 = cur.x - 6.0f; y_bottom = cur.y - pad_y + 24.0f; }
+            x1 = cur.x + ImGui::GetContentRegionAvail().x + 6.0f;
             const float w = ImGui::GetContentRegionAvail().x;
             const float tw = ImGui::CalcTextSize(t).x;
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 3.0f);
             if (align == 2)      ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (w > tw ? w - tw : 0.0f));
             else if (align == 1) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (w > tw ? (w - tw) * 0.5f : 0.0f));
-            ImGui::TextUnformatted(t);
-            if (!mono) ImGui::PopFont();
+            ImGui::TextColored(Tokens::TX3, "%s", t);
         };
-        if (show_trade_columns_) head("BUYS", 2, false);
-        head("BIDS", 2, false);
-        head("PRICE", 1, false);
-        head("ASKS", 0, false);
+        if (show_trade_columns_) head("Buys", 2);
+        head("Bids", 2);
+        head("Price", 1);
+        head("Asks", 0);
         if (show_trade_columns_) {
-            head("SELLS", 2, false);
-            head("DELTA", 2, false);
+            head("Sells", 2);
+            head("Delta", 2);
         }
-        ImGui::PopStyleColor();
+        ImGui::PopFont();
+        ImGui::GetWindowDrawList()->AddLine(ImVec2(x0, y_bottom - 0.5f), ImVec2(x1, y_bottom - 0.5f), u32(Tokens::BD1));
     }
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -546,135 +579,142 @@ void DOMWidget::render_ladder(const Terminal::Orderbook& ob) {
     // Rows come from the row-model cache (rebuilt in update() on change only).
     // Guard: first frames can render before update() built the models.
     if (rows_ask_.size() == levels_per_side_ && rows_bid_.size() == levels_per_side_) {
-        // ── Ask levels (top, highest price first) ──
-        for (int i = static_cast<int>(levels_per_side_) - 1; i >= 0; i--) {
+        for (int i = static_cast<int>(levels_per_side_) - 1; i >= 0; i--)
             render_level_row(rows_ask_[static_cast<size_t>(i)], /*is_ask=*/true, dl, pad_y);
-        }
-
-        // ── Current-price row ──
         render_current_row(ob, dl, pad_y);
         if (auto_center_) ImGui::SetScrollHereY(0.5f);
-
-        // ── Bid levels (bottom, highest bid first) ──
-        for (int i = 0; i < static_cast<int>(levels_per_side_); i++) {
+        for (int i = 0; i < static_cast<int>(levels_per_side_); i++)
             render_level_row(rows_bid_[static_cast<size_t>(i)], /*is_ask=*/false, dl, pad_y);
-        }
     }
 
     ImGui::EndTable();
+    ImGui::PopStyleColor();
     ImGui::PopStyleVar();
     ImGui::PopFont();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Level row - one price tick (ask or bid side)
+// Level row - one price band (ask or bid side)
 // ═══════════════════════════════════════════════════════════════════════════════
+
+namespace {
+// A depth cell: a bar from the price side that always holds its whole number (never half under it) and runs on
+// past it in proportion to the band's size, so the cell reads as a bar chart with the numbers at its base at any
+// panel width. Larger bands are brighter on the OCEAN ramp (kept short of its palest end so the number stays
+// readable on it); a wall ten times the rest still leaves ordinary bands visible (gentle power).
+void depth_cell(ImDrawList* dl, const char* txt, float frac, bool bid_side, float row_h, float pad_y) {
+    const ImVec2 cur = ImGui::GetCursorScreenPos();
+    const float cell_w = ImGui::GetContentRegionAvail().x;
+    const float tw = ImGui::CalcTextSize(txt).x;
+    const float inset = 5.0f;
+    const float bar_w = std::min(cell_w, std::max(tw + inset * 2.0f, std::round(std::pow(frac, 0.6f) * cell_w)));
+    const ImVec4 c = ocean_vec4(0.34f + 0.52f * frac);
+    const float y0 = std::round(cur.y - pad_y + 2.0f), y1 = std::round(cur.y - pad_y + row_h - 2.0f);
+    const ImVec2 a = bid_side ? ImVec2(cur.x + cell_w - bar_w, y0) : ImVec2(cur.x, y0);
+    const ImVec2 b = bid_side ? ImVec2(cur.x + cell_w, y1) : ImVec2(cur.x + bar_w, y1);
+    dl->AddRectFilled(a, b, with_alpha(c, 0.34f + 0.36f * frac), 3.0f);
+    const float x = bid_side ? cur.x + cell_w - inset - tw : cur.x + inset;
+    dl->AddText(ImVec2(std::round(x), cur.y), ImGui::GetColorU32(frac >= 0.3f ? Theme::Tokens::TX1 : Theme::Tokens::TX2), txt);
+}
+}  // namespace
 
 void DOMWidget::render_level_row(const RowModel& rm, bool is_ask,
                                  ImDrawList* dl, float pad_y) {
-    const float row_h = Theme::row_h_dense();
+    using namespace Theme;
+    const float row_h = row_h_dense();
     ImGui::TableNextRow(ImGuiTableRowFlags_None, row_h);
 
     int col = 0;
+    ImGui::TableSetColumnIndex(0);
+    {
+        // Hover: a soft row fill, so the eye can follow a price across the columns.
+        const float y0 = ImGui::GetCursorScreenPos().y - pad_y;
+        const ImVec2 m = ImGui::GetIO().MousePos;
+        if (ImGui::IsWindowHovered() && m.y >= y0 && m.y < y0 + row_h)
+            ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, u32(Tokens::CONTROL));
+    }
 
-    // ── BUYS - faint UP, right-aligned ──
+    // ── Buys ──
     if (show_trade_columns_) {
         ImGui::TableSetColumnIndex(col++);
         if (rm.has_buy) {
-            ImVec4 c = Theme::Tokens::UP; c.w = 0.55f;
-            ImGui::PushStyleColor(ImGuiCol_Text, c);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(Tokens::UP.x, Tokens::UP.y, Tokens::UP.z, 0.78f));
             cell_text_right(rm.buy_txt);
             ImGui::PopStyleColor();
         }
     }
 
-    // ── BIDS depth cell - ocean bar anchored to the price side (grows left) ──
+    // ── Bids ──
     ImGui::TableSetColumnIndex(col++);
-    if (!is_ask && rm.has_size) {
-        const float frac = rm.depth_frac;
-        const float bar_t = 0.12f + frac * 0.88f;
-        const ImVec2 cur = ImGui::GetCursorScreenPos();
-        const float cell_w = ImGui::GetContentRegionAvail().x;
-        const float bar_w = std::max(2.0f, frac * cell_w);
-        const float y0 = cur.y - pad_y + 1.0f;
-        dl->AddRectFilled(ImVec2(cur.x + cell_w - bar_w, y0),
-                          ImVec2(cur.x + cell_w, y0 + row_h - 2.0f),
-                          ocean_u32(bar_t), 1.0f);
-        depth_cell_text(dl, rm.size_txt, /*right_align=*/true, bar_w, bar_t);
-    }
+    if (!is_ask && rm.has_size) depth_cell(dl, rm.size_txt, rm.depth_frac, true, row_h, pad_y);
 
-    // ── PRICE - TX2, centered ──
+    // ── Price: centred; the digits that differ from the current price bright, best bid / ask in the side colour ──
     ImGui::TableSetColumnIndex(col++);
     {
-        ImGui::PushStyleColor(ImGuiCol_Text, Theme::Tokens::TX2);
-        cell_text_center(rm.price_txt);
-        ImGui::PopStyleColor();
+        const ImVec2 cur = ImGui::GetCursorScreenPos();
+        const float cell_w = ImGui::GetContentRegionAvail().x;
+        const char* split = rm.price_txt + rm.bright_from;
+        const float tw = ImGui::CalcTextSize(rm.price_txt).x;
+        const float pw = ImGui::CalcTextSize(rm.price_txt, split).x;
+        const float x = std::round(cur.x + std::max(0.0f, (cell_w - tw) * 0.5f));
+        const ImVec4& bright = rm.is_best ? (is_ask ? Tokens::DOWN : Tokens::UP) : Tokens::TX1;
+        dl->AddText(ImVec2(x, cur.y), u32(Tokens::TX3), rm.price_txt, split);
+        dl->AddText(ImVec2(x + pw, cur.y), u32(bright), split);
     }
 
-    // ── ASKS depth cell - ocean bar anchored to the price side (grows right) ──
+    // ── Asks ──
     ImGui::TableSetColumnIndex(col++);
-    if (is_ask && rm.has_size) {
-        const float frac = rm.depth_frac;
-        const float bar_t = 0.12f + frac * 0.88f;
-        const ImVec2 cur = ImGui::GetCursorScreenPos();
-        const float bar_w = std::max(2.0f, frac * ImGui::GetContentRegionAvail().x);
-        const float y0 = cur.y - pad_y + 1.0f;
-        dl->AddRectFilled(ImVec2(cur.x, y0),
-                          ImVec2(cur.x + bar_w, y0 + row_h - 2.0f),
-                          ocean_u32(bar_t), 1.0f);
-        depth_cell_text(dl, rm.size_txt, /*right_align=*/false, bar_w, bar_t);
-    }
+    if (is_ask && rm.has_size) depth_cell(dl, rm.size_txt, rm.depth_frac, false, row_h, pad_y);
 
     if (!show_trade_columns_) return;
 
-    // ── SELLS - faint DOWN, right-aligned ──
+    // ── Sells ──
     ImGui::TableSetColumnIndex(col++);
     if (rm.has_sell) {
-        ImVec4 c = Theme::Tokens::DOWN; c.w = 0.55f;
-        ImGui::PushStyleColor(ImGuiCol_Text, c);
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(Tokens::DOWN.x, Tokens::DOWN.y, Tokens::DOWN.z, 0.78f));
         cell_text_right(rm.sell_txt);
         ImGui::PopStyleColor();
     }
 
-    // ── Δ - signed, direction-colored, right-aligned ──
+    // ── Delta ──
     ImGui::TableSetColumnIndex(col++);
     if (rm.has_delta) {
-        const ImVec4& c = rm.delta_pos ? Theme::Tokens::UP : Theme::Tokens::DOWN;
-        ImGui::PushStyleColor(ImGuiCol_Text, c);
+        ImGui::PushStyleColor(ImGuiCol_Text, rm.delta_pos ? Tokens::UP : Tokens::DOWN);
         cell_text_right(rm.delta_txt);
         ImGui::PopStyleColor();
     }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Current-price row - ELEV fill, inset hairlines, solid BRAND price chip,
+// Current-price row - ELEV fill, inset hairlines, BRAND price chip,
 // cumulative buy/sell/Δ totals in the trade columns
 // ═══════════════════════════════════════════════════════════════════════════════
 
 void DOMWidget::render_current_row(const Terminal::Orderbook& ob, ImDrawList* dl, float pad_y) {
     (void)ob;
-    const float row_h = Theme::row_h_dense();
+    using namespace Theme;
+    const float row_h = row_h_dense() + 4.0f;
     ImGui::TableNextRow(ImGuiTableRowFlags_None, row_h);
-    ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, Theme::u32(Theme::Tokens::ELEV));
+    ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, u32(Tokens::ELEV));
 
     const CurrentRowModel& cr = row_current_;
     int col = 0;
     float row_y0 = 0.0f, x_left = 0.0f;
+    const float lift = 2.0f;   // the taller row: centre its text
 
-    // ── BUYS total ──
     if (show_trade_columns_) {
         ImGui::TableSetColumnIndex(col++);
         const ImVec2 c0 = ImGui::GetCursorScreenPos();
         row_y0 = c0.y - pad_y;
         x_left = c0.x - 6.0f;
         if (cr.has_buy) {
-            ImGui::PushStyleColor(ImGuiCol_Text, Theme::Tokens::UP);
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + lift);
+            ImGui::PushStyleColor(ImGuiCol_Text, Tokens::UP);
             cell_text_right(cr.buy_txt);
             ImGui::PopStyleColor();
         }
     }
 
-    // ── BIDS - empty ──
     ImGui::TableSetColumnIndex(col++);
     if (!show_trade_columns_) {
         const ImVec2 c0 = ImGui::GetCursorScreenPos();
@@ -682,50 +722,39 @@ void DOMWidget::render_current_row(const Terminal::Orderbook& ob, ImDrawList* dl
         x_left = c0.x - 6.0f;
     }
 
-    // ── PRICE - solid BRAND chip, BRAND_INK text ──
+    // ── Price chip ──
     ImGui::TableSetColumnIndex(col++);
     {
         const ImVec2 cur = ImGui::GetCursorScreenPos();
         const float cell_w = ImGui::GetContentRegionAvail().x;
         const float tw = ImGui::CalcTextSize(cr.price_txt).x;
-        const float chip_w = std::min(cell_w + 8.0f, tw + 14.0f);
-        const float cx0 = cur.x + (cell_w - chip_w) * 0.5f;
-        const float cy0 = cur.y - pad_y + 1.5f;
-        dl->AddRectFilled(ImVec2(cx0, cy0),
-                          ImVec2(cx0 + chip_w, cy0 + row_h - 3.0f),
-                          Theme::u32(Theme::Tokens::BRAND), 2.0f);
-        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (cell_w > tw ? (cell_w - tw) * 0.5f : 0.0f));
-        ImGui::PushStyleColor(ImGuiCol_Text, Theme::Tokens::BRAND_INK);
-        ImGui::TextUnformatted(cr.price_txt);
-        ImGui::PopStyleColor();
+        const float chip_w = std::min(cell_w + 10.0f, tw + 16.0f);
+        const float cx0 = std::round(cur.x + (cell_w - chip_w) * 0.5f);
+        const float cy0 = std::round(row_y0 + 2.0f);
+        dl->AddRectFilled(ImVec2(cx0, cy0), ImVec2(cx0 + chip_w, cy0 + row_h - 4.0f), u32(Tokens::BRAND), Radius::R1);
+        dl->AddText(ImVec2(std::round(cur.x + (cell_w - tw) * 0.5f), cur.y + lift), u32(Tokens::BRAND_INK), cr.price_txt);
     }
 
-    // ── ASKS - empty ──
     ImGui::TableSetColumnIndex(col++);
     float x_right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x + 6.0f;
 
     if (show_trade_columns_) {
-        // ── SELLS total ──
         ImGui::TableSetColumnIndex(col++);
         if (cr.has_sell) {
-            ImGui::PushStyleColor(ImGuiCol_Text, Theme::Tokens::DOWN);
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + lift);
+            ImGui::PushStyleColor(ImGuiCol_Text, Tokens::DOWN);
             cell_text_right(cr.sell_txt);
             ImGui::PopStyleColor();
         }
-
-        // ── Δ total ──
         ImGui::TableSetColumnIndex(col++);
-        {
-            x_right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x + 6.0f;
-            const ImVec4& c = cr.delta_pos ? Theme::Tokens::UP : Theme::Tokens::DOWN;
-            ImGui::PushStyleColor(ImGuiCol_Text, c);
-            cell_text_right(cr.delta_txt);
-            ImGui::PopStyleColor();
-        }
+        x_right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x + 6.0f;
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + lift);
+        ImGui::PushStyleColor(ImGuiCol_Text, cr.delta_pos ? Tokens::UP : Tokens::DOWN);
+        cell_text_right(cr.delta_txt);
+        ImGui::PopStyleColor();
     }
 
-    // ── Inset hairlines top + bottom (design: inset 0 ±1px var(--bd-2)) ──
-    const ImU32 hairline = Theme::u32(Theme::Tokens::BD2);
+    const ImU32 hairline = u32(Tokens::BD2);
     dl->AddLine(ImVec2(x_left, row_y0 + 0.5f),         ImVec2(x_right, row_y0 + 0.5f),         hairline);
     dl->AddLine(ImVec2(x_left, row_y0 + row_h - 0.5f), ImVec2(x_right, row_y0 + row_h - 0.5f), hairline);
 }

@@ -2,6 +2,7 @@
 
 #include "core/app_context.h"
 #include "ui/widget.h"
+#include "replayer/pack_preview.h"
 
 #include <cstdint>
 #include <string>
@@ -13,7 +14,7 @@
 class ReplayLibraryWidget final : public Widget {
 public:
     explicit ReplayLibraryWidget(const AppContext& ctx);
-    ~ReplayLibraryWidget() override = default;
+    ~ReplayLibraryWidget() override;
 
     void render() override;
     void update() override;
@@ -38,11 +39,14 @@ private:
         std::string display_symbol;
         std::string captured_at;
         std::string pack_url;
+        std::string exchange_id, event_id, fingerprint;
         std::string metadata_line;
         std::string tags_line;
         int64_t duration_seconds = 0;
         int64_t size_bytes = 0;
         bool featured = false;
+        bool details_open = false, preview_requested = false, preview_done = false;
+        PackPreview::Chart preview;
     };
 
     const AppContext& ctx_;
@@ -53,6 +57,7 @@ private:
     double notice_until_ = 0.0;
     int manifest_revision_ = -1;
     int pending_pack_ = -1;
+    int preview_request_ = 0, preview_pack_ = -1;
     bool loading_ = false;
     bool catalog_ready_ = false;
     bool replace_popup_requested_ = false;
@@ -60,7 +65,9 @@ private:
     void begin_fetch(bool force);
     bool parse_manifest(const std::string& payload, std::string& parse_error);
     void play_pack(const Pack& pack);
-    void render_pack(const Pack& pack, int index);
+    void render_pack(Pack& pack, int index);
+    void render_preview(Pack& pack, ImVec2 size);
+    void update_preview();
     void render_replace_confirmation();
 
     static bool is_http_url(const std::string& value);

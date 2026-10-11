@@ -182,16 +182,19 @@ void EventRuntime::emit_state(const AppContext& ctx) {
     }
     if (end_ms <= start_ms) return;  // no window yet - nothing to report
 
-    const bool active  = rm.is_active();
+    // Dropped-socket recovery keeps the bar up as loading, with its own notice.
+    const ReplayManager::ReconnectStatus& rc = rm.reconnect_status();
+    const bool recovering = rc.active || rc.failed;
+    const bool active  = rm.is_active() || recovering;
     const bool playing = rm.is_playing();
     const bool paused  = rm.is_paused();
-    const bool loading = rm.is_loading() || rm.state() == ReplayManager::State::Seeking;
+    const bool loading = rm.is_loading() || rm.state() == ReplayManager::State::Seeking || rc.active;
     // Ended = the replay ran to replay_finished (Stopped). Distinct from "not
     // started" because emit_state never fires before a window exists; drives
     // the chrome's "Watch again" state (pack /demo: the native transport hides
     // on Stopped and v1 relied on a page reload).
-    const bool ended   = rm.state() == ReplayManager::State::Stopped;
-    const bool errored = rm.state() == ReplayManager::State::Error;
+    const bool ended   = rm.is_completed();
+    const bool errored = rc.failed || (!rc.active && rm.state() == ReplayManager::State::Error);
     const float speed  = rm.info().speed;
     const auto gap     = rm.depth_gap();
 
@@ -209,6 +212,10 @@ void EventRuntime::emit_state(const AppContext& ctx) {
     hasher.mix(static_cast<uint64_t>(gap.to_ms));
     hasher.mix(static_cast<uint64_t>(rm.pack_checkpoint_ms()));
     hasher.mix(static_cast<uint64_t>(static_cast<int>(speed * 100.0f)));
+    hasher.mix(static_cast<uint64_t>(rc.active ? 1 : 0) + (rc.failed ? 2 : 0) + 300u);
+    hasher.mix(static_cast<uint64_t>(rc.attempt) + 400u);
+    hasher.mix(static_cast<uint64_t>(rc.resumes) + 500u);
+    hasher.mix(static_cast<uint64_t>(rc.resume_at_ms));
 
     if (!transport::should_emit(hasher.value(), emit_sig_, active, playing, paused, loading,
                                 emscripten_get_now(), last_clock_emit_ms_)) {
@@ -217,7 +224,9 @@ void EventRuntime::emit_state(const AppContext& ctx) {
 
     // Inactive clock: a FINISHED replay reports the window end (a completed bar
     // at 0% looks broken), anything else (pre-start) reports the start.
-    int64_t now_ms = active ? rm.interpolated_time_ms() : (ended ? end_ms : start_ms);
+    int64_t now_ms = !active ? (ended ? end_ms : start_ms)
+                   : recovering ? rc.resume_at_ms
+                   : rm.interpolated_time_ms();
     now_ms = std::clamp<int64_t>(now_ms, start_ms, end_ms);
     now_ms = transport::apply_clock_floor(now_ms, clock_floor_ms_, active, playing, paused, loading);
 
@@ -243,6 +252,10 @@ void EventRuntime::emit_state(const AppContext& ctx) {
     st["ended"]   = ended;
     st["errored"] = errored;
     st["error"]   = errored ? rm.info().error_message : std::string();
+    // Additive: dropped-socket recovery (ReplayManager::reconnect_status).
+    st["reconnect"] = {{"active", rc.active}, {"failed", rc.failed},
+                       {"attempt", rc.attempt}, {"maxAttempts", rc.max_attempts},
+                       {"resumeAtMs", rc.resume_at_ms}, {"resumes", rc.resumes}};
     st["checkpointMs"] = rm.pack_checkpoint_ms();
     st["speed"]   = speed;
     // Recorded-depth interruption the replay is playing through (or just did).

@@ -95,7 +95,14 @@ public:
     // this same segment cache and inherits its fixed log map rather than
     // computing its own.
     [[nodiscard]] const std::vector<LiqFieldSeg>& segments() const { return segs_; }
+    // Fuel still standing at each bucket at the live/replay edge, exact and pre-merge: (bucket price,
+    // decayed fuel). The touch-odds zone chips sum this over the registered 0.5% window; merged
+    // segments are a drawing optimisation and average their run, so they cannot stand in for it.
+    struct Standing { double price; double fuel; };
+    [[nodiscard]] const std::vector<Standing>& standing() const { return standing_; }
     [[nodiscard]] double bucket_width_log() const { return bw_; }
+    // Bumped whenever the cache is rebuilt: consumers keyed on segments() compare against it.
+    [[nodiscard]] uint32_t generation() const { return rebuild_gen_; }
     [[nodiscard]] float  norm_lo() const { return norm_lo_; }
     [[nodiscard]] float  norm_hi() const { return norm_hi_; }
 
@@ -116,6 +123,7 @@ private:
     // Cache: segments sorted ascending by price_lo so the renderer can binary
     // search the visible Y band.
     std::vector<LiqFieldSeg> segs_;
+    std::vector<Standing> standing_;   // pending buckets, ascending price, rebuilt with segs_
     double bw_       = 0.0;   // bucket width in LOG price, grid = exp(k*bw)
     float  max_mag_  = 0.0f;  // global max magnitude, reference only
     float  norm_lo_  = 0.0f;  // LOG-map lower clip = p(lo_pct) of intensities

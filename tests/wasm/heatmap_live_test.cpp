@@ -272,6 +272,50 @@ int main() {
     r.set_bucket_multiplier(1);
     r.sync_gpu_from_timeline();
     assert(r.get_value_at_price_and_time(100.25, epoch + (r.RING_SIZE + 5LL) * 60000) == 17);
+    {
+        // Live display bridging must survive both upload paths without creating
+        // a source observation, weakening gap coverage or affecting replay mode.
+        auto bridge_renderer = std::make_unique<ShaderHeatmapRenderer>();
+        auto& bridge = *bridge_renderer;
+        bridge.configure_realtime(1);
+        bridge.set_realtime_gap_bridge(true);
+        bridge.set_observation_clock_ms(epoch + 10000);
+        bridge.finalize_column(epoch + 17, {{100, 2}}, true);
+        bridge.finalize_column(epoch + 117, {{100, 3}});
+        bridge.sync_gpu_from_timeline();
+        bridge.finalize_column(epoch + 417, {{100, 9}}, true);
+        const auto source_count = bridge.timeline_.size();
+        for (int pass = 0; pass < 2; ++pass) {
+            if (pass) bridge.sync_gpu_from_timeline();
+            assert(bridge.bridges_observation(epoch + 417));
+            assert(metadata[bridge.meta_texture_][11] == 6); // Held visual column.
+            assert(bridge.column_meta_[2].timestamp_ms == epoch + 117);
+            assert(std::abs(bridge.column_flags(epoch + 417) - 7.17f) < 0.001f);
+            assert(bridge.get_value_at_price_and_time(100.25, epoch + 250) == 0);
+            assert(bridge.get_value_at_price_and_time(100.25, epoch + 410) == 0);
+            assert(bridge.get_value_at_price_and_time(100.25, epoch + 417) == 9);
+            assert(bridge.has_missing_columns(epoch + 200, epoch + 300));
+            assert(bridge.timeline_.size() == source_count);
+        }
+        bridge.finalize_column(epoch + 5417, {{100, 10}}, true);
+        assert(bridge.bridges_observation(epoch + 5417));
+        bridge.finalize_column(epoch + 10518, {{100, 11}}, true);
+        assert(!bridge.bridges_observation(epoch + 10518)); // Beyond the as-of clock.
+        bridge.set_observation_clock_ms(epoch + 12000);
+        assert(bridge.bridges_observation(epoch + 10518)); // Slow resync remains visually continuous.
+        bridge.sync_gpu_from_timeline();
+        assert(bridge.has_missing_columns(epoch + 5600, epoch + 10000));
+        assert(bridge.get_value_at_price_and_time(100.25, epoch + 8000) == 0);
+        bridge.set_realtime_gap_bridge(false); // Replay/strict mode.
+        bridge.sync_gpu_from_timeline();
+        assert(!bridge.bridges_observation(epoch + 417));
+        assert(metadata[bridge.meta_texture_][11] == 0);
+        assert(bridge.column_flags(epoch + 417) >= 5 && bridge.column_flags(epoch + 417) < 6);
+        assert(bridge.timeline_.size() == source_count + 2);
+        bridge.set_realtime_gap_bridge(true);
+        bridge.clear();
+        assert(!bridge.bridges_observation(epoch + 417));
+    }
     r.clear();
     r.configure_realtime(1);
     r.set_observation_clock_ms(epoch + 1000);
@@ -339,6 +383,28 @@ int main() {
     r.sync_gpu_from_timeline();
     for (const auto& column : r.column_meta_)
         if (column.num_rows) assert(column.timestamp_ms <= epoch + 130017);
+    // A history query completing between depth events must not blink the live
+    // projection. Arrivals during that query can predate its wall-clock cutoff.
+    {
+        std::deque<RealtimeDepthHistory::SamplePtr> snapshot, recent;
+        for (int64_t offset : {17, 517, 1017}) {
+            auto sample = std::make_shared<RealtimeDepthHistory::Sample>();
+            sample->timestamp_ms = epoch + offset; sample->serial = recent.size() + 1;
+            sample->levels.push_back({100, double(offset)});
+            recent.push_back(sample);
+        }
+        snapshot.push_back(recent.front());
+        append_realtime_depth_tail(snapshot, recent, epoch + 1400, epoch + 1600, 500);
+        r.clear(); r.configure_realtime(1, 500);
+        r.set_observation_clock_ms(epoch + 1600);
+        for (const auto& sample : snapshot)
+            r.finalize_column(sample->timestamp_ms, {{100, float(sample->levels.front().size)}});
+        r.set_observation_hold(epoch + 1600, recent.back()->timestamp_ms);
+        r.sync_gpu_from_timeline();
+        assert(r.realtime_draw_until(epoch + 2000, true) == epoch + 2000);
+        assert(r.get_value_at_price_and_time(100.25, epoch + 1017) == 1017);
+        assert(r.get_value_at_price_and_time(100.25, epoch + 2000) == 0);
+    }
     // Small-tick RT with distant resting orders must retain the active book
     // through initial batch upload, direct arrival and retention-origin rebuild.
     r.clear();

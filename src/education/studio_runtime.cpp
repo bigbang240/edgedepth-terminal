@@ -556,11 +556,16 @@ void StudioRuntime::emit_state(const AppContext& ctx) {
 #ifdef __EMSCRIPTEN__
     if (!has_source_) return;   // nothing to report until a source is applied
     const ReplayManager& rm = ctx.replay_mgr();
-    const bool active  = rm.is_active();
+    // A replay recovering from a dropped socket stays on screen as loading, not
+    // unavailable: the bar explains the reconnect instead of the hard error.
+    const ReplayManager::ReconnectStatus& rc = rm.reconnect_status();
+    const bool recovering = rc.active || rc.failed;
+    const bool active  = rm.is_active() || recovering;
     const bool playing = rm.is_playing();
     const bool paused  = rm.is_paused();
-    const bool unavailable = !rm.info().error_message.empty();
-    const bool loading = rm.is_loading() || rm.state() == ReplayManager::State::Seeking;
+    const bool ended = rm.is_completed();
+    const bool unavailable = rc.failed || (!rc.active && !rm.info().error_message.empty());
+    const bool loading = rm.is_loading() || rm.state() == ReplayManager::State::Seeking || rc.active;
     const float speed  = rm.info().speed;
 
     // Export session state riding the studio emit (P3-v1): phase + card flag are
@@ -579,11 +584,16 @@ void StudioRuntime::emit_state(const AppContext& ctx) {
     hasher.mix(active  ? 1u : 0u);
     hasher.mix(playing ? 1u : 0u);
     hasher.mix(paused  ? 1u : 0u);
+    hasher.mix(ended ? 1u : 0u);
     hasher.mix(unavailable ? 1u : 0u);
     hasher.mix(loading ? 1u : 0u);
     hasher.mix(static_cast<uint64_t>(static_cast<int>(speed * 100.0f)));
     hasher.mix(static_cast<uint64_t>(export_phase_) + 100u);
     hasher.mix(card_up ? 1u : 0u);
+    hasher.mix(static_cast<uint64_t>(rc.active ? 1 : 0) + (rc.failed ? 2 : 0) + 300u);
+    hasher.mix(static_cast<uint64_t>(rc.attempt) + 400u);
+    hasher.mix(static_cast<uint64_t>(rc.resumes) + 500u);
+    hasher.mix(static_cast<uint64_t>(rc.resume_at_ms));
     // Compare read: the strip's discrete facts (who moved first, the lag) are
     // part of the signature so a change reaches React even while paused.
     const bool compare_on = rm.lead_lag_active();
@@ -606,7 +616,9 @@ void StudioRuntime::emit_state(const AppContext& ctx) {
         return;  // nothing discrete changed & no clock tick due
     }
 
-    int64_t now_ms = active ? rm.interpolated_time_ms() : src_start_ms_;
+    int64_t now_ms = !active ? src_start_ms_
+                   : recovering ? rc.resume_at_ms
+                   : rm.interpolated_time_ms();
     now_ms = transport::apply_clock_floor(now_ms, clock_floor_ms_, active, playing, paused, loading);
 
     json st;
@@ -619,8 +631,13 @@ void StudioRuntime::emit_state(const AppContext& ctx) {
     st["active"]  = active;
     st["playing"] = playing;
     st["paused"]  = paused;
+    st["ended"]   = ended;
     // Additive v2 field: older hosts ignore it; newer hosts also accept old clients.
     st["replayUnavailable"] = unavailable;
+    // Additive: dropped-socket recovery (ReplayManager::reconnect_status).
+    st["reconnect"] = {{"active", rc.active}, {"failed", rc.failed},
+                       {"attempt", rc.attempt}, {"maxAttempts", rc.max_attempts},
+                       {"resumeAtMs", rc.resume_at_ms}, {"resumes", rc.resumes}};
     st["loading"] = loading;
     st["speed"]   = speed;
     {

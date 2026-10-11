@@ -57,6 +57,7 @@ private:
     struct RowText {
         char price[24];
         char qty[24];
+        char usd[16];   // compact quote value (12.3K), for the USD units
         char time[12];
     };
     std::array<RowText, MAX_TRADES> row_text_{};
@@ -73,14 +74,19 @@ private:
     double qty_ema_ = 0.0;
     // UI state
     bool auto_scroll_ = true;
-    bool show_stats_ = true;
+    bool show_stats_ = true;        // the buy/sell pressure bar in the toolbar
+    bool display_usd_ = false;      // size in quote value instead of coin
+    bool highlight_large_ = true;   // tint prints over 8x the rolling size
+    // Over the buffered prints, recomputed each update: the largest quote value (size bars) and the buy share.
+    double max_notional_ = 0.0;
+    double buy_notional_ = 0.0, sell_notional_ = 0.0;
     size_t last_rendered_count_ = 0;
     bool scroll_to_bottom_ = false;
     // Helper methods
     void calculate_statistics();
     void render_header();
     void render_table();
-    void render_trade_row(const Terminal::Trade& trade, const RowText& txt);
+    void render_trade_row(const Terminal::Trade& trade, const RowText& txt, size_t slot);
     void format_trade_time(size_t slot);
     const char* format_timestamp(int64_t unix_ms) const;
 };

@@ -44,6 +44,7 @@ enum class WidgetType {
     Chart,
     DOM,
     Stats,
+    Data,
     Heatmap,
     DebugLog,
     PaperTrading,
@@ -89,7 +90,7 @@ public:
     }
 
     bool is_visible() const {
-        return is_open && was_visible_last_frame_;
+        return is_open && !hidden_by_chart && !suspended_for_replay && was_visible_last_frame_;
     }
 
     bool should_update(int frame_counter) const {
@@ -106,6 +107,13 @@ public:
         }
     }
 
+    // Default DOM/tape companions follow the primary chart of their market.
+    // Explicitly opened/pinned panels opt out. Temporary hiding never closes
+    // the widget or changes its ImGui identity, subscriptions or settings.
+    bool mode_companion = false;
+    bool follows_route = false; // Market link is independent of the visibility override.
+    bool hidden_by_chart = false;
+    bool suspended_for_replay = false;
     bool is_open = true;
     bool is_replay_widget = false;  // Created during replay - auto-closed on exit
     // Set by whoever adds the widget from a menu: open as a centred floating
@@ -155,7 +163,7 @@ protected:
         open_centered = false;
         const ImGuiViewport* vp = ImGui::GetMainViewport();
         const ImVec2 ws = vp->WorkSize;
-        const bool chart = type() == WidgetType::Chart;
+        const bool chart = type() == WidgetType::Chart || type() == WidgetType::Data;
         const ImVec2 size(
             std::min(chart ? std::clamp(ws.x * 0.62f, 560.0f, 1280.0f) : std::clamp(ws.x * 0.26f, 340.0f, 460.0f),
                      ws.x - 40.0f),

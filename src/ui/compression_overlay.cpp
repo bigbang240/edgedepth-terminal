@@ -44,11 +44,12 @@ void open(const Terminal::Pair& pair, const char* tf) {
 void menu(const Terminal::Pair& pair, bool replay) {
     if (pair.exchange != "binancef") return;
     if (Theme::begin_menu_group("Compression")) {
-        if (replay) Theme::menu_note("Open a saved setup from its investigation to inspect it in the replay sidebar.");
+        if (replay) Theme::menu_note("Open setups from their investigation.");
         else {
             if (Theme::menu_toggle("Inspect 1h compression", false, false)) open(pair, "1h");
+            if (ImGui::IsItemHovered()) Theme::tooltip("Experimental watchlist, admin access.");
             if (Theme::menu_toggle("Inspect 4h compression", false, false)) open(pair, "4h");
-            Theme::menu_note("Experimental watchlist: admin access. Recognition and alert eligibility are separate.");
+            if (ImGui::IsItemHovered()) Theme::tooltip("Experimental watchlist, admin access.");
         }
         Theme::end_menu_group();
     }

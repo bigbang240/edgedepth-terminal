@@ -37,7 +37,12 @@ public:
     //           wording. Absent from the props when the call site has none, so
     //           rows emitted before this existed stay distinguishable from rows
     //           whose gate genuinely has no layer.
-    void open(Trigger t, const char* detail = nullptr, const char* layer = nullptr);
+    //   cause - who opened it: "click" (the viewer asked for the locked thing) or
+    //           "auto" (a ?realtime=1 link, a restored workspace, a context swap
+    //           re-arming it). Rides every event of this opening; absent = the
+    //           call site does not know, which is every gate but real-time today.
+    void open(Trigger t, const char* detail = nullptr, const char* layer = nullptr,
+              const char* cause = nullptr);
     // Login variant (AUTH_REQUIRED / GRANT_REQUIRED) - CTA goes to /login.
     void open_login(const char* detail = nullptr);
 
@@ -50,6 +55,10 @@ public:
     // open()/open_login() CLEAR any armed redirect, so the live-terminal gates
     // (speed/symbol/layer/range pills, launcher) can never inherit a stale one.
     void set_dismiss_redirect(const char* symbol);
+    // The market this gate is about, as the viewer reads it ("OGN", "Bybit BTC").
+    // Names the main button ("Unlock OGN · $20/mo, billed yearly"). Call AFTER
+    // open(), which clears it, like set_dismiss_redirect.
+    void set_subject(const char* subject);
 
     // Show a slim, non-blocking notice toast (neutral - e.g. an authenticated user
     // hit a token/session error, which is NOT a login or an upsell situation).
@@ -69,11 +78,16 @@ private:
     void render_preview(float width);  // the recorded clip for this gate, if any
     void render_toast();
     void stop_preview();
-    void dismiss();  // shared "Maybe later"/Escape path (runs the redirect, if armed)
+    // Shared "Maybe later"/X/Escape path (runs the redirect, if armed). `how`
+    // names the control for the upsell_dismiss event; nullptr records none (the
+    // BTC preview button, which has its own event).
+    void dismiss(const char* how);
+    double opened_at_ = 0.0;           // ImGui::GetTime() when this opening appeared
 
     Trigger     trigger_ = Trigger::Generic;
     std::string detail_;               // PROSE subline (human)
     std::string layer_;                // stable analytics slug (empty = absent)
+    std::string subject_;              // market named on the main button (empty = generic)
     std::string dismiss_redirect_;   // full path ("/terminal/<sym>"); empty = just close
     bool        login_variant_ = false;
     // Recorded clip shown beside the copy (public/media/terminal/<name>.webm

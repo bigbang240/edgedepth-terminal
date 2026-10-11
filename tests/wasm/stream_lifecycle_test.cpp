@@ -1,5 +1,6 @@
 // Compile with the production StreamManager and Emscripten headers. Only the
 // WebSocket boundary is replaced, so this exercises the real lifecycle paths.
+#include <emscripten.h>
 #include <span>
 #include <cstdio>
 #include <cstdlib>
@@ -23,6 +24,32 @@ static void check(bool value, const char* message) {
     if (!value) { std::fprintf(stderr, "%s\n", message); std::exit(1); }
 }
 int main() {
+    EM_ASM({ globalThis.window = globalThis.window || {}; });
+    for (auto stream : {Terminal::Stream::LiquidationLevels, Terminal::Stream::PatternAdmin, Terminal::Stream::IcebergState}) {
+        sent.clear();
+        StreamManager sm(1);
+        int owner = 0;
+        const StreamKey key{{"hl", "BTC"}, stream, 0};
+        EM_ASM({ window.__EDGEDEPTH_REPLAY_TOKEN__ = 'first-token'; });
+        sm.subscribe_direct(key, &owner);
+        check(sent.size() == 1 && sent.back()["data"]["entitlement_token"] == "first-token",
+              "protected stream carries the account token");
+        EM_ASM({ window.__EDGEDEPTH_REPLAY_TOKEN__ = 'refreshed-token'; });
+        sm.update_websocket_handle(2);
+        check(sent.size() == 2 && sent.back()["data"]["entitlement_token"] == "refreshed-token",
+              "reconnect reads the refreshed token");
+        sm.pause_live_subscriptions();
+        check(!sent.back()["data"].contains("entitlement_token"), "unsubscribe needs no token");
+        EM_ASM({ window.__EDGEDEPTH_REPLAY_TOKEN__ = 'resume-token'; });
+        sm.resume_live_subscriptions();
+        check(sent.size() == 4 && sent.back()["data"]["entitlement_token"] == "resume-token",
+              "return from replay reads the current token");
+        sm.unsubscribe_direct(key, &owner);
+        sm.set_replay_mode(true);
+        sm.subscribe_direct(key, &owner);
+        check(sent.size() == 5, "replay cannot subscribe to a protected live stream");
+    }
+    EM_ASM({ delete window.__EDGEDEPTH_REPLAY_TOKEN__; });
     {
         StreamManager live(1), replay(0);
         replay.set_replay_mode(true);
@@ -115,6 +142,21 @@ int main() {
         check(flow.total_delta() == 1, "backlog overflow cannot mutate paused totals");
         flow.advance_to(22000);
         check(flow.total_trades() == 1 && flow.reset_after_gap(), "overflow restarts and explicitly marks incomplete cumulative coverage");
+    }
+
+    {
+        sent.clear(); StreamManager sm(1); int chart = 0, stats = 0;
+        const StreamKey key{{"bybit", "movrusdt"}, Terminal::Stream::Volumes, 60000};
+        sm.subscribe_volume(key, {&chart, [](void*, const Terminal::Volume&) {}});
+        sm.subscribe_volume(key, {&stats, [](void*, const Terminal::Volume&) {}});
+        check(sent.size() == 1 && sent.back()["data"]["timeframe"] == 60000, "one real volume subscription for chart and Stats");
+        sm.unsubscribe_volume(key, &chart);
+        check(sent.size() == 1, "chart teardown retains Stats flow");
+        sm.update_websocket_handle(2); check(sent.size() == 2, "reconnect restores volume");
+        sm.pause_live_subscriptions(); check(sent.size() == 3 && sent.back()["method"] == "unsubscribe", "replay pauses volume");
+        sm.resume_live_subscriptions(); check(sent.size() == 4 && sent.back()["method"] == "subscribe", "live resume restores volume");
+        sm.unsubscribe_volume(key, &stats); check(sent.size() == 5 && sent.back()["method"] == "unsubscribe", "last flow owner unsubscribes");
+        sm.update_websocket_handle(3); check(sent.size() == 5, "closed volume stays closed");
     }
 
     for (auto stream : {Terminal::Stream::TickVolume, Terminal::Stream::Heatmap}) {

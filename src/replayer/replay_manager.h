@@ -72,6 +72,7 @@ public:
         float progress = 0.0f;          // 0.0 to 1.0
         int64_t timeframe_ms = 300000;  // Current candle TF in ms (default 5m)
         State state = State::Idle;
+        bool completed = false;        // End reached; keep the recorded context until close
 
         // Buffer health (from backend status updates)
         int buffer_size = 0;
@@ -243,6 +244,29 @@ public:
     // frame paused until the user reopens replay; never silently resume live.
     void on_transport_interrupted(const WebSocketClient* socket);
     bool transport_interrupted() const { return transport_interrupted_; }
+
+    // ─── Transport-loss recovery ─────────────────────────────────────────
+    // A dropped replay socket ends its session on the box. Instead of a dead
+    // "Reopen replay", the manager recreates the same window at the playhead
+    // once that socket is back (tick_reconnect, per frame), up to
+    // RECONNECT_MAX_ATTEMPTS times. Hosts read reconnect_status() to tell the
+    // viewer what is happening. Lessons are excluded: they own step state that
+    // a fresh session would reset.
+    struct ReconnectStatus {
+        bool    active = false;     // waiting for the socket or rejoining
+        bool    failed = false;     // gave up; a reload resumes at resume_at_ms
+        int     attempt = 0;        // attempts issued (0 = still waiting for the socket)
+        int     max_attempts = 0;
+        int64_t resume_at_ms = 0;   // market time playback resumes at
+        int     resumes = 0;        // recoveries this page; hosts toast on increment
+    };
+    const ReconnectStatus& reconnect_status() const { return reconnect_; }
+    void tick_reconnect();
+
+    // document.visibilitychange. Hidden pauses a playing replay so the box stops
+    // streaming to a tab nobody can see (a backgrounded tab that stops reading
+    // starves its own pongs and the box drops the socket); visible resumes it.
+    void on_visibility_change(bool hidden);
     void pause();
     void resume();
     void toggle_pause();        // Space bar
@@ -286,7 +310,8 @@ public:
         gap.from_ms = depth_gap_from_ms_; gap.at_ms = depth_gap_at_ms_; gap.to_ms = depth_gap_to_ms_;
         return gap;
     }
-    bool is_paused() const { return info_.state == State::Paused || info_.state == State::Error; }
+    bool is_completed() const { return info_.state == State::Stopped && info_.completed; }
+    bool is_paused() const { return info_.state == State::Paused || info_.state == State::Error || is_completed(); }
     bool is_idle() const { return info_.state == State::Idle; }
     // Current playback speed multiplier (for the chart status chip).
     float current_speed() const { return SPEED_PRESETS[current_speed_preset_idx_]; }
@@ -597,6 +622,35 @@ private:
     // buffer is created.
     bool transport_interrupted_ = false;
     bool pack_mode_ = false;
+
+    // Transport-loss recovery (see reconnect_status).
+    struct ReconnectPlan {
+        bool is_archive = false;
+        std::string event_id;
+        std::vector<std::string> symbols;
+        int64_t start_ms = 0;
+        int64_t end_ms = 0;
+        float speed = 1.0f;
+        int64_t timeframe_seconds = 300;
+        bool resume_playing = true;   // false when the viewer had paused
+        bool in_flight = false;       // a recreate request is out
+        bool joined = false;          // that request's session reached the box (Buffering)
+        bool seek_pending = false;    // archive: seek to resume_at_ms once live
+        int64_t lost_at_ms = 0;       // wall ms of the drop
+        int64_t attempt_at_ms = 0;    // wall ms the current attempt went out
+        int64_t next_try_at_ms = 0;   // wall ms the next attempt may go out
+    };
+    static constexpr int     RECONNECT_MAX_ATTEMPTS = 3;
+    static constexpr int64_t RECONNECT_ATTEMPT_TIMEOUT_MS = 30000;
+    ReconnectPlan   reconnect_plan_;
+    ReconnectStatus reconnect_;
+    bool reconnect_issuing_ = false;  // our own re-request, not a viewer's new replay
+    bool paused_for_hidden_ = false;  // on_visibility_change paused this replay
+    bool arm_reconnect();
+    void begin_reconnect_attempt();
+    void finish_reconnect(bool resumed);
+    void cancel_reconnect();
+    void emit_reconnect_usage(const char* phase);
     std::unique_ptr<PackReplayEngine> pack_engine_;
 
     // ─── Usage instrumentation state (design §3) ─────────────────────────

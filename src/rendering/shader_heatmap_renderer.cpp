@@ -355,11 +355,11 @@ void ShaderHeatmapRenderer::finalize_column(
         const int col = static_cast<int>((timestamp_ms - oldest_ts) / time_step_ms_);
         if (timestamp_ms >= oldest_ts && col >= 0 && col < RING_SIZE &&
             (replay_cutoff_ms_ == 0 || timestamp_ms <= replay_cutoff_ms_)) {
-            if (realtime_ && !segment_start) {
+            if (realtime_ && (!segment_start || bridges_observation(timestamp_ms))) {
                 auto previous = timeline_.lower_bound(timestamp_ms);
                 if (previous != timeline_.begin()) {
                     --previous;
-                    fill_observation_hold(find_column_for_time(previous->first), col);
+                    fill_observation_hold(find_column_for_time(previous->first), col, segment_start);
                 }
             }
             if (column_meta_[col].finalized && column_meta_[col].timestamp_ms > timestamp_ms) return;
@@ -516,6 +516,8 @@ void ShaderHeatmapRenderer::upload_column(
         max_value,
         flags  // 0=empty, 1=valid, 2=live
     };
+    // CPU coverage/quantity reads must see the same flags as direct GPU uploads.
+    std::copy_n(meta, 4, meta_staging_.begin() + ring_col * 4);
     glBindTexture(GL_TEXTURE_2D, meta_texture_);
     glTexSubImage2D(GL_TEXTURE_2D, 0,
                     ring_col, 0,
@@ -671,7 +673,8 @@ void ShaderHeatmapRenderer::sync_gpu_from_timeline() {
                 (mid_price - half_win) / native_bucket_size_) * native_bucket_size_;
         }
 
-        if (realtime_ && !observation_boundaries_.contains(ts)) fill_observation_hold(highest_col, col);
+        const bool boundary = observation_boundaries_.contains(ts);
+        if (realtime_ && (!boundary || bridges_observation(ts))) fill_observation_hold(highest_col, col, boundary);
         // Build float column
         const int num_rows = build_column(price_qty_map, col_price_min,
                                           gpu_bucket_size_, apply_spread);
@@ -808,19 +811,29 @@ void ShaderHeatmapRenderer::evict_oldest_timeline() {
     }
 }
 
-void ShaderHeatmapRenderer::fill_observation_hold(int previous, int next) {
+bool ShaderHeatmapRenderer::bridges_observation(int64_t timestamp_ms) const {
+    if (!realtime_ || !realtime_gap_bridge_ || !observation_boundaries_.contains(timestamp_ms) ||
+        (replay_cutoff_ms_ > 0 && timestamp_ms > replay_cutoff_ms_)) return false;
+    const auto after = timeline_.find(timestamp_ms);
+    if (after == timeline_.end() || after == timeline_.begin()) return false;
+    const auto before = std::prev(after);
+    return timestamp_ms > before->first;
+}
+
+void ShaderHeatmapRenderer::fill_observation_hold(int previous, int next, bool display_bridge) {
     if (!realtime_ || previous < 0 || next <= previous + 1 || next >= RING_SIZE) return;
     const auto& source = column_meta_[previous];
     if (source.num_rows <= 0 || source.values.empty()) return;
+    const float flags = display_bridge ? 6.0f : 4.0f;
     std::copy(source.values.begin(), source.values.end(), column_build_buf_.begin());
     for (int col = previous + 1; col < next; ++col) {
-        upload_column(col, source.num_rows, source.price_min, source.price_step, source.max_value, 4.0f);
+        upload_column(col, source.num_rows, source.price_min, source.price_step, source.max_value, flags);
         column_meta_[col] = source; // Retain the original observation clock.
         const size_t offset = size_t(col) * 4;
         meta_staging_[offset] = float(source.price_min - gpu_price_origin_);
         meta_staging_[offset + 1] = float(source.num_rows);
         meta_staging_[offset + 2] = source.max_value;
-        meta_staging_[offset + 3] = 4.0f; // Held state between proven contiguous events.
+        meta_staging_[offset + 3] = flags; // 6 is presentation-only recovery; 4 is a synchronized hold.
     }
 }
 
@@ -909,7 +922,7 @@ float ShaderHeatmapRenderer::realtime_normalization(double price_min, double pri
     const int stride = std::max(1, (ring_count_ + 63) / 64);
     for (int col = ring_count_ - 1; col >= 0; col -= stride) {
         const auto& meta = column_meta_[col];
-        if (meta.timestamp_ms > replay_cutoff_ms_ || meta.num_rows <= 0 || meta.values.empty() ||
+        if (meta_staging_[col * 4 + 3] == 6.0f || meta.timestamp_ms > replay_cutoff_ms_ || meta.num_rows <= 0 || meta.values.empty() ||
             (!timeline_.empty() && meta.timestamp_ms < timeline_.begin()->first)) continue;
         // Held GPU columns retain their source timestamp. Looking up the native
         // observation avoids making the initial calibration depend on row grouping.
@@ -955,6 +968,37 @@ double ShaderHeatmapRenderer::realtime_draw_until(double viewport_end, bool exte
         column_meta_[ring_count_ - 1].timestamp_ms <= replay_cutoff_ms_)
         return std::max(double(replay_cutoff_ms_), std::min(viewport_end, limit));
     return double(replay_cutoff_ms_);
+}
+
+/** Display continuity only; the chart labels the age of this confirmed book. */
+void ShaderHeatmapRenderer::render_recovery_preview(
+    const std::unordered_map<double, float>& prices, double mid_price,
+    float sensitivity, int64_t from_ms, double until_ms) {
+    if (!realtime_ || !(gpu_bucket_size_ > 0) || prices.empty()) return;
+    const auto limits = ImPlot::GetPlotLimits();
+    const double from = std::max(limits.X.Min, double(from_ms));
+    const double until = std::min(limits.X.Max, until_ms);
+    if (until <= from) return;
+    const float reference = realtime_peak_ > 0 ? realtime_peak_ * bucket_multiplier_ : global_max_qty_;
+    if (!(reference > 0)) return;
+    const double pmin = column_price_min(mid_price, gpu_bucket_size_);
+    const int rows = build_column(prices, pmin, gpu_bucket_size_, false);
+    auto* draw = ImPlot::GetPlotDrawList();
+    ImPlot::PushPlotClipRect();
+    for (int row = 0; row < rows; ++row) {
+        const double low = pmin + row * gpu_bucket_size_, high = low + gpu_bucket_size_;
+        if (high <= limits.Y.Min || low >= limits.Y.Max) continue;
+        const float relative = std::max(column_build_buf_[row] * sensitivity / reference, 0.0f);
+        const float shoulder = relative / std::sqrt(0.25f + relative * relative);
+        const float t = shoulder * shoulder;
+        if (t < 0.004f) continue;
+        uint8_t r, g, b;
+        HeatmapColormap::apply(realtime_warm_ ? HeatmapColormap::Type::RealtimeWarm :
+            HeatmapColormap::Type::RealtimeOrderbook, t, r, g, b);
+        draw->AddRectFilled(ImPlot::PlotToPixels(from, high), ImPlot::PlotToPixels(until, low),
+            IM_COL32(r, g, b, int(255 * opacity_)));
+    }
+    ImPlot::PopPlotClipRect();
 }
 
 void ShaderHeatmapRenderer::render_cells(
@@ -1328,17 +1372,19 @@ bool ShaderHeatmapRenderer::has_missing_columns(int64_t start_ms, int64_t end_ms
         static_cast<double>(end_ms - gpu_origin_ms_) / time_step_ms_ + 0.5));
     if (first < 0 || last >= ring_count_) return true;
     for (int64_t col = first; col <= last; ++col)
-        if (column_meta_[col].num_rows == 0) return true;
+        if (column_meta_[col].num_rows == 0 || meta_staging_[col * 4 + 3] == 6.0f) return true;
     return false;
 }
 
 float ShaderHeatmapRenderer::get_value_at_price_and_time(
     double price, int64_t time_ms) const
 {
-    // Query the exact column/rows uploaded to the GPU; never borrow a neighbour.
+    // Display bridges have no measured quantity, even though the GPU paints a held book.
     const int col = find_column_for_time(time_ms);
     if (col < 0) return 0;
     const auto& meta = column_meta_[col];
+    const float flags = meta_staging_[col * 4 + 3];
+    if (flags == 6.0f || (flags >= 7.0f && time_ms < meta.timestamp_ms)) return 0;
     if (replay_cutoff_ms_ > 0 && meta.timestamp_ms > replay_cutoff_ms_) return 0;
     const double step = static_cast<float>(meta.price_step);
     if (step <= 0) return 0;

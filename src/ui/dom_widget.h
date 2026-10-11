@@ -3,12 +3,16 @@
 // dom_widget.h - Order ladder (DOM), edgedepth design-system rework
 //
 // 6-column grid: buys · bids · PRICE · asks · sells · Δ
-//   - bid/ask depth cells colored on the OCEAN ramp (small=deep blue →
-//     large=green/yellow), bar anchored to the price-side edge
-//   - buys/sells = locally-accumulated traded volume (TradeAtPriceAccumulator),
-//     faint UP/DOWN; Δ = buys − sells, direction-colored
-//   - current-price row: ELEV fill, inset hairlines, solid BRAND price chip
-//   - USD/COIN display toggle, reset-mode pills, density-aware row_h()
+//   - bid/ask depth: a bar from the price side that always holds its whole number
+//     and runs on in proportion to size, on the OCEAN ramp (small = faint blue,
+//     large = green) (design v3, 2026-10-11)
+//   - price: the digits that differ from the current price bright, the rest dim;
+//     best bid / best ask in the side colour
+//   - buys/sells = locally-accumulated traded volume (TradeAtPriceAccumulator);
+//     Δ = buys − sells, direction-colored
+//   - current-price row: ELEV fill, inset hairlines, BRAND price chip
+//   - toolbar: Coin/USD switch, grouping and flow-window dropdowns, spread,
+//     centre and settings icons; density-aware row_h()
 // ═══════════════════════════════════════════════════════════════════════════════
 #include "widget.h"
 #include "types/types.h"
@@ -94,6 +98,8 @@ private:
         bool   has_size = false;
         bool   has_buy = false, has_sell = false, has_delta = false;
         bool   delta_pos = true;
+        bool   is_best = false;            // the band holding the best bid (bid row) or best ask (ask row)
+        uint8_t bright_from = 0;           // price_txt from here on differs from the current price: drawn bright
         char   price_txt[24] = {};
         char   size_txt[16]  = {};
         char   buy_txt[16]   = {};
@@ -133,7 +139,7 @@ private:
     void fmt_signed(double v, double price, char* buf, size_t n) const;
 
     // Rendering
-    void render_controls();
+    void render_controls(const Terminal::Orderbook& ob);
     void render_ladder(const Terminal::Orderbook& ob);
     void render_level_row(const RowModel& rm, bool is_ask, ImDrawList* dl, float pad_y);
     void render_current_row(const Terminal::Orderbook& ob, ImDrawList* dl, float pad_y);
