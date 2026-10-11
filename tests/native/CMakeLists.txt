@@ -103,3 +103,7 @@ add_terminal_native_test(compression_geometry_test compression_geometry_test.cpp
 add_terminal_native_test(touch_odds_test touch_odds_test.cpp)
 add_terminal_native_test(touch_zones_test touch_zones_test.cpp)
 target_link_libraries(touch_odds_test PRIVATE nlohmann_json::nlohmann_json)
+
+# Appearance preferences: v2 read, v1 -> v2 migration and bad-value rejection.
+add_terminal_native_test(appearance_preferences_test appearance_preferences_test.cpp)
+target_link_libraries(appearance_preferences_test PRIVATE nlohmann_json::nlohmann_json)

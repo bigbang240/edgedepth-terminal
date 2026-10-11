@@ -9,7 +9,9 @@
 //
 // Semantic colors (UP/DOWN/BRAND/…) are runtime-mutable so the Tweaks panel
 // can switch candle conventions and accents without a rebuild. Surfaces,
-// borders and text ramp are fixed constexpr.
+// borders and text ramp are runtime-mutable too: a chrome preset (set_chrome)
+// swaps them as one ramp. Read tokens at draw time; never copy one into a
+// static or constexpr.
 //
 // Legacy aliases (Theme::Colors::BUY_GREEN etc.) are kept so existing widgets
 // compile unchanged; new/reworked code should use Theme::Tokens:: directly.
@@ -40,31 +42,37 @@ namespace Theme {
 
     // ── Runtime tweak enums (wired to the Tweaks panel in a later phase) ─────
     enum class Accent : uint8_t { Teal, Indigo, Amber, Mono };
-    enum class CandleConvention : uint8_t { TealMag, Classic, Muted, BlueWhite, Custom };
+    // Saved as ints in edgedepth.appearance.v2: append new values, never reorder.
+    enum class CandleConvention : uint8_t { TealMag, Classic, Muted, BlueWhite, Custom, BlueOrange };
+    // Dark chrome presets (surfaces, hairlines, text). Market colors and the
+    // accent stay separate choices. Values live in theme.cpp kChrome.
+    enum class Chrome : uint8_t { EdgeDepth, Graphite, Midnight, HighContrast };
 
     namespace Tokens {
         // ── Surfaces - theme-tokens.json bg ramp (2026-07-02 redesign) ───────
         // bg-0 app background / chart canvas · bg-1 bars + panel chrome ·
         // Near-black planes; controls have no idle tile. Hover and focus
         // reveal the hit area, while a rule and text identify selection.
-        inline constexpr ImVec4 BASE   = from_hex(0x050505);  // bg-0
-        inline constexpr ImVec4 PANEL  = from_hex(0x080808);  // bg-1
-        inline constexpr ImVec4 ELEV   = from_hex(0x0d0d0d);  // bg-2
-        inline constexpr ImVec4 INPUT  = from_hex(0x0b0b0b);  // editable fields
-        inline constexpr ImVec4 HOVER  = from_hex(0x141414);  // bg-2
-        inline constexpr ImVec4 ACTIVE = from_hex(0x1b1b1b);  // bg-2 (accent marks "on")
+        // Surfaces, hairlines and text are runtime-mutable: these initial
+        // values are the EdgeDepth chrome preset (set_chrome).
+        inline ImVec4 BASE   = from_hex(0x050505);  // bg-0
+        inline ImVec4 PANEL  = from_hex(0x080808);  // bg-1
+        inline ImVec4 ELEV   = from_hex(0x0d0d0d);  // bg-2
+        inline ImVec4 INPUT  = from_hex(0x0b0b0b);  // editable fields
+        inline ImVec4 HOVER  = from_hex(0x141414);  // bg-2
+        inline ImVec4 ACTIVE = from_hex(0x1b1b1b);  // bg-2 (accent marks "on")
 
         // ── Hairlines - line-1 borders/dividers, line-2 control borders ──────
-        inline constexpr ImVec4 BD1  = from_hex(0x1c1c1c);          // line-1 - the only separation
-        inline constexpr ImVec4 BD2  = from_hex(0x292929);          // line-2 - control borders
-        inline constexpr ImVec4 BD3  = from_hex(0x737373, 0.55f);   // hover borders (text-3 hue)
-        inline constexpr ImVec4 GRID = from_hex(0x1c1c1c, 0.55f);   // chart gridlines (line-1)
+        inline ImVec4 BD1  = from_hex(0x1c1c1c);          // line-1 - the only separation
+        inline ImVec4 BD2  = from_hex(0x292929);          // line-2 - control borders
+        inline ImVec4 BD3  = from_hex(0x737373, 0.55f);   // hover borders (text-3 hue)
+        inline ImVec4 GRID = from_hex(0x1c1c1c, 0.55f);   // chart gridlines (line-1)
 
         // ── Text ramp - text-1/2/3 (+ dimmed text-3 for axis/disabled) ───────
-        inline constexpr ImVec4 TX1 = from_hex(0xe8e8e8);  // primary numerals, titles
-        inline constexpr ImVec4 TX2 = from_hex(0xb0b0b0);  // labels, secondary data
-        inline constexpr ImVec4 TX3 = from_hex(0x858585);  // captions, units, group labels
-        inline constexpr ImVec4 TX4 = from_hex(0x737373, 0.72f);  // axis ticks, disabled
+        inline ImVec4 TX1 = from_hex(0xe8e8e8);  // primary numerals, titles
+        inline ImVec4 TX2 = from_hex(0xb0b0b0);  // labels, secondary data
+        inline ImVec4 TX3 = from_hex(0x858585);  // captions, units, group labels
+        inline ImVec4 TX4 = from_hex(0x737373, 0.72f);  // axis ticks, disabled
 
         // ── Semantic - runtime-mutable (candle convention / accent tweaks) ──
         inline ImVec4 UP         = from_hex(0x2fd6ad);         // up / bid / positive
@@ -148,10 +156,13 @@ namespace Theme {
     // ── Runtime tweaks ───────────────────────────────────────────────────────
     Accent accent();
     CandleConvention candles();
+    Chrome chrome();
     void load_preferences();
+    void save_preferences();                         // after a change outside the controls below (liq colormap)
     void render_appearance_controls();
     void set_accent(Accent a);                       // mutates BRAND* tokens
     void set_candle_convention(CandleConvention c);  // mutates UP*/DOWN* tokens
+    void set_chrome(Chrome c);                       // mutates surface/hairline/text tokens
 
     // ── Fonts ────────────────────────────────────────────────────────────────
     // Inter = chrome/labels/headings. Roboto Mono = ALL numerics
@@ -237,12 +248,12 @@ namespace Theme {
         inline const ImVec4& BUY_GREEN_DIM   = Tokens::UP_LINE;
         inline const ImVec4& SELL_RED_DIM    = Tokens::DOWN_LINE;
         inline constexpr ImVec4 PRICE_YELLOW = Tokens::WARN;
-        inline constexpr ImVec4 NEUTRAL_GRAY = Tokens::TX3;
-        inline constexpr ImVec4 BACKGROUND_DARK = Tokens::BASE;
-        inline constexpr ImVec4 PANEL_BG     = Tokens::PANEL;
-        inline constexpr ImVec4 BORDER       = Tokens::BD2;
-        inline constexpr ImVec4 TEXT_PRIMARY = Tokens::TX1;
-        inline constexpr ImVec4 TEXT_SECONDARY = Tokens::TX2;
+        inline const ImVec4& NEUTRAL_GRAY    = Tokens::TX3;
+        inline const ImVec4& BACKGROUND_DARK = Tokens::BASE;
+        inline const ImVec4& PANEL_BG        = Tokens::PANEL;
+        inline const ImVec4& BORDER          = Tokens::BD2;
+        inline const ImVec4& TEXT_PRIMARY    = Tokens::TX1;
+        inline const ImVec4& TEXT_SECONDARY  = Tokens::TX2;
     }
 
     namespace FontSizes {  // legacy names, new scale

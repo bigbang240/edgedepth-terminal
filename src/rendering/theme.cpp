@@ -7,6 +7,9 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <iterator>
+#include "core/appearance_preferences.h"
+#include "core/heatmap_colormap.h"
 #include "core/workspace_settings.h"
 #include <implot.h>
 #ifdef __EMSCRIPTEN__
@@ -34,6 +37,7 @@ namespace Theme {
         // tweak state
         Accent           g_accent  = Accent::Mono;
         CandleConvention g_candles = CandleConvention::TealMag;
+        Chrome           g_chrome  = Chrome::EdgeDepth;
         int              g_density = 8;
         uint32_t g_custom_up = 0x2fd6ad, g_custom_down = 0xee5c78;
         bool g_preferences_saved = true;
@@ -50,6 +54,48 @@ namespace Theme {
 
     Accent accent() { return g_accent; }
     CandleConvention candles() { return g_candles; }
+    Chrome chrome() { return g_chrome; }
+
+    namespace {
+        // Dark chrome presets (James 2026-10-11). One row per Chrome value, in enum order:
+        // every surface, hairline and text token as 0xRRGGBB; BD3, GRID (BD1's hue) and TX4 keep alphas.
+        // To add a preset: append a Chrome value, a row here and its label in kChromeNames. Brand (LOGO, PRO tags),
+        // signed market colors, WARN and the heatmap ramps are not chrome and stay fixed.
+        struct ChromeRamp {
+            uint32_t base, panel, elev, input, hover, active;
+            uint32_t bd1, bd2, bd3, tx1, tx2, tx3, tx4;
+            float bd3_a, grid_a, tx4_a;
+        };
+        constexpr ChromeRamp kChrome[] = {
+            // EdgeDepth: the v2 token sheet (default; pixels unchanged).
+            {0x050505, 0x080808, 0x0d0d0d, 0x0b0b0b, 0x141414, 0x1b1b1b,
+             0x1c1c1c, 0x292929, 0x737373, 0xe8e8e8, 0xb0b0b0, 0x858585, 0x737373, 0.55f, 0.55f, 0.72f},
+            // Graphite: lifted neutral greys, softer hairlines.
+            {0x111113, 0x161618, 0x1b1b1e, 0x19191b, 0x232326, 0x2a2a2e,
+             0x252528, 0x313135, 0x7e7e84, 0xe8e8ea, 0xb8b8bc, 0x929297, 0x808085, 0.45f, 0.50f, 0.75f},
+            // Midnight: the marketing site's blue-black (--bg-0 #0b0e13, --line-1/2, green-neutral text).
+            {0x0b0e13, 0x0e1218, 0x11161d, 0x0f131a, 0x161b24, 0x1c2230,
+             0x1e242e, 0x2a3140, 0x66736e, 0xecf0ef, 0xadb9b4, 0x85918c, 0x717d79, 0.60f, 0.55f, 0.75f},
+            // High contrast: black base, brighter text ramp and hairlines (WCAG: TX3 >= 9:1 and TX4 >= 6:1 on resting
+            // surfaces, BD2 >= 3:1 on panels; EdgeDepth gives 4.9:1 and 2.6:1).
+            {0x000000, 0x030303, 0x0b0b0b, 0x0a0a0a, 0x1a1a1a, 0x262626,
+             0x3d3d3d, 0x5f5f5f, 0xa6a6a6, 0xffffff, 0xdedede, 0xbdbdbd, 0xa8a8a8, 0.70f, 0.70f, 0.90f},
+        };
+        constexpr const char* kChromeNames[] = {"EdgeDepth", "Graphite", "Midnight", "High contrast"};
+        static_assert(std::size(kChrome) == std::size(kChromeNames) &&
+                      std::size(kChrome) == size_t(Chrome::HighContrast) + 1, "one row and label per Chrome value");
+    }
+
+    void set_chrome(Chrome c) {
+        const ChromeRamp& r = kChrome[std::min<size_t>(size_t(c), std::size(kChrome) - 1)];
+        g_chrome = Chrome(&r - kChrome);
+        using namespace Tokens;
+        BASE = from_hex(r.base);   PANEL = from_hex(r.panel); ELEV = from_hex(r.elev);
+        INPUT = from_hex(r.input); HOVER = from_hex(r.hover); ACTIVE = from_hex(r.active);
+        BD1 = from_hex(r.bd1); BD2 = from_hex(r.bd2); BD3 = from_hex(r.bd3, r.bd3_a); GRID = from_hex(r.bd1, r.grid_a);
+        TX1 = from_hex(r.tx1); TX2 = from_hex(r.tx2); TX3 = from_hex(r.tx3); TX4 = from_hex(r.tx4, r.tx4_a);
+        apply_dark_theme();  // re-map style colors from the new ramp
+    }
 
     void set_accent(Accent a) {
         g_accent = a;
@@ -76,6 +122,8 @@ namespace Theme {
             case CandleConvention::Custom: up = g_custom_up; down = g_custom_down; break;
             case CandleConvention::Classic: up = 0x26d07a; down = 0xff4d5e; break;
             case CandleConvention::Muted:   up = 0x41a583; down = 0xcf6173; line = 0.45f; break;
+            // Colourblind-safer: blue/orange stays apart for red-green colour vision deficiency.
+            case CandleConvention::BlueOrange: up = 0x56b4e9; down = 0xf28c28; break;
             case CandleConvention::TealMag: // design tokens: up #2fd6ad / down #ee5c78
             default:                        up = 0x2fd6ad; down = 0xee5c78; break;
         }
@@ -89,48 +137,105 @@ namespace Theme {
 
 
     // Appearance is a browser preference, shared by live charts and replay.
-    // Keep it independent of live-only workspace capture.
-    void load_preferences() {
+    // Keep it independent of live-only workspace capture. v2 adds the chrome
+    // preset and the liquidation colormap; a browser with only v1 keeps its
+    // market colors and accent (chrome EdgeDepth) and is written as v2 once.
+    // v1 is left in place for an older build. The parsing is in
+    // core/appearance_preferences.h, with a native test.
+    namespace {
+        workspace::Json read_storage(const char* key) {
 #ifdef __EMSCRIPTEN__
-        char* text = reinterpret_cast<char*>(EM_ASM_PTR({
-            try {
-                const value = localStorage.getItem('edgedepth.appearance.v1');
-                return value && value.length < 4096 ? stringToNewUTF8(value) : 0;
-            } catch (_) { return 0; }
-        }));
-        if (!text) return;
-        const auto j = workspace::Json::parse(text, nullptr, false);
-        free(text);
-        if (!j.is_object()) return;
-        int version = 0;
-        workspace::read(j, "version", version, 1, 1);
-        if (version != 1) return;
-        workspace::read(j, "accent", g_accent, 0, 3);
-        workspace::read(j, "candles", g_candles, 0, 4);
-        workspace::read(j, "up", g_custom_up, 0, 0xffffff);
-        workspace::read(j, "down", g_custom_down, 0, 0xffffff);
-        set_accent(g_accent);
-        set_candle_convention(g_candles);
+            char* text = reinterpret_cast<char*>(EM_ASM_PTR({
+                try {
+                    const value = localStorage.getItem(UTF8ToString($0));
+                    return value && value.length < 4096 ? stringToNewUTF8(value) : 0;
+                } catch (_) { return 0; }
+            }, key));
+            if (!text) return {};
+            auto j = workspace::Json::parse(text, nullptr, false);
+            free(text);
+            return j.is_object() ? j : workspace::Json{};
+#else
+            (void)key;
+            return {};
 #endif
+        }
+
+        appearance::Preferences current_preferences() {
+            appearance::Preferences p;
+            p.chrome = int(g_chrome); p.accent = int(g_accent); p.candles = int(g_candles);
+            p.up = g_custom_up; p.down = g_custom_down; p.liq_map = int(HeatmapColormap::liq_map());
+            return p;
+        }
+    }
+
+    void load_preferences() {
+        appearance::Preferences p = current_preferences();
+        const appearance::Limits limits{int(std::size(kChrome)) - 1, int(Accent::Mono),
+            int(CandleConvention::BlueOrange), int(HeatmapColormap::LiqMap::Inferno)};
+        const auto source = appearance::read(read_storage("edgedepth.appearance.v2"),
+                                             read_storage("edgedepth.appearance.v1"), limits, p);
+        if (source == appearance::Source::None) return;
+        g_custom_up = p.up; g_custom_down = p.down;
+        set_chrome(Chrome(p.chrome));
+        set_accent(Accent(p.accent));
+        set_candle_convention(CandleConvention(p.candles));
+        if (p.liq_map != int(HeatmapColormap::liq_map())) HeatmapColormap::set_liq_map(HeatmapColormap::LiqMap(p.liq_map));
+        if (source == appearance::Source::V1) save_preferences();
+    }
+
+    void save_preferences() {
+#ifdef __EMSCRIPTEN__
+        const auto text = appearance::to_json(current_preferences()).dump();
+        g_preferences_saved = EM_ASM_INT({
+            try { localStorage.setItem('edgedepth.appearance.v2', UTF8ToString($0)); return 1; }
+            catch (_) { return 0; }
+        }, text.c_str());
+#endif
+    }
+
+    namespace {
+        // A full-width combo of labels; returns the picked index.
+        int appearance_combo(const char* id, const char* const* labels, int n, int selected) {
+            ImGui::SetNextItemWidth(-1);
+            int picked = selected;
+            if (ImGui::BeginCombo(id, labels[selected])) {
+                for (int i = 0; i < n; ++i) {
+                    if (ImGui::Selectable(labels[i], i == selected)) picked = i;
+                    if (i == selected) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+            return picked;
+        }
     }
 
     void render_appearance_controls() {
         bool changed = false;
-        int palette = int(candles());
+        ImGui::TextUnformatted("Interface theme");
+        const int c = appearance_combo("##interface_theme", kChromeNames, int(std::size(kChromeNames)), int(chrome()));
+        if (c != int(chrome())) { set_chrome(Chrome(c)); changed = true; }
+        ImGui::Spacing();
+        // Display order keeps Custom last; the enum order is the saved one.
+        static constexpr CandleConvention kPalettes[] = {CandleConvention::TealMag, CandleConvention::Classic,
+            CandleConvention::Muted, CandleConvention::BlueWhite, CandleConvention::BlueOrange, CandleConvention::Custom};
+        static constexpr const char* kPaletteNames[] = {"Teal / rose", "Green / red", "Muted", "Blue / white",
+            "Blue / orange", "Custom"};
+        int shown = 0;
+        while (kPalettes[shown] != candles() && shown + 1 < int(std::size(kPalettes))) ++shown;
         ImGui::TextUnformatted("Market colors");
-        ImGui::SetNextItemWidth(-1);
-        if (ImGui::Combo("##market_palette", &palette,
-            "Teal / rose\0Green / red\0Muted\0Blue / white\0Custom\0")) {
-            set_candle_convention(CandleConvention(palette));
+        const int palette = appearance_combo("##market_palette", kPaletteNames, int(std::size(kPaletteNames)), shown);
+        if (palette != shown) {
+            set_candle_convention(kPalettes[palette]);
             changed = true;
         }
         ImVec4 up = Tokens::UP, down = Tokens::DOWN;
         const bool up_changed = ImGui::ColorEdit3("Up / buy", &up.x, ImGuiColorEditFlags_NoInputs);
         const bool down_changed = ImGui::ColorEdit3("Down / sell", &down.x, ImGuiColorEditFlags_NoInputs);
         if (up_changed || down_changed) {
-            const auto hex = [](ImVec4 c) {
-                return (uint32_t(c.x * 255 + 0.5f) << 16) |
-                       (uint32_t(c.y * 255 + 0.5f) << 8) | uint32_t(c.z * 255 + 0.5f);
+            const auto hex = [](ImVec4 col) {
+                return (uint32_t(col.x * 255 + 0.5f) << 16) |
+                       (uint32_t(col.y * 255 + 0.5f) << 8) | uint32_t(col.z * 255 + 0.5f);
             };
             g_custom_up = hex(up); g_custom_down = hex(down);
             set_candle_convention(CandleConvention::Custom);
@@ -145,19 +250,11 @@ namespace Theme {
             set_accent(Accent(a)); changed = true;
         }
         if (ImGui::Button("Reset appearance")) {
+            set_chrome(Chrome::EdgeDepth);
             set_candle_convention(CandleConvention::TealMag);
             set_accent(Accent::Mono); changed = true;
         }
-        if (changed) {
-#ifdef __EMSCRIPTEN__
-            const auto text = workspace::Json({{"version",1}, {"accent",int(accent())},
-                {"candles",int(candles())}, {"up",g_custom_up}, {"down",g_custom_down}}).dump();
-            g_preferences_saved = EM_ASM_INT({
-                try { localStorage.setItem('edgedepth.appearance.v1', UTF8ToString($0)); return 1; }
-                catch (_) { return 0; }
-            }, text.c_str());
-#endif
-        }
+        if (changed) save_preferences();
         if (!g_preferences_saved)
             ImGui::TextWrapped("Browser storage is unavailable. These colors apply until you reload.");
     }

@@ -4036,7 +4036,7 @@ void ChartWidget::render_controls() {
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive, Theme::Tokens::ACTIVE);
                 ImGui::PushStyleColor(ImGuiCol_Text, on ? Theme::Tokens::BRAND_TX
                                                         : Theme::Tokens::TX2);
-                if (ImGui::Button(label)) HeatmapColormap::set_liq_map(m);
+                if (ImGui::Button(label)) { HeatmapColormap::set_liq_map(m); Theme::save_preferences(); }
                 ImGui::PopStyleColor(4);
             };
             cmap_btn("Ember",   HeatmapColormap::LiqMap::Ember,   false);

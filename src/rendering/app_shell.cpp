@@ -1310,7 +1310,7 @@ namespace {
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, on ? Tokens::BRAND_SOFT : Tokens::HOVER);
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive, Tokens::ACTIVE);
                 ImGui::PushStyleColor(ImGuiCol_Text, on ? Tokens::BRAND : Tokens::TX2);
-                if (ImGui::Button(label)) HeatmapColormap::set_liq_map(m);
+                if (ImGui::Button(label)) { HeatmapColormap::set_liq_map(m); Theme::save_preferences(); }
                 ImGui::PopStyleColor(4);
             };
             lmap_btn("Ember",   HeatmapColormap::LiqMap::Ember);
