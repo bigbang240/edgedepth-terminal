@@ -9,8 +9,8 @@ int main() {
     require(!q.visible(q.asof-1),"No future geometry before decision time");
     require(q.visible(q.asof),"Geometry becomes visible at its decision time");
     require(std::abs(q.resistance(1790072100000.0)*1.005-68.43217882517688)<1e-7,"QNT time-projected minute trigger");
-    const double before=q.resistance(q.asof); (void)q.resistance(q.asof+86400000);
-    require(q.resistance(q.asof)==before,"Projection never mutates frozen anchors");
+    const double before=q.resistance(static_cast<double>(q.asof)); (void)q.resistance(static_cast<double>(q.asof+86400000));
+    require(q.resistance(static_cast<double>(q.asof))==before,"Projection never mutates frozen anchors");
     q.touch=q.asof+1; require(!q.valid(),"Reject an unconfirmed future anchor");
     q.touch=1788926400000; q.slope=NAN; require(!q.valid(),"Reject missing geometry");
 }

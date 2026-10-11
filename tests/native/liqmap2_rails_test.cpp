@@ -20,7 +20,7 @@ static Rail rail(int64_t id, int64_t born, int64_t step, double usd) {
     Rail r;
     r.id = id;
     r.is_long = true;
-    r.price = 100 - id;
+    r.price = 100.0 - static_cast<double>(id);
     r.born_ms = born;
     r.steps.push_back({step, usd, 0.2, usd/5, r.price - 0.1, r.price + 0.1});
     return r;
@@ -204,7 +204,7 @@ int main() {
             g.apply_live(at(h_ms(1)), "cfg", {r}, {});
         }
         double vmax = 0;
-        const auto rs = runs(segments(g.rails(), h_ms(1), 0, h_ms(2), 0, 1, vmax, Colour::dollars));
+        const auto rs = runs(segments(g.rails(), h_ms(1), 0, static_cast<double>(h_ms(2)), 0, 1, vmax, Colour::dollars));
         double total = 0;
         for (const auto& r : rs) total += r.usd;
         CHECK(rs.size() == 2);
