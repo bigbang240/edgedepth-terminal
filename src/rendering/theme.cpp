@@ -118,7 +118,9 @@ namespace Theme {
         g_candles = c;
         uint32_t up, down; float line = 0.50f;
         switch (c) {
-            case CandleConvention::BlueWhite: up = 0x5ba9ff; down = 0xf2f2f2; break;
+            // Calm royal blue / white (the TradingView look; James 2026-10-11): #2962ff lifted from 58% to 65%
+            // lightness, hue and saturation kept, so UP text holds 4.5:1 on every chrome preset's resting surfaces.
+            case CandleConvention::BlueWhite: up = 0x4d7cff; down = 0xf2f2f2; break;
             case CandleConvention::Custom: up = g_custom_up; down = g_custom_down; break;
             case CandleConvention::Classic: up = 0x26d07a; down = 0xff4d5e; break;
             case CandleConvention::Muted:   up = 0x41a583; down = 0xcf6173; line = 0.45f; break;

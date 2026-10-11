@@ -457,26 +457,32 @@ void ChartWidget::render_realtime() {
         const float right = std::min(ImPlot::GetPlotPos().x + ImPlot::GetPlotSize().x,
             ImPlot::PlotToPixels(realtime_projection_until(rt_clock_ms_, rt_span_ms_), book.bid).x);
         const float edge = ImPlot::PlotToPixels(double(rt_clock_ms_), book.bid).x;
-        for (int side = 0; side < 2; ++side) {
+        // A dark halo under the current quotes, as under the quote history above, keeps them readable over any
+        // depth colour (a blue bid over the blue end of the ramp vanished). Halos first, so a tight spread keeps
+        // both colours.
+        const ImU32 halo = Theme::u32(Theme::Tokens::BASE);
+        for (int pass = 0; pass < 2; ++pass) for (int side = 0; side < 2; ++side) {
             const double price = side ? book.ask : book.bid;
             const double current_price = side ? rt_dom_frame_.ask() : rt_dom_frame_.bid();
             // The step sits where this side's price changed, not where the
             // newest ticker arrived, so it holds its place in time.
             const int64_t since = side ? rt_quote_ask_since_ms_ : rt_quote_bid_since_ms_;
             const double quote_ms = double(std::clamp(since > 0 ? since : rt_quote_.timestamp_ms, book.timestamp_ms, rt_clock_ms_));
-            const ImU32 color = Theme::u32(side ? Theme::Tokens::DOWN : Theme::Tokens::UP);
+            const ImU32 color = pass ? Theme::u32(side ? Theme::Tokens::DOWN : Theme::Tokens::UP) : halo;
+            const float width = pass ? 1.25f : 3.25f;
             dl->AddLine(ImPlot::PlotToPixels(double(book.timestamp_ms), price),
-                ImPlot::PlotToPixels(quote_ms, price), color, 1.25f);
+                ImPlot::PlotToPixels(quote_ms, price), color, width);
             dl->AddLine(ImPlot::PlotToPixels(quote_ms, price),
-                ImPlot::PlotToPixels(quote_ms, current_price), color, 1.25f);
+                ImPlot::PlotToPixels(quote_ms, current_price), color, width);
             dl->AddLine(ImPlot::PlotToPixels(quote_ms, current_price),
-                ImPlot::PlotToPixels(double(rt_clock_ms_), current_price), color, 1.25f);
+                ImPlot::PlotToPixels(double(rt_clock_ms_), current_price), color, width);
         }
-        for (int side = 0; side < 2; ++side) {
+        for (int pass = 0; pass < 2; ++pass) for (int side = 0; side < 2; ++side) {
             const double price = side ? rt_dom_frame_.ask() : rt_dom_frame_.bid();
             const float y = ImPlot::PlotToPixels(0, price).y;
-            const ImU32 color = Theme::u32(side ? Theme::Tokens::DOWN : Theme::Tokens::UP);
-            for (float x = edge; x < right; x += 10) dl->AddLine(ImVec2(x, y), ImVec2(std::min(x + 5, right), y), color);
+            const ImU32 color = pass ? Theme::u32(side ? Theme::Tokens::DOWN : Theme::Tokens::UP) : halo;
+            for (float x = edge; x < right; x += 10)
+                dl->AddLine(ImVec2(x, y), ImVec2(std::min(x + 5, right), y), color, pass ? 1.0f : 3.0f);
         }
     }
     const char* note = rt_archive_ && rt_archive_->loading ? "Loading RT history..." : rt_archive_ && !rt_archive_->error.empty() ? "RT archive stopped: open RT settings for storage status" : rt_history_view_ ? (rt_archive_ && rt_archive_->loading ?
