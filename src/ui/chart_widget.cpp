@@ -4446,7 +4446,7 @@ void ChartWidget::handle_plot_interaction() {
                 const ImVec2 b = ImPlot::PlotToPixels(ImPlotPoint(t1, q1));
                 const bool up = dprice >= 0.0;
                 const ImU32 col  = up ? Theme::u32(Theme::Tokens::UP) : Theme::u32(Theme::Tokens::DOWN);
-                const ImU32 fill = up ? IM_COL32(47, 214, 173, 34) : IM_COL32(238, 92, 120, 34);
+                const ImU32 fill = Theme::u32(up ? Theme::Tokens::UP : Theme::Tokens::DOWN, 34.0f / 255.0f);
                 const ImVec2 r0(std::min(a.x, b.x), std::min(a.y, b.y));
                 const ImVec2 r1(std::max(a.x, b.x), std::max(a.y, b.y));
                 pdl->AddRectFilled(r0, r1, fill);
