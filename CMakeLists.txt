@@ -398,6 +398,8 @@ set(PROJECT_SRC
         src/ui/chart_reference_context.cpp
         src/ui/workspace_settings.cpp
         src/ui/chart_widget.cpp
+        src/ui/chart_widget_tpo.cpp
+        src/ui/chart_widget_footprint.cpp
         src/ui/chart_widget_time_axis.cpp
         src/ui/chart_widget_indicators.cpp
         src/ui/chart_widget_liquidations.cpp
