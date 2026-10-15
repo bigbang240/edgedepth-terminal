@@ -132,7 +132,7 @@ void SymbolRegistry::fetch_metadata(std::function<void()> on_ready) {
     }
 
     // 2. Fire background XHR to refresh (works regardless of CORS config).
-    // Base resolution mirrors resolve_ws_url() in main.cpp: ?api=<origin> or
+    // Base resolution mirrors resolve_ws_url() in websocket_endpoints.cpp: ?api=<origin> or
     // window.__EDGEDEPTH_API_URL__ points a dev / self-hosted terminal at a
     // local hub; production stays the default.
     EM_ASM({

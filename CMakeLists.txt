@@ -351,6 +351,8 @@ set(PROJECT_SRC
         src/core/performance_tracker.h
         src/core/websocket.h
         src/core/websocket.cpp
+        src/core/websocket_endpoints.h
+        src/core/websocket_endpoints.cpp
         src/core/orderbook_manager.h
         src/core/orderbook_manager.cpp
         src/core/app_context.h
@@ -558,6 +560,14 @@ target_compile_definitions(c_based_trader_client PRIVATE "ImDrawIdx=unsigned int
 
 # Standalone production depth regression uses the same pinned wire/runtime.
 if(EMSCRIPTEN)
+    add_executable(websocket_endpoints_regression EXCLUDE_FROM_ALL
+        tests/wasm/websocket_endpoints_test.cpp src/core/websocket_endpoints.cpp)
+    target_compile_options(websocket_endpoints_regression PRIVATE -O1)
+    # Match the application's allocator and UTF-8 bridge exports used by EM_ASM.
+    target_link_options(websocket_endpoints_regression PRIVATE -sENVIRONMENT=node
+        -sEXPORTED_FUNCTIONS=_main,_malloc
+        -sEXPORTED_RUNTIME_METHODS=UTF8ToString,lengthBytesUTF8,stringToUTF8)
+    set_target_properties(websocket_endpoints_regression PROPERTIES SUFFIX ".js")
     add_executable(census_overlay_regression EXCLUDE_FROM_ALL
         tests/wasm/census_overlay_test.cpp
         ${IMGUI_DIR}/imgui.cpp ${IMGUI_DIR}/imgui_draw.cpp

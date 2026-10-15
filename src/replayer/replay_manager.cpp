@@ -106,7 +106,7 @@ static std::string current_replay_token() {
 // The HTTP origin that serves POST /replay/session and /replay/session/archive.
 //
 // Derived from the same window global that picks the replay WEBSOCKET origin
-// (main.cpp resolve_replay_ws_url), because session creation and the socket
+// (core/websocket_endpoints.cpp resolve_replay_ws_url), because session creation and the socket
 // that joins the session MUST land on the same process: the session row is
 // written to that box's replay_sessions and join_replay looks it up locally.
 // Creating on hub and joining on server 2 would produce a session id the
