@@ -69,6 +69,13 @@ jobs:
       - name: Real-time depth sequence and retention regression
         run: bash tests/wasm/run_realtime_depth.sh "$PWD/build"
 
+      - name: Session usage lifecycle regression
+        run: |
+          cmake --build build --target session_usage_regression --parallel 4
+          for mode in terminal lesson studio event demo studio-empty event-empty demo-empty terminal-empty; do
+            node build/session_usage_regression.js "$mode"
+          done
+
       - name: Volume continuity and VPIN clock regression
         run: |
           cmake --build build --target indicator_continuity_regression --parallel 4

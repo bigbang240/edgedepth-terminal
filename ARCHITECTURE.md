@@ -78,6 +78,7 @@ Each loop iteration performs browser and SDL event handling, starts a new ImGui 
 The JavaScript boundary is deliberately narrow:
 
 - [`src/core/websocket.cpp`](src/core/websocket.cpp) wraps the Emscripten WebSocket API.
+- [`src/core/session_usage.cpp`](src/core/session_usage.cpp) owns session startup events, heartbeats and visible-time accounting. The main loop passes initialization status and route identity; `usage_emit.h` remains the browser event bridge.
 - [`src/core/websocket_endpoints.cpp`](src/core/websocket_endpoints.cpp) selects live and replay WebSocket URLs from browser overrides, retaining the hosted-domain guard and defaults. Connection lifetime and lane routing stay in `main.cpp`.
 - `EM_ASM` and exported `EMSCRIPTEN_KEEPALIVE` functions in [`src/main.cpp`](src/main.cpp) and [`src/education/`](src/education/) exchange viewport, transport, and optional embedding state with JavaScript.
 - [`src/shell.html`](src/shell.html) owns the canvas and Emscripten `Module` bootstrap.
