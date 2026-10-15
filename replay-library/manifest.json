@@ -72,9 +72,9 @@
       "window_start": "2026-06-05T06:45:00Z",
       "window_end": "2026-06-05T07:15:00Z",
       "duration_seconds": 1800,
-      "size_bytes": 55702606,
-      "sha256": "3917933938c6629e09efa634ae244738417751a21dcd63f16f8aedf2b6a4cc28",
-      "pack_url": "https://replays.edgedepth.com/replays/zec_cascade_demo/v1.edpack",
+      "size_bytes": 59880115,
+      "sha256": "6524d2f6254f3558f505c065dd067c1c0252b07032df918e3225bfd804d389d8",
+      "pack_url": "https://replays.edgedepth.com/replays/zec_cascade_demo/v2.edpack",
       "tags": ["liquidation-cascade", "order-flow", "selloff"],
       "featured": true
     }
