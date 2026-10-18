@@ -31,6 +31,17 @@ bool ChartWidget::rt_mode_gated() const {
         !Entitlements::btc_preview_market(pair_.exchange, pair_.symbol);
 }
 
+void ChartWidget::set_rt_candle_seconds(const int seconds) {
+    // The supported grid. Anything else is ignored so a stale workspace or a
+    // scripted call cannot put the live view on an unbounded bucket.
+    switch (seconds) {
+        case 1: case 5: case 15: case 30: case 60: case 300:
+            rt_candle_seconds_ = seconds;
+            break;
+        default: break;
+    }
+}
+
 bool ChartWidget::rt_mode_locked() const {
     return rt_mode_gated() && !rt_preview::Store::instance().available();
 }
@@ -131,9 +142,12 @@ void ChartWidget::set_rt_mode(bool on) {
     // Keep recording across candle/RT switches. Chart closure or a context
     // change owns archive disposal and depth unsubscription.
     if (on) {
-        chart_type_ = ChartType::Line;
-        rt_candles_ = false;
+        chart_type_ = ChartType::Candles;
+        rt_candles_ = true;
+        rt_candle_seconds_ = 1;
         rt_auto_price_ = true;
+        rt_price_free_ = false;
+        rt_axis_scale_axis_ = -1;
         rt_auto_fit_ = {};
         rt_price_window_ = {};
         rt_effective_multiplier_ = rt_bucket_multiplier_;
@@ -515,25 +529,29 @@ void ChartWidget::render_realtime() {
         }
     }
     if (rt_candles_ && !(rt_history_view_ && rt_archive_->view_trades_grouped)) {
-        // One-second OHLC from retained trade records only. Empty seconds stay
-        // absent; a paused frame uses its frozen records and the same as-of clock.
+        // OHLC from retained trade records only, aggregated into the selected
+        // real-time bucket (1s by default; the toolbar offers 5s..5m). Empty
+        // buckets stay absent; a paused frame uses its frozen records and the
+        // same as-of clock.
+        const int64_t bucket_ms = int64_t(std::max(1, rt_candle_seconds_)) * 1000;
+        const double mid = 0.5 * double(bucket_ms), body = 0.35 * double(bucket_ms);
         Terminal::Candle candle{};
         bool have = false;
         auto flush = [&]() {
             if (!have) return;
-            const ImVec2 hi = ImPlot::PlotToPixels(double(candle.timestamp_ms) + 500, candle.high);
-            const ImVec2 lo = ImPlot::PlotToPixels(double(candle.timestamp_ms) + 500, candle.low);
-            const ImVec2 open = ImPlot::PlotToPixels(double(candle.timestamp_ms) + 150, candle.open);
-            const ImVec2 close = ImPlot::PlotToPixels(double(candle.timestamp_ms) + 850, candle.close);
+            const ImVec2 hi = ImPlot::PlotToPixels(double(candle.timestamp_ms) + mid, candle.high);
+            const ImVec2 lo = ImPlot::PlotToPixels(double(candle.timestamp_ms) + mid, candle.low);
+            const ImVec2 open = ImPlot::PlotToPixels(double(candle.timestamp_ms) + mid - body, candle.open);
+            const ImVec2 close = ImPlot::PlotToPixels(double(candle.timestamp_ms) + mid + body, candle.close);
             const ImU32 color = Theme::u32(candle.close >= candle.open ? Theme::Tokens::UP : Theme::Tokens::DOWN);
             dl->AddLine(hi, lo, color);
             dl->AddRectFilled(ImVec2(open.x, std::min(open.y, close.y)),
                 ImVec2(close.x, std::max(open.y + 1, close.y)), color);
         };
         for (const auto& trade : trades) {
-            if (trade.timestamp_ms < limits.X.Min - 1000) continue;
+            if (trade.timestamp_ms < limits.X.Min - double(bucket_ms)) continue;
             if (trade.timestamp_ms > rt_clock_ms_ || trade.timestamp_ms > limits.X.Max) break;
-            const int64_t bucket = trade.timestamp_ms / 1000 * 1000;
+            const int64_t bucket = trade.timestamp_ms / bucket_ms * bucket_ms;
             if (!have || bucket != candle.timestamp_ms) {
                 flush(); candle = {}; candle.timestamp_ms = bucket;
                 candle.open = candle.high = candle.low = candle.close = trade.price; have = true;

@@ -753,6 +753,17 @@ set(COMMON_LINK_FLAGS
         -sPTHREAD_POOL_SIZE=2
 )
 
+# SharedArrayBuffer (pthreads) requires cross-origin isolation headers on the
+# serving origin. Self-hosters serving plain static files (python http.server,
+# Caddy without COOP/COEP) get a permanently black canvas with -pthread, so
+# offer a single-threaded link: -DEDGEDEPTH_PTHREADS=OFF.
+option(EDGEDEPTH_PTHREADS "Link with pthreads (requires COOP/COEP headers)" ON)
+if(NOT EDGEDEPTH_PTHREADS)
+    list(REMOVE_ITEM COMMON_LINK_FLAGS -pthread)
+    list(REMOVE_ITEM COMMON_LINK_FLAGS -sPTHREAD_POOL_SIZE=2)
+    message(STATUS "EDGEDEPTH_PTHREADS=OFF: single-threaded link (no cross-origin isolation required)")
+endif()
+
 # Debug-specific flags
 set(DEBUG_COMPILE_FLAGS
         ${COMMON_COMPILE_FLAGS}

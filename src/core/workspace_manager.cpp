@@ -230,7 +230,7 @@ void apply(const Json& saved) {
 }
 Json preset(int index) {
     Json settings = {{"chart_type",index == 0 ? 1 : 0},{"timeframe",60},
-        {"rt_mode",index == 1},{"liq_dense_field",index == 3},{"liq_profile_enabled",false},
+        {"rt_mode",index == 1},{"rt_candles",index == 1},{"liq_dense_field",index == 3},{"liq_profile_enabled",false},
         {"heatmap_enabled",index == 1},{"indicators",Json::array()}};
     if (index != 1) {
         settings["indicators"].push_back({{"name","Vol (USDT)"}});
@@ -284,12 +284,12 @@ void tick(std::vector<std::unique_ptr<Widget>>& widgets, const AppContext& ctx,
                 load_named(stored);
                 if (stored.contains("current") && valid_document(stored["current"])) {
                     pending = stored["current"];
-                    if (!stored.contains("layout_revision") || stored["layout_revision"] != 2) {
-                        bool rt = false;
-                        for (const auto& row : pending["widgets"])
-                            if (row["type"] == "chart")
-                                rt = row["settings"].value("rt_mode", Json(false)) == true;
-                        pending = preset(rt ? 1 : 3);
+                    if (!stored.contains("layout_revision") || stored["layout_revision"] != 3) {
+                        // Migrate to the current defaults: the Liquidity preset
+                        // (real-time mode, live candles over the heatmap) is
+                        // the product's core view. One-time per revision; the
+                        // user's own changes persist after this.
+                        pending = preset(1);
                         notice = "Default layout repaired. Your named workspaces are still available.";
                     }
                 }
@@ -306,10 +306,12 @@ void tick(std::vector<std::unique_ptr<Widget>>& widgets, const AppContext& ctx,
             }
             std::free(tab);
         }
-        // A first session, or one whose saved layout could not be used, starts
-        // from the same preset Reset Layout produces, so the Candles default
-        // (volume and CVD subplots) applies without a saved workspace.
-        if (pending.is_null()) reset_default();
+        // A first session starts in the Liquidity preset (real-time mode,
+        // live 1s candles over the order-flow heatmap): that is the product's
+        // core view, and on a REST-banned network the plain 1m chart would
+        // sit on "Loading candles" forever. Sessions with an unusable saved
+        // layout fall back through Reset Layout's preset instead.
+        if (pending.is_null()) pending = preset(1);
         EM_ASM({
             window.addEventListener('pagehide', () => _workspace_flush());
             document.addEventListener('visibilitychange', () => { if (document.hidden) _workspace_flush(); });
@@ -322,7 +324,7 @@ void tick(std::vector<std::unique_ptr<Widget>>& widgets, const AppContext& ctx,
     was_enabled = true;
     if (!pending.is_null()) {
         apply(pending); pending = Json{}; last_capture = -1;
-        library["layout_revision"] = 2;
+        library["layout_revision"] = 3;
         // DockBuilder and new windows need a completed frame before capture.
         capture_after_frame = ImGui::GetFrameCount() + 1;
         return;
@@ -343,7 +345,7 @@ void tick(std::vector<std::unique_ptr<Widget>>& widgets, const AppContext& ctx,
         }
     }
     if (ImGui::GetFrameCount() <= capture_after_frame) return;
-    library["layout_revision"] = 2;
+    library["layout_revision"] = 3;
     if (save_requested || export_requested || ImGui::GetTime() - last_capture >= 1.0) {
         auto next = capture(); last_capture = ImGui::GetTime();
         if (next.is_null() || next.dump().size() > max_bytes) {
