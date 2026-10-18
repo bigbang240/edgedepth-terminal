@@ -13,7 +13,14 @@ class OrderbookManager;
 // thread; depth is copied through the orderbook owner's locked read API.
 class RealtimeArchive : public std::enable_shared_from_this<RealtimeArchive> {
 public:
-    static constexpr int64_t target_ms = 1800000;
+    // ── [SELF-HOST P1] Retention horizon of the browser-local RT archive ──
+    // Default stays the shipped 30 minutes; window.__EDGEDEPTH_RT_ARCHIVE_MS__
+    // (read once at boot in main.cpp) raises it up to 12h. The IndexedDB
+    // worker budget scales with it (see src/realtime_archive.js) and the
+    // chart zoom constraints follow automatically (/0.88 headroom users).
+    static constexpr int64_t kDefaultTargetMs = 1800000;
+    static int64_t target_ms;
+    static void set_target_ms(int64_t ms);
     static std::shared_ptr<RealtimeArchive> acquire(CandleManager&, OrderbookManager&, const Terminal::Pair&);
     ~RealtimeArchive();
     // Pack delivery gate, checked between small groups of frames. During a seek

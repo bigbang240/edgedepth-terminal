@@ -8,6 +8,15 @@
 #include <nlohmann/json.hpp>
 EM_JS_DEPS(realtime_archive_deps, "$stringToUTF8,$UTF8ToString");
 
+// ── [SELF-HOST P1] runtime retention horizon ──────────────────────────
+// Default = the shipped 30 minutes. main.cpp lifts it once at boot from
+// window.__EDGEDEPTH_RT_ARCHIVE_MS__ (clamped to [30min, 12h]); the worker's
+// byte budget and the chart zoom ceilings follow the same value.
+int64_t RealtimeArchive::target_ms = RealtimeArchive::kDefaultTargetMs;
+void RealtimeArchive::set_target_ms(const int64_t ms) {
+    target_ms = std::clamp(ms, kDefaultTargetMs, int64_t(12) * 3600 * 1000);
+}
+
 EM_JS(void, archive_unique_id, (char* out), { stringToUTF8(crypto.randomUUID(),out,64); });
 EM_JS(void, archive_create, (const char* id), { Module['rtArchive'].create(UTF8ToString(id)); });
 EM_JS(void, archive_cancel, (const char* id), { Module['rtArchive'].cancel(UTF8ToString(id)); });

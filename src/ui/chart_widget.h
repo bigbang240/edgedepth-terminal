@@ -507,6 +507,16 @@ private:
     // (its rows*step clamp would fight the stretch every frame). Cleared when
     // price following re-engages.
     bool rt_price_free_ = false;
+
+    // ── [SELF-HOST P1] Peak-hold ──────────────────────────────────────────
+    // Decayed per-price-bucket depth maxima keyed by the absolute bucket
+    // index (price / tick_size), independent of the GPU ring's drifting
+    // per-column windows. A pulled wall keeps a ghost bar for the horizon.
+    std::unordered_map<int64_t, std::pair<float, int64_t>> rt_peak_levels_;
+    bool rt_peak_hold_ = false;
+    int  rt_peak_horizon_min_ = 10;   // 5 / 10 / 30
+    int64_t rt_peak_pruned_at_ms_ = 0;
+
     double rt_usage_emit_s_ = -1;
     int64_t rt_clock_ms_ = 0;
     uint64_t rt_serial_ = 0, rt_generation_ = 0;

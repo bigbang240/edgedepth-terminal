@@ -174,6 +174,8 @@ Json ChartWidget::save_settings() const {
     j["candle_liq_collapsed"] = candle_liq_collapsed_;
     j["rt_walls"] = rt_walls_enabled_; j["rt_pulls"] = rt_pulls_enabled_; j["rt_cvd"] = rt_cvd_enabled_;
     j["rt_auto_contrast"] = rt_auto_contrast_;
+    j["rt_peak_hold"] = rt_peak_hold_;            // [SELF-HOST P1]
+    j["rt_peak_horizon_min"] = rt_peak_horizon_min_; // [SELF-HOST P1]
     j["liq_census_enabled"] = liq_census_enabled_;
     j["hl_groups"] = hl_groups_;
     j["hl_profile"] = hl_profile_;
@@ -293,6 +295,9 @@ void ChartWidget::load_settings(const Json& j) {
     workspace::read(j, "rt_min_notional", rt_min_notional_, 0, 1000000000000.0);
     workspace::read(j, "rt_span_ms", rt_span_ms_, 1000, 1800000);
     workspace::read(j, "rt_bucket_multiplier", rt_bucket_multiplier_, 1, 20);
+    // [SELF-HOST P1] peak-hold (absent in older saves: keeps the defaults)
+    workspace::read(j, "rt_peak_hold", rt_peak_hold_);
+    workspace::read(j, "rt_peak_horizon_min", rt_peak_horizon_min_, 1, 60);
     workspace::read(j, "heatmap_enabled", heatmap_enabled_);
     workspace::read(j, "heatmap_adapt_to_zoom", heatmap_adapt_to_zoom_);
     workspace::read(j, "heatmap_bucket_multiplier", heatmap_bucket_multiplier_, 1, 100);
