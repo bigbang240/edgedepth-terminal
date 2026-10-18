@@ -1627,6 +1627,16 @@ void apply_hosted_replay_transition() {
 }
 }  // namespace
 
+// ── [SELF-HOST P1] snapshot request hook ──────────────────────────────
+// JS calls the KEEPALIVE export directly (Module.ed_request_snapshot()) -
+// a plain C++ flag, no property polling or eval involved. Consumed at the
+// end of the frame once the back buffer holds a fully drawn frame.
+static bool g_ed_snapshot_pending = false;
+extern "C" {
+EMSCRIPTEN_KEEPALIVE
+void ed_request_snapshot() { g_ed_snapshot_pending = true; }
+}
+
 void main_loop() {
     apply_hosted_replay_transition();
     if (g_app.ws_client) g_app.ws_client->tick();
@@ -2047,7 +2057,7 @@ void main_loop() {
     // here (before swap), converted to a PNG in JS, and parked on
     // window.__ed_lastShot for the awaiting promise. Reads the back buffer
     // right after ImGui render, so no preserveDrawingBuffer is needed.
-    if (EM_ASM_INT({ return Module._edSnapPending ? 1 : 0; })) {
+    if (g_ed_snapshot_pending) {
         GLint vp[4];
         glGetIntegerv(GL_VIEWPORT, vp);
         const GLsizei sw = vp[2], sh = vp[3];
@@ -2075,11 +2085,9 @@ void main_loop() {
                 c.getContext('2d').putImageData(new ImageData(flipped, w, h), 0, 0);
                 const shot = ({ png: c.toDataURL('image/png'), ts: Date.now() });
                 window.__ed_lastShot = shot;
-                Module._edSnapPending = false;
             }, sw, sh, shot.data());
-        } else {
-            emscripten_run_script("Module._edSnapPending=false");
         }
+        g_ed_snapshot_pending = false;
     }
     g_profiler.begin("SwapWindow");
     SDL_GL_SwapWindow(g_app.window);
