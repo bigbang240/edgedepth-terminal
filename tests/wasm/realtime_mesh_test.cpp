@@ -19,7 +19,11 @@ int main() {
     assert(RealtimeBubble::radius(100, 100) == 3);
     assert(RealtimeBubble::radius(400, 100) == 6);
     assert(RealtimeBubble::radius(1600, 100) == 12);
-    assert(RealtimeBubble::radius(160000, 100) == 12);
+    // Past 16x the minimum each doubling adds 3 px up to the Max size cap (Standard 24 by default).
+    assert(RealtimeBubble::radius(3200, 100) == 15);
+    assert(RealtimeBubble::radius(160000, 100) == 24);
+    assert(RealtimeBubble::radius(160000, 100, bubble_size::kCompact) == 12);
+    assert(RealtimeBubble::radius(1e9, 100, bubble_size::kLarge) == 32);
     assert(CandleBubbleDisplay::radius(0,100)==0);
     assert(CandleBubbleDisplay::radius(100,100)<CandleBubbleDisplay::radius(1000,100));
     assert(CandleBubbleDisplay::radius(100000,100)==18);

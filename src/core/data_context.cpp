@@ -36,7 +36,8 @@ DataContext DataContext::create_replay_context(
     const std::string& exchange,
     int ws_handle,
     int64_t start_time_ms,
-    int64_t default_timeframe_sec)
+    int64_t default_timeframe_sec,
+    bool primary_history_preloaded)
 {
     DataContext ctx;
     ctx.source = DataSource::Replay;
@@ -93,10 +94,15 @@ DataContext DataContext::create_replay_context(
         ctx.candles->set_replay_time(start_time_ms);
         // Request historical candles UP TO the replay start time.
         // This gives the chart visual context - the candles BEFORE the replay point.
-        // Uses the live WS handle to send the request to the server.
-        ctx.streams->request_candles_before(
-            primary_pair, default_timeframe_sec, start_time_ms,
-            CandleManager::INITIAL_PRELOAD_CANDLES);
+        // Uses the live WS handle to send the request to the server. A box that
+        // created this session from join_replay already sent this page right
+        // behind replay_joined (replay_create.h), so asking again would only
+        // put a second copy on the socket.
+        if (!primary_history_preloaded) {
+            ctx.streams->request_candles_before(
+                primary_pair, default_timeframe_sec, start_time_ms,
+                CandleManager::REPLAY_START_PRELOAD_CANDLES);
+        }
         // Compare markets: the same construction per extra symbol, so each
         // builds its own candles from the merged tape and carries its own
         // pre-roll history. The replayer already plays every session symbol
@@ -109,7 +115,7 @@ DataContext DataContext::create_replay_context(
             cm->set_replay_time(start_time_ms);
             ctx.streams->request_candles_before(
                 pair, default_timeframe_sec, start_time_ms,
-                CandleManager::INITIAL_PRELOAD_CANDLES);
+                CandleManager::REPLAY_START_PRELOAD_CANDLES);
             ctx.owned_compare_candles.push_back(std::move(cm));
         }
         // Scrub-preview store (ghost candles): fetch the FULL replay window in

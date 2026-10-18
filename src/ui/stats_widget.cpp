@@ -78,7 +78,6 @@ StatsWidget::StatsWidget(const Terminal::Pair& pair, const AppContext& ctx, cons
             static_cast<StatsWidget*>(ptr)->volume_snapshot_.apply(volume, static_cast<int64_t>(Entitlements::wall_now_ms()));
         }
     });
-    if (Entitlements::is_pro()) subscribed_streams_->subscribe_direct({pair_, Terminal::Stream::IcebergState, 0}, this);
     for (auto stream : {Terminal::Stream::PositioningState, Terminal::Stream::VPINState})
         subscribed_streams_->subscribe_direct({pair_, stream, 0}, this);
 }
@@ -92,7 +91,6 @@ StatsWidget::~StatsWidget() {
     subscribed_streams_->unsubscribe_stats(stream_key_, this);
     subscribed_streams_->unsubscribe_stats(hour_stream_key_, this);
     subscribed_streams_->unsubscribe_volume(volume_stream_key_, this);
-    subscribed_streams_->unsubscribe_direct({pair_, Terminal::Stream::IcebergState, 0}, this);
     for (auto stream : {Terminal::Stream::PositioningState, Terminal::Stream::VPINState})
         subscribed_streams_->unsubscribe_direct({pair_, stream, 0}, this);
 }
@@ -564,12 +562,6 @@ void StatsWidget::render_status_strip(bool live) {
             ImGui::TextWrapped("Check the last bucket's age");
             ImGui::TreePop();
         }
-        if (ImGui::TreeNode("Iceberg candidates")) {
-            ImGui::TextWrapped("Repeated taker-side trade clusters");
-            ImGui::TextWrapped("Heuristic, not confirmed hidden orders");
-            ImGui::TextWrapped("Bias: observed buy/sell notional");
-            ImGui::TreePop();
-        }
         if (ImGui::TreeNode("Research")) {
             ImGui::TextWrapped("Each published source has its own clock");
             ImGui::TextWrapped("A risk tier is not a probability");
@@ -968,7 +960,6 @@ void StatsWidget::render_order_flow(bool overview) {
             if (ImGui::IsItemHovered()) Theme::tooltip("Share of observed taker USD notional in the current UTC minute.");
         } else note(pressure);
     }
-    render_icebergs();
 
     // VPIN - latest finalized volume-bucket print from the SeriesCache (already
     // parsed for the chart). Value + regime chip + fill gauge (amber). PRO.
@@ -1176,51 +1167,4 @@ void StatsWidget::render_liq_risk(bool overview) {
     }
     note(source_note);
     ImGui::Dummy(ImVec2(0, 8));
-}
-
-void StatsWidget::render_icebergs() {
-    const auto now = static_cast<int64_t>(Entitlements::wall_now_ms());
-    const auto* ice = ctx_.analytics ? ctx_.analytics_mgr().get_iceberg(Terminal::pair_key(pair_.exchange, pair_.symbol)) : nullptr;
-    const bool fresh = ice && ice->fresh(now), paid = Entitlements::is_pro();
-    const bool volume = fresh && ice->buy_usd + ice->sell_usd > 0;
-    char counts[48] = "--", bias[32] = "--";
-    if (fresh) snprintf(counts, sizeof(counts), "%d buy / %d sell", ice->buy_clusters, ice->sell_clusters);
-    if (volume) snprintf(bias, sizeof(bias), "%+.0f%%", ice->bias() * 100);
-    char help[380] = "Repeated taker-side trade clusters, not confirmed hidden limit orders. No feed is not zero detections. Counts cover the last five minutes.";
-    if (ice) snprintf(help, sizeof(help), "Repeated taker-side clusters with at least %d bulks of $%.0f and heuristic confidence >= %.2f. Counts are unique qualifying clusters with complete bulks in the last 5m. Bias is (buy - sell) / total observed cluster notional. This does not identify passive hidden orders or accumulation.", ice->min_refreshes, ice->min_bulk_usd, ice->min_confidence);
-    const ImVec2 org = ImGui::GetCursorScreenPos();
-    const float width = ImGui::GetContentRegionAvail().x;
-    auto* dl = ImGui::GetWindowDrawList();
-    dl->AddRectFilled(ImVec2(org.x + 20, org.y + 6), ImVec2(org.x + width - 20, org.y + 73), col(Tokens::ELEV));
-    ImGui::PushFont(Fonts::ui());
-    dl->AddText(ImVec2(org.x + 32, org.y + 16), col(Tokens::TX2), "Iceberg candidates");
-    const char* window = "5m heuristic";
-    dl->AddText(ImVec2(org.x + width - 32 - ImGui::CalcTextSize(window).x, org.y + 16), col(Tokens::TX3), window);
-    ImGui::PopFont();
-    ImGui::PushFont(Fonts::mono());
-    dl->AddText(ImVec2(org.x + 32, org.y + 43), col(Tokens::TX1), paid ? counts : "Locked");
-    ImGui::PopFont();
-    char bias_label[48]; snprintf(bias_label, sizeof(bias_label), "Bias %s", paid ? bias : "--");
-    ImGui::PushFont(Fonts::ui());
-    dl->AddText(ImVec2(org.x + width - 32 - ImGui::CalcTextSize(bias_label).x, org.y + 43),
-        col(paid && volume ? (ice->bias() >= 0 ? Tokens::UP : Tokens::DOWN) : Tokens::TX3), bias_label);
-    ImGui::PopFont();
-    ImGui::Dummy(ImVec2(width, 84));
-    if (ImGui::IsItemHovered()) Theme::tooltip("%s", paid ? help : "Pro access required.");
-    if (paid && (!fresh || ice->warming() || ice->history_limited))
-        note(!fresh ? (ice ? "Detector or trade source stale" : "Detector feed unavailable") :
-             ice->history_limited ? "Partial detector history" : "Detector warming up");
-    if (paid) {
-        char detail[96] = "No fresh detector data";
-        if (fresh) {
-            char age[16]; StatFreshness::age_label(now - ice->timestamp_ms, age, sizeof(age));
-            snprintf(detail, sizeof(detail), "Last 5m / updated %s ago%s%s", age,
-                ice->warming() ? " / warming" : "", ice->history_limited ? " / partial" : "");
-        }
-        char buy[24] = "--", sell[24] = "--";
-        if (fresh) { fmt_usd(ice->buy_usd, buy, sizeof(buy)); fmt_usd(ice->sell_usd, sell, sizeof(sell)); }
-        char amounts[64]; snprintf(amounts, sizeof(amounts), "Buy %s / sell %s", buy, sell);
-        metric_row(Row{.label = "Observed", .value = amounts, .detail = detail,
-            .help = "Observed taker notional of the candidate clusters, not estimated hidden inventory."});
-    }
 }

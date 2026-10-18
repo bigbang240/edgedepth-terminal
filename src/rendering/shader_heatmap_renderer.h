@@ -13,6 +13,7 @@
 #include "imgui.h"
 #include "implot.h"
 #include "pb/messages.pb.h"
+#include "core/rt_contrast.h"
 
 /**
  * ShaderHeatmapRenderer - GPU ring buffer + custom fragment shader.
@@ -117,6 +118,10 @@ public:
     void set_realtime_warm(bool warm) { realtime_warm_ = warm; }
     bool realtime_warm() const { return realtime_warm_; }
     void recalibrate_realtime_colors() { realtime_peak_ = 0; }
+    // Automatic contrast (RT only): ease the colour scale toward the visible book.
+    // Off keeps the original set-once scale. Recalibration snaps in both modes.
+    void set_realtime_auto_contrast(bool on) { realtime_auto_contrast_ = on; }
+    bool realtime_auto_contrast() const { return realtime_auto_contrast_; }
     int get_bucket_multiplier() const { return bucket_multiplier_; }
 
     void set_time_offset_ms(int64_t offset) { time_offset_ms_ = offset; }
@@ -194,15 +199,7 @@ public:
         bool clipped = false;
     };
     CandleCoverage candle_coverage(int64_t time_ms) const;
-    static int64_t candle_depth_seconds(int64_t candle_seconds, double visible_ms = 0) {
-        // Minute detail when it fits; bounded, explicit sampling for broad views.
-        // Never request depth coarser than the candles themselves.
-        for (int64_t step : {60LL, 300LL, 900LL, 3600LL, 14400LL, 86400LL}) {
-            if (step >= candle_seconds) return candle_seconds;
-            if (visible_ms <= double(step) * 1000 * 1800) return step;
-        }
-        return candle_seconds;
-    }
+
 
     float get_data_mean() const { return zscore_mean_; }
     float get_data_stddev() const { return zscore_stddev_; }
@@ -280,8 +277,11 @@ private:
     std::vector<float> reach_build_buf_;   // MAX_ROWS - reach_prob per row (Phase 2a)
 
     // Staging buffer for batch meta upload (avoids thousands of glTexSubImage2D calls)
-    // Data is uploaded per-column directly from column_build_buf_ (cache-friendly).
+    // Rebuilds of orderbook depth upload bounded tiles; live updates stay per-column.
     std::vector<float> meta_staging_;   // RING_SIZE * 4 - entire meta texture
+    bool batch_depth_upload_ = false;
+    std::vector<float> depth_upload_tile_; // At most 64 * MAX_ROWS, reused across rebuilds.
+    void upload_depth_tiles(int columns);
 
     // Forward-fill carry state for extend_levels (liq heatmap)
     std::vector<float> prev_column_carry_;  // MAX_ROWS
@@ -323,8 +323,12 @@ private:
     std::map<int64_t, int> observation_source_ticks_; // Archive bins may already combine native ticks.
     bool realtime_ = false;
     bool realtime_warm_ = true;
-    float realtime_normalization(double price_min, double price_max);
-    float realtime_peak_ = 0; // Locked native-tick density reference, independent of grouping.
+    float realtime_normalization(double price_min, double price_max, double time_min, double time_max);
+    float realtime_reference(double price_min, double price_max, double time_min, double time_max, bool visible_only);
+    float realtime_peak_ = 0; // Native-tick density reference, independent of grouping.
+    bool realtime_auto_contrast_ = true;
+    RealtimeContrast realtime_contrast_;
+    std::vector<float> realtime_values_; // measurement scratch, reused
     int64_t realtime_peak_clock_ms_ = 0;
     int64_t observation_hold_until_ms_ = 0, observation_hold_source_ms_ = 0;
     int64_t realtime_hold_until() const;

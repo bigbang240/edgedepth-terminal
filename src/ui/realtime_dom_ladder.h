@@ -18,11 +18,12 @@ public:
     // Call after the chart's plot has rendered this frame, with the mono font
     // pushed. A close button in the header clears `open`.
     void render(const RealtimeDOMFrame& frame, const PriceFormatter& fmt, bool* open);
-    // Width that keeps the price and five compact quantity columns readable.
+    // Width that keeps the price and four compact quantity columns readable.
     static float preferred_width();
 
 private:
     struct Row { double bid = 0, ask = 0, buy = 0, sell = 0; };
     std::vector<Row> rows_;
+    std::vector<double> depth_sizes_;   // visible rows' depth, for the bar scale
     bool display_usd_ = false;
 };

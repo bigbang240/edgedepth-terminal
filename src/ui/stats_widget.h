@@ -81,7 +81,6 @@ private:
 
     // ── Section bodies (step 2) ─────────────────────────────────────────────
     void render_order_flow(bool overview = false);
-    void render_icebergs();
     void note(const char* text);
     void render_positioning(bool overview = false);
     void render_liq_risk(bool overview = false);

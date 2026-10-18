@@ -59,13 +59,17 @@ namespace Terminal {
         LiquidationLevels = 34,
         // Admin-scoped live pattern geometry (PatternDetected payload).
         PatternAdmin = 35,
-        IcebergState = 37, // 36 belongs to RT history
+        // 36 belongs to RT history. 37 retired 2026-10-12: legacy iceberg display
+        // stream (IcebergStats). Kept out of this enum so nothing subscribes; never reuse it.
         // V2 modelled liquidation map (LiqMapV2Frame) and its history (LiqMapV2History).
         LiqMapV2 = 38,
         HistoricalLiqMapV2 = 39,
         // V2 rails admin preview (LiqMapV2Rails) and its history (LiqMapV2RailsHistory); admin only.
         LiqMapV2Rails = 40,
         HistoricalLiqMapV2Rails = 41,
+        // Hyperliquid rails built on the server (HLRails) and their history (HLRailsHistory), keyed {"hl", COIN}.
+        HLRails = 42,
+        HistoricalHLRails = 43,
     };
 
     constexpr std::string_view stream_to_string(Stream s) {
@@ -104,11 +108,12 @@ namespace Terminal {
         case Stream::ReplayPreviewCandles: return "ReplayPreviewCandles";
         case Stream::LiquidationLevels: return "LiquidationLevels";
         case Stream::PatternAdmin: return "PatternAdmin";
-        case Stream::IcebergState: return "IcebergState";
         case Stream::LiqMapV2: return "LiqMapV2";
         case Stream::HistoricalLiqMapV2: return "HistoricalLiqMapV2";
         case Stream::LiqMapV2Rails: return "LiqMapV2Rails";
         case Stream::HistoricalLiqMapV2Rails: return "HistoricalLiqMapV2Rails";
+        case Stream::HLRails: return "HLRails";
+        case Stream::HistoricalHLRails: return "HistoricalHLRails";
         default: return "Unknown";
         }
     }

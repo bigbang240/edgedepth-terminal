@@ -3,6 +3,7 @@
 #include "shader_heatmap_resources.h"
 #include "core/heatmap_colormap.h"
 #include "core/reach_math.h"
+#include "types/frame_profiler.h"
 #include "implot_internal.h"
 #include <cstdio>
 #include <cmath>
@@ -501,14 +502,6 @@ void ShaderHeatmapRenderer::upload_column(
 {
     column_meta_[ring_col].values.assign(column_build_buf_.begin(),
                                          column_build_buf_.begin() + num_rows);
-    // Upload data column (1 × num_rows, padded to MAX_ROWS)
-    glBindTexture(GL_TEXTURE_2D, data_texture_);
-    glTexSubImage2D(GL_TEXTURE_2D, 0,
-                    ring_col, 0,       // xoffset, yoffset
-                    1, MAX_ROWS,       // width=1, height=MAX_ROWS
-                    GL_RED, GL_FLOAT,
-                    column_build_buf_.data());
-
     // Upload metadata for this column
     float meta[4] = {
         static_cast<float>(price_min - gpu_price_origin_),
@@ -518,12 +511,45 @@ void ShaderHeatmapRenderer::upload_column(
     };
     // CPU coverage/quantity reads must see the same flags as direct GPU uploads.
     std::copy_n(meta, 4, meta_staging_.begin() + ring_col * 4);
+    if (batch_depth_upload_) return; // CPU values/flags are complete; the rebuild uploads them once.
+    // Upload data column (1 × num_rows, padded to MAX_ROWS)
+    glBindTexture(GL_TEXTURE_2D, data_texture_);
+    glTexSubImage2D(GL_TEXTURE_2D, 0,
+                    ring_col, 0,       // xoffset, yoffset
+                    1, MAX_ROWS,       // width=1, height=MAX_ROWS
+                    GL_RED, GL_FLOAT,
+                    column_build_buf_.data());
+
     glBindTexture(GL_TEXTURE_2D, meta_texture_);
     glTexSubImage2D(GL_TEXTURE_2D, 0,
                     ring_col, 0,
                     1, 1,
                     GL_RGBA, GL_FLOAT,
                     meta);
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+// Transpose small tiles from the exact CPU columns. A full row-major staging
+// texture costs 32 MB and cache-hostile writes; this scratch space stays 256 KB.
+void ShaderHeatmapRenderer::upload_depth_tiles(int columns) {
+    constexpr int width = 64;
+    depth_upload_tile_.resize(width * MAX_ROWS);
+    glBindTexture(GL_TEXTURE_2D, data_texture_);
+    for (int first = 0; first < columns; first += width) {
+        const int count = std::min(width, columns - first);
+        int rows = 0;
+        for (int c = 0; c < count; ++c)
+            rows = std::max(rows, column_meta_[first + c].num_rows);
+        if (!rows) continue;
+        std::fill_n(depth_upload_tile_.begin(), count * rows, 0.0f);
+        for (int c = 0; c < count; ++c) {
+            const auto& values = column_meta_[first + c].values;
+            for (size_t r = 0; r < values.size(); ++r)
+                depth_upload_tile_[r * count + c] = values[r];
+        }
+        glTexSubImage2D(GL_TEXTURE_2D, 0, first, 0, count, rows,
+                        GL_RED, GL_FLOAT, depth_upload_tile_.data());
+    }
     glBindTexture(GL_TEXTURE_2D, 0);
 }
 
@@ -551,6 +577,7 @@ void ShaderHeatmapRenderer::upload_reach_column(int ring_col) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 void ShaderHeatmapRenderer::sync_gpu_from_timeline() {
+    ProfileScope profile("Depth GPU rebuild");
     if (timeline_.empty()) {
         ring_count_ = 0;
         gpu_dirty_ = false;
@@ -618,6 +645,7 @@ void ShaderHeatmapRenderer::sync_gpu_from_timeline() {
                 static_cast<size_t>(RING_SIZE) * 4 * sizeof(float));
 
     int highest_col = -1;
+    batch_depth_upload_ = colormap_type_ == ColormapType::Orderbook;
 
     for (const auto& [ts, price_qty_map] : timeline_) {
         // Replay cutoff: skip columns past the current playback position
@@ -693,15 +721,13 @@ void ShaderHeatmapRenderer::sync_gpu_from_timeline() {
         }
         if (col_max > global_max_qty_) global_max_qty_ = col_max;
 
-        // Direct per-column GL upload from column_build_buf_ (contiguous, cache-friendly).
-        // The old staging buffer approach required strided writes (data_staging_[r * RING_SIZE + col])
-        // which were cache-hostile - 4M iterations for 4000 columns.
+        // Keep exact CPU rows for labels, held intervals and the batched depth upload.
         upload_column(col, num_rows, col_price_min, gpu_bucket_size_, col_max,
             column_flags(ts));
 
-        // Phase 2a: Build + upload reach_prob column at the same ring position.
-        // Uses the same col_price_min and native_bucket_size_ as the data column.
-        {
+        // Only liquidation rendering samples reach probability. Orderbook depth
+        // must not upload an unused 1024-row reach column for every observation.
+        if (colormap_type_ == ColormapType::Liquidation) {
             auto reach_it = reach_timeline_.find(ts);
             if (reach_it != reach_timeline_.end() && !reach_it->second.empty()) {
                 std::memset(reach_build_buf_.data(), 0, MAX_ROWS * sizeof(float));
@@ -765,6 +791,8 @@ void ShaderHeatmapRenderer::sync_gpu_from_timeline() {
     // columns can extend the ring before the next rebuild; gaps must not reveal
     // valid flags left over from an earlier viewport or replay position.
     const int upload_cols = (highest_col >= 0) ? highest_col + 1 : 0;
+    if (batch_depth_upload_) upload_depth_tiles(upload_cols);
+    batch_depth_upload_ = false;
     if (upload_cols > 0) {
         glBindTexture(GL_TEXTURE_2D, meta_texture_);
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0,
@@ -909,18 +937,44 @@ void ShaderHeatmapRenderer::mark_dirty() {
 // row totals, so multiply its denominator by the number of native ticks per row.
 // Combining equally populated ticks then preserves brightness, while an isolated
 // wall fades as its quantity is spread over a wider row. Source quantities stay intact.
-float ShaderHeatmapRenderer::realtime_normalization(double price_min, double price_max) {
+float ShaderHeatmapRenderer::realtime_normalization(double price_min, double price_max,
+                                                    double time_min, double time_max) {
     // Direct callers must also see the current grid and its observation clocks.
     if (gpu_dirty_) sync_gpu_from_timeline();
     if (replay_cutoff_ms_ < realtime_peak_clock_ms_) realtime_peak_ = 0;
-    // Calibrate once for this traversal. New orders, retention and auto-fit
-    // must never recolor already observed history. Price grouping does not reset
-    // the density reference; explicit recalibration and sensitivity remain available.
-    if (realtime_peak_ > 0) return realtime_peak_ * bucket_multiplier_;
-    std::vector<float> values;
-    values.reserve(64 * MAX_ROWS);
-    const int stride = std::max(1, (ring_count_ + 63) / 64);
-    for (int col = ring_count_ - 1; col >= 0; col -= stride) {
+    // Set once (auto contrast off): calibrate once for this traversal. New orders,
+    // retention and auto-fit must never recolor already observed history. Price
+    // grouping does not reset the density reference; explicit recalibration and
+    // sensitivity remain available. Auto contrast instead eases the reference
+    // toward the visible book (core/rt_contrast.h), measured every two seconds.
+    if (realtime_peak_ > 0 && !realtime_auto_contrast_) return realtime_peak_ * bucket_multiplier_;
+    const bool snap = !(realtime_peak_ > 0);
+    realtime_peak_ = realtime_contrast_.update(realtime_peak_, replay_cutoff_ms_, realtime_auto_contrast_,
+        [&] { return realtime_reference(price_min, price_max, time_min, time_max, true); },
+        [&] { return realtime_reference(price_min, price_max, time_min, time_max, false); });
+    if (snap) realtime_peak_clock_ms_ = replay_cutoff_ms_;
+    return realtime_peak_ > 0 ? realtime_peak_ * bucket_multiplier_ : global_max_qty_;
+}
+
+// The 90th percentile of native-tick quantities in at most 64 eligible columns
+// within the visible prices: across the whole ring (the original set-once rule),
+// or across the visible time window only, newest first (automatic contrast).
+float ShaderHeatmapRenderer::realtime_reference(double price_min, double price_max,
+                                                double time_min, double time_max, bool visible_only) {
+    auto& values = realtime_values_;
+    values.clear();
+    ProfileScope profile("Depth contrast sample");
+    values.reserve(size_t(rt_contrast::kSampleColumns) * MAX_ROWS);
+    int first = 0, last = ring_count_ - 1;
+    if (visible_only) {
+        if (!(time_step_ms_ > 0) || !(time_max > time_min)) return 0;
+        const double origin = double(gpu_origin_ms_), step = double(time_step_ms_);
+        first = std::max(0, int(std::floor((time_min - origin) / step)));
+        last = std::min(last, int(std::floor((std::min(time_max, double(replay_cutoff_ms_)) - origin) / step)));
+        if (last < first) return 0;
+    }
+    const int stride = std::max(1, (last - first + 1 + rt_contrast::kSampleColumns - 1) / rt_contrast::kSampleColumns);
+    for (int col = last; col >= first; col -= stride) {
         const auto& meta = column_meta_[col];
         if (meta_staging_[col * 4 + 3] == 6.0f || meta.timestamp_ms > replay_cutoff_ms_ || meta.num_rows <= 0 || meta.values.empty() ||
             (!timeline_.empty() && meta.timestamp_ms < timeline_.begin()->first)) continue;
@@ -937,14 +991,11 @@ float ShaderHeatmapRenderer::realtime_normalization(double price_min, double pri
             if (value > 0 && std::isfinite(value)) values.push_back(value / source_ticks);
         }
     }
-    if (!values.empty()) {
-        const size_t index = values.size() < 10 ? values.size() - 1 :
-            (values.size() - 1) * 90 / 100;
-        std::nth_element(values.begin(), values.begin() + index, values.end());
-        realtime_peak_ = values[index];
-    }
-    realtime_peak_clock_ms_ = replay_cutoff_ms_;
-    return realtime_peak_ > 0 ? realtime_peak_ * bucket_multiplier_ : global_max_qty_;
+    if (values.empty()) return 0;
+    const size_t index = values.size() < 10 ? values.size() - 1 :
+        (values.size() - 1) * rt_contrast::kPercentile / 100;
+    std::nth_element(values.begin(), values.begin() + std::ptrdiff_t(index), values.end());
+    return values[index];
 }
 
 // A display-only projection of the last eligible GPU column. Never change
@@ -979,7 +1030,7 @@ void ShaderHeatmapRenderer::render_recovery_preview(
     const double from = std::max(limits.X.Min, double(from_ms));
     const double until = std::min(limits.X.Max, until_ms);
     if (until <= from) return;
-    const float reference = realtime_peak_ > 0 ? realtime_peak_ * bucket_multiplier_ : global_max_qty_;
+    const float reference = (realtime_peak_ > 0 ? realtime_peak_ * bucket_multiplier_ : global_max_qty_) * rt_contrast::kDisplayHeadroom;
     if (!(reference > 0)) return;
     const double pmin = column_price_min(mid_price, gpu_bucket_size_);
     const int rows = build_column(prices, pmin, gpu_bucket_size_, false);
@@ -1099,7 +1150,7 @@ void ShaderHeatmapRenderer::render_cells(
     u.bucket_size = static_cast<float>(gpu_bucket_size_);
     u.bucket_multiplier = texture_grouping();
     u.sensitivity = sensitivity;
-    u.max_qty = realtime_ ? realtime_normalization(limits.Y.Min, limits.Y.Max) :
+    u.max_qty = realtime_ ? realtime_normalization(limits.Y.Min, limits.Y.Max, limits.X.Min, limits.X.Max) * rt_contrast::kDisplayHeadroom :
         (candle_orderbook() ? candle_normalization(limits.Y.Min, limits.Y.Max, limits.X.Min, limits.X.Max) : global_max_qty_);
     u.color_low = color_low_;
     u.color_peak = color_peak_;
@@ -1187,7 +1238,7 @@ void ShaderHeatmapRenderer::render_labels(int64_t, float sensitivity) const {
             if (size.x > cell_w * 0.95f || size.y > cell_h * 0.9f) continue;
             const auto center = ImPlot::PlotToPixels(ts, price + bucket * 0.5);
             const float reference = realtime_ && realtime_peak_ > 0
-                ? realtime_peak_ * bucket_multiplier_ : global_max_qty_;
+                ? realtime_peak_ * bucket_multiplier_ * rt_contrast::kDisplayHeadroom : global_max_qty_;
             const float normalized = candle_orderbook() ? candle_intensity(qty, sensitivity) :
                 (reference > 0 ? qty * sensitivity / reference : 0);
             const auto color = normalized > 0.5f ? IM_COL32(0,0,0,230) : IM_COL32(255,255,255,230);

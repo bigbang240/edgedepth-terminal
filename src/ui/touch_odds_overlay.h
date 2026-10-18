@@ -14,11 +14,14 @@ bool chip_visible(const Terminal::Pair& pair, bool replay);
 // End of the current forecast window for this pair, or 0; the chart reserves future margin to it.
 int64_t window_end(const Terminal::Pair& pair, int64_t clock);
 // observed_allowed: this viewer may switch the rails' fuel to observed Hyperliquid positions (admin, HL chart).
-void menu(const Terminal::Pair& pair, bool& enabled, bool observed_allowed = false, bool modelled_allowed = false);
+// rails_off: why the touch-odds rails cannot draw on this chart (another layer holds the forward area, or no fuel
+// stands under them), or null; the menu then says so instead of offering switches that change nothing.
+void menu(const Terminal::Pair& pair, bool& enabled, bool observed_allowed = false, const char* rails_off = nullptr);
 // The rails fuel choice from menu(): observed Hyperliquid positions instead of the scenario map.
 bool observed_fuel_selected();
-bool modelled_fuel_selected();  // rails fuel: the V2 modelled map of the chart's venue (admin)
-void render(const Terminal::Pair& pair, int64_t clock, const char* price_fmt, bool replay = false);
+// The 20-minute bands, the cascade chip and the cursor readout. rails_drawn: the chart draws the touch-odds rails
+// this frame, and the bands give them the forward area.
+void render(const Terminal::Pair& pair, int64_t clock, const char* price_fmt, bool replay, bool rails_drawn);
 // Whether the liquidation rails layer draws for this pair now; the scenario map then leaves the
 // forward area to the rails, and zone chips give way to rail labels.
 bool rails_active(const Terminal::Pair& pair, int64_t clock, bool replay);

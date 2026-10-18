@@ -425,6 +425,10 @@ void draw_ui_icon(ImDrawList* dl, UiIcon icon, ImVec2 c, float s, ImU32 col, flo
             for (int i = -1; i <= 1; ++i)
                 dl->AddLine(at(c, s, -0.75f, i * 0.5f), at(c, s, 0.75f, i * 0.5f), col, th);
             break;
+        case UiIcon::More:
+            for (int i = -1; i <= 1; ++i)
+                dl->AddCircleFilled(at(c, s, i * 0.62f, 0.0f), std::max(1.1f, s * 0.15f), col, 10);
+            break;
         case UiIcon::Target:
             // A ring, a centre dot and four ticks: centre on price.
             dl->AddCircle(c, s * 0.62f, col, 20, th);

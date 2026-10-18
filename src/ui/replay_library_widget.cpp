@@ -1,6 +1,8 @@
 #include "ui/replay_library_widget.h"
 
 #include "rendering/theme.h"
+#include "core/logo_manager.h"
+#include "ui/drawing/drawing_icons.h"
 #include "replayer/replay_manager.h"
 #include "core/entitlements.h"
 
@@ -412,23 +414,39 @@ bool ReplayLibraryWidget::parse_manifest(
         if (pack.display_symbol.empty()) pack.display_symbol = upper_ascii(pack.symbol);
         if (pack.exchange.empty()) pack.exchange = "Recorded market";
 
-        std::string date = pack.captured_at;
-        if (date.size() >= 10) date.resize(10);
-        pack.metadata_line = pack.exchange;
-        if (!date.empty()) pack.metadata_line += " | " + date;
-        if (pack.duration_seconds > 0) {
-            pack.metadata_line += " | " + format_duration(pack.duration_seconds) + " excerpt";
+        pack.base_asset = pack.display_symbol.substr(0, pack.display_symbol.find('/'));
+        // The venue is drawn as its mark beside the pair (James, 2026-10-17), so the
+        // line carries only when, how long and how big: "9 Aug 2026 · 06:50 UTC · 27m · 74.8 MB".
+        static const char* const kMonths[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+        const auto add = [&pack](const std::string& part) {
+            if (part.empty()) return;
+            if (!pack.metadata_line.empty()) pack.metadata_line += " \xC2\xB7 ";
+            pack.metadata_line += part;
+        };
+        int year = 0, month = 0, day = 0, hour = -1, minute = -1;
+        if (std::sscanf(pack.captured_at.c_str(), "%d-%d-%dT%d:%d", &year, &month, &day, &hour, &minute) >= 3 &&
+            month >= 1 && month <= 12) {
+            char date[32];
+            std::snprintf(date, sizeof(date), "%d %s %d", day, kMonths[month - 1], year);
+            add(date);
+            if (hour >= 0 && minute >= 0) {
+                char time[16];
+                std::snprintf(time, sizeof(time), "%02d:%02d UTC", hour, minute);
+                add(time);
+            }
+        } else if (pack.captured_at.size() >= 10) {
+            add(pack.captured_at.substr(0, 10));
         }
-        if (pack.size_bytes > 0) {
-            pack.metadata_line += " | " + format_size(pack.size_bytes);
-        }
+        if (pack.duration_seconds > 0) add(format_duration(pack.duration_seconds));
+        if (pack.size_bytes > 0) add(format_size(pack.size_bytes));
 
         if (const auto tags = item.find("tags"); tags != item.end() && tags->is_array()) {
-            size_t count = 0;
             for (const auto& tag : *tags) {
-                if (!tag.is_string() || count++ >= 6) continue;
-                if (!pack.tags_line.empty()) pack.tags_line += "   ";
-                pack.tags_line += "#" + tag.get<std::string>();
+                if (!tag.is_string() || pack.tags.size() >= 6) continue;
+                std::string words = tag.get<std::string>();
+                std::replace(words.begin(), words.end(), '-', ' ');
+                pack.tags.push_back(std::move(words));
             }
         }
         // Preserve only previews of the exact same catalog object on refresh.
@@ -485,12 +503,12 @@ void ReplayLibraryWidget::play_pack(const Pack& pack) {
     is_open = false;
 }
 
-void ReplayLibraryWidget::render_preview(Pack& pack, ImVec2 size) {
+bool ReplayLibraryWidget::render_preview(Pack& pack, ImVec2 size) {
     using namespace Theme;
     pack.preview_requested = true;
     const ImVec2 a = ImGui::GetCursorScreenPos(), b(a.x + size.x, a.y + size.y);
     auto* dl = ImGui::GetWindowDrawList();
-    dl->AddRectFilled(a, b, ImGui::GetColorU32(Tokens::BASE), 3.0f);
+    dl->AddRectFilled(a, b, ImGui::GetColorU32(Tokens::BASE), Radius::R2);
     const auto& bars = pack.preview.bars;
     ImGui::PushFont(Fonts::mono_sm());
     dl->AddText(ImVec2(a.x + 10, a.y + 8), ImGui::GetColorU32(Tokens::TX3), "1m candles");
@@ -533,84 +551,158 @@ void ReplayLibraryWidget::render_preview(Pack& pack, ImVec2 size) {
         dl->AddText(ImVec2(left, b.y - 17), ImGui::GetColorU32(Tokens::TX3), window);
     }
     ImGui::PopFont();
-    ImGui::Dummy(size);
-    if (ImGui::IsItemHovered()) Theme::tooltip("Actual complete 1-minute candles inside this recording.\nPre-roll and bars crossing the end are excluded. Gaps stay gaps.\nThe change is for the displayed bars, not the whole event.");
+    // The preview is also the play button: under the pointer it dims and shows a round play mark.
+    const bool clicked = ImGui::InvisibleButton("##preview", size);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        dl->AddRectFilled(a, b, IM_COL32(0, 0, 0, 120), Radius::R2);
+        const ImVec2 c((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f);
+        const float r = ImGui::IsItemActive() ? 19.0f : 20.0f;
+        dl->AddCircleFilled(c, r, ImGui::GetColorU32(Tokens::TX1), 32);
+        drawing::draw_ui_icon(dl, drawing::UiIcon::Play, ImVec2(c.x + 1.5f, c.y), 8.0f, ImGui::GetColorU32(Tokens::BRAND_INK), 1.6f);
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal | ImGuiHoveredFlags_NoSharedDelay))
+        Theme::tooltip("Click to replay. Actual complete 1-minute candles inside this recording.\nPre-roll and bars crossing the end are excluded. Gaps stay gaps.\nThe change is for the displayed bars, not the whole event.");
+    return clicked;
 }
 
+void ReplayLibraryWidget::request_play(int index) {
+    if (index < 0 || index >= static_cast<int>(packs_.size())) return;
+    if (ctx_.replay_mgr().is_active()) { pending_pack_ = index; replace_popup_requested_ = true; }
+    else play_pack(packs_[index]);
+}
+
+// One recording as a card (design v3, 2026-10-17; James: the library looked "slightly low quality"):
+// a rounded surface whose hairline brightens under the pointer; the coin and venue as their marks;
+// Featured as a badge; tags as chips; one filled Replay with its glyph, a quiet Details and the rest
+// behind a three-dot menu. The card sizes to its content (AutoResizeY), so no height arithmetic.
 void ReplayLibraryWidget::render_pack(Pack& pack, int index) {
     using namespace Theme;
+    using drawing::UiIcon;
     ImGui::PushID(pack.id.c_str());
+    constexpr float kPad = 14.0f, kGap = 18.0f, kPreviewH = 138.0f;
     const float width = ImGui::GetContentRegionAvail().x;
-    const bool wide = width >= 660.0f;
-    const float preview_w = wide ? 250.0f : width - 24.0f;
-    const float text_w = wide ? width - preview_w - 40.0f : width - 24.0f;
+    const bool wide = width >= 640.0f;
+    const float preview_w = wide ? 252.0f : width - kPad * 2.0f;
+    const float text_w = wide ? width - preview_w - kPad * 2.0f - kGap : width - kPad * 2.0f;
     std::string name = pack.title;
     if (auto comma = name.find(','); comma != std::string::npos) name.resize(comma);
-    const auto base = pack.display_symbol.substr(0, pack.display_symbol.find('/')) + " ";
+    const auto base = pack.base_asset + " ";
     if (name.rfind(base, 0) == 0) name.erase(0, base.size());
     if (!name.empty()) name[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(name[0])));
-    const float detail_h = pack.details_open ? ImGui::CalcTextSize(pack.summary.c_str(), nullptr, false, text_w).y + 10.0f : 0.0f;
-    ImGui::PushFont(Fonts::mono_sm());
-    const float small_line = ImGui::GetFontSize();
-    const float wrapped_extra = std::max(0.0f, ImGui::CalcTextSize(pack.metadata_line.c_str(), nullptr, false, text_w).y - small_line) +
-        std::max(0.0f, ImGui::CalcTextSize(pack.tags_line.c_str(), nullptr, false, text_w).y - small_line);
-    ImGui::PopFont();
-    const float height = (wide ? 154.0f : 288.0f) + detail_h + wrapped_extra;
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, Tokens::PANEL);
-    ImGui::PushStyleColor(ImGuiCol_Border, Tokens::BD1);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 10));
-    const bool visible = ImGui::BeginChild("##pack", ImVec2(0, height), true,
+
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, Tokens::CARD);
+    ImGui::PushStyleColor(ImGuiCol_Border, hovered_pack_ == index ? Tokens::BD2 : Tokens::BD1);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, Radius::R3);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(kPad, kPad));
+    bool play = false;
+    const bool visible = ImGui::BeginChild("##pack", ImVec2(0, 0),
+        ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding,
         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     if (visible) {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
         const ImVec2 origin = ImGui::GetCursorPos();
-        render_preview(pack, ImVec2(preview_w, 132));
-        ImGui::SetCursorPos(wide ? ImVec2(origin.x + preview_w + 16, origin.y) : ImVec2(origin.x, origin.y + 142));
+        play |= render_preview(pack, ImVec2(preview_w, kPreviewH));
+        if (wide) ImGui::SetCursorPos(ImVec2(origin.x + preview_w + kGap, origin.y + 2.0f));
+        else ImGui::Dummy(ImVec2(0.0f, 4.0f));
+        const float col_x = ImGui::GetCursorPosX();
         ImGui::BeginGroup();
+
+        // Identity: coin mark, pair, venue mark, Featured.
         ImGui::PushFont(Fonts::heading());
+        const float line_h = ImGui::GetTextLineHeight();
+        const ImVec2 row = ImGui::GetCursorScreenPos();
+        constexpr float kCoin = 22.0f, kVenue = 15.0f;
+        LogoManager::instance().draw_coin(dl, pack.base_asset, ImVec2(row.x, row.y + (line_h - kCoin) * 0.5f), kCoin);
+        ImGui::SetCursorScreenPos(ImVec2(row.x + kCoin + 9.0f, row.y));
         ImGui::TextUnformatted(pack.display_symbol.c_str());
         ImGui::PopFont();
-        if (pack.featured) { ImGui::SameLine(); ImGui::TextColored(Tokens::TX3, "FEATURED"); }
+        if (!pack.exchange_id.empty()) {
+            ImGui::SameLine(0.0f, 9.0f);
+            const ImVec2 v = ImGui::GetCursorScreenPos();
+            LogoManager::instance().draw_exchange(dl, pack.exchange_id, ImVec2(v.x, row.y + (line_h - kVenue) * 0.5f), kVenue);
+            ImGui::Dummy(ImVec2(kVenue, line_h));
+            if (ImGui::IsItemHovered()) Theme::tooltip("%s", pack.exchange.c_str());
+        }
+        if (pack.featured) {
+            ImGui::SameLine(0.0f, 10.0f);
+            push_font(Fonts::ui(), 11.5f);
+            const char* label = "Featured";
+            const ImVec2 ts = ImGui::CalcTextSize(label);
+            const float h = ts.y + 6.0f, glyph = 4.5f, w = 8.0f + glyph * 2.0f + 5.0f + ts.x + 9.0f;
+            const ImVec2 at = ImGui::GetCursorScreenPos();
+            const float y = row.y + (line_h - h) * 0.5f;
+            dl->AddRectFilled(ImVec2(at.x, y), ImVec2(at.x + w, y + h), ImGui::GetColorU32(Tokens::CONTROL), h * 0.5f);
+            drawing::draw_ui_icon(dl, UiIcon::Star, ImVec2(at.x + 8.0f + glyph, y + h * 0.5f), glyph,
+                                  ImGui::GetColorU32(Tokens::WARN), 1.2f);
+            dl->AddText(ImVec2(at.x + 8.0f + glyph * 2.0f + 5.0f, y + 3.0f), ImGui::GetColorU32(Tokens::TX1), label);
+            ImGui::Dummy(ImVec2(w, line_h));
+            ImGui::PopFont();
+            if (ImGui::IsItemHovered()) Theme::tooltip("Picked for how clearly it shows the order flow behind a move.");
+        }
+
+        // What it is, then when, how long and how big.
+        ImGui::Dummy(ImVec2(0.0f, 2.0f));
         ImGui::TextColored(Tokens::TX1, "%s", name.c_str());
         ImGui::PushFont(Fonts::mono_sm());
-        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + text_w);
+        ImGui::PushTextWrapPos(col_x + text_w);
         ImGui::TextColored(Tokens::TX3, "%s", pack.metadata_line.c_str());
-        ImGui::TextColored(Tokens::TX2, "%s", pack.tags_line.c_str());
         ImGui::PopTextWrapPos();
-        ImGui::PopFont();
-        ImGui::Spacing();
-        ImGui::PushStyleColor(ImGuiCol_Button, Tokens::BRAND);
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Tokens::BRAND_TX);
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, Tokens::BRAND);
-        ImGui::PushStyleColor(ImGuiCol_Text, Tokens::BRAND_INK);
-        if (ImGui::Button("Replay", ImVec2(82, 26))) {
-            if (ctx_.replay_mgr().is_active()) { pending_pack_ = index; replace_popup_requested_ = true; }
-            else play_pack(pack);
+
+        // Tags as chips, wrapped to the column.
+        if (!pack.tags.empty()) {
+            ImGui::Dummy(ImVec2(0.0f, 2.0f));
+            const float right = ImGui::GetCursorScreenPos().x + text_w;
+            for (size_t i = 0; i < pack.tags.size(); ++i) {
+                const float w = ImGui::CalcTextSize(pack.tags[i].c_str()).x + 14.0f;
+                if (i > 0) {
+                    ImGui::SameLine(0.0f, 6.0f);
+                    if (ImGui::GetCursorScreenPos().x + w > right) ImGui::NewLine();
+                }
+                chip(pack.tags[i].c_str(), Tokens::TX2, Tokens::CONTROL);
+            }
         }
-        ImGui::PopStyleColor(4);
-        ImGui::SameLine();
-        if (ImGui::Button(pack.details_open ? "Less" : "Details", ImVec2(68, 26))) pack.details_open = !pack.details_open;
-        ImGui::SameLine();
-        if (ImGui::Button("...", ImVec2(30, 26))) ImGui::OpenPopup("##pack_actions");
-        if (ImGui::BeginPopup("##pack_actions")) {
-            if (ImGui::MenuItem("Download .edpack")) edrl_open_url(pack.pack_url.c_str());
-            if (ImGui::MenuItem("Copy link")) {
+        ImGui::PopFont();
+
+        // Actions: Replay, Details, and the rest behind the three dots at the column's right.
+        ImGui::Dummy(ImVec2(0.0f, 6.0f));
+        constexpr float kButtonH = 28.0f;
+        play |= button("Replay", ButtonKind::Soft, ImVec2(0.0f, kButtonH), UiIcon::Play);
+        ImGui::SameLine(0.0f, 6.0f);
+        if (button(pack.details_open ? "Hide details" : "Details", ButtonKind::Ghost, ImVec2(0.0f, kButtonH)))
+            pack.details_open = !pack.details_open;
+        ImGui::SameLine(text_w - kButtonH);  // inside the group, SameLine counts from the group's start
+        if (icon_button("##more", UiIcon::More, "More", kButtonH)) ImGui::OpenPopup("##pack_actions");
+        if (begin_menu("##pack_actions", 210.0f)) {
+            if (menu_item(UiIcon::Copy, "Copy link")) {
                 edrl_copy_url(pack.pack_url.c_str());
                 notice_ = "Recording link copied"; notice_until_ = ImGui::GetTime() + 2.0;
             }
+            if (menu_item(UiIcon::ArrowUpRight, "Download .edpack")) edrl_open_url(pack.pack_url.c_str());
             ImGui::EndPopup();
         }
         if (pack.details_open) {
-            ImGui::Spacing();
-            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + text_w);
+            ImGui::Dummy(ImVec2(0.0f, 4.0f));
+            ImGui::PushTextWrapPos(col_x + text_w);
             ImGui::TextColored(Tokens::TX2, "%s", pack.summary.c_str());
             ImGui::PopTextWrapPos();
         }
         ImGui::EndGroup();
+        // A wide card is as tall as its taller column.
+        if (wide) {
+            const float bottom = std::max(ImGui::GetCursorPosY(), origin.y + kPreviewH);
+            ImGui::SetCursorPosY(bottom);
+            ImGui::Dummy(ImVec2(0.0f, 0.0f));
+        }
     }
     ImGui::EndChild();
-    ImGui::PopStyleVar();
+    // After EndChild the card is the item; hovering anything inside it hovers the card.
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByPopup)) hovered_pack_ = index;
+    else if (hovered_pack_ == index) hovered_pack_ = -1;
+    ImGui::PopStyleVar(2);
     ImGui::PopStyleColor(2);
     ImGui::PopID();
+    if (play) request_play(index);
 }
 
 void ReplayLibraryWidget::render_replace_confirmation() {
@@ -621,23 +713,18 @@ void ReplayLibraryWidget::render_replace_confirmation() {
     }
     ImGui::TextWrapped("Starting this recording will stop the replay that is currently open.");
     ImGui::Spacing();
-    if (ImGui::Button("Cancel", ImVec2(100.0f, 28.0f))) {
+    if (Theme::button("Cancel", Theme::ButtonKind::Ghost, ImVec2(100.0f, 28.0f))) {
         pending_pack_ = -1;
         ImGui::CloseCurrentPopup();
     }
     ImGui::SameLine();
-    ImGui::PushStyleColor(ImGuiCol_Button, Theme::Tokens::BRAND);
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::Tokens::BRAND_TX);
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, Theme::Tokens::BRAND);
-    ImGui::PushStyleColor(ImGuiCol_Text, Theme::Tokens::BRAND_INK);
-    if (ImGui::Button("Replace and replay", ImVec2(160.0f, 28.0f))) {
+    if (Theme::button("Replace and replay", Theme::ButtonKind::Primary, ImVec2(170.0f, 28.0f), drawing::UiIcon::Play)) {
         if (pending_pack_ >= 0 && pending_pack_ < static_cast<int>(packs_.size())) {
             play_pack(packs_[pending_pack_]);
         }
         pending_pack_ = -1;
         ImGui::CloseCurrentPopup();
     }
-    ImGui::PopStyleColor(4);
     ImGui::EndPopup();
 }
 
@@ -645,34 +732,47 @@ void ReplayLibraryWidget::render() {
     if (!is_open) return;
 
     place_new_window();  // before our own size, so it wins
-    ImGui::SetNextWindowSize(ImVec2(850.0f, 850.0f), ImGuiCond_FirstUseEver);
+    // Roomy, but never wider or taller than the screen: an 850 px window opened half off a narrow one.
+    const ImVec2 work = ImGui::GetMainViewport()->WorkSize;
+    ImGui::SetNextWindowSize(ImVec2(std::min(850.0f, work.x - 40.0f), std::min(850.0f, work.y - 40.0f)),
+                             ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSizeConstraints(ImVec2(420.0f, 360.0f), ImVec2(FLT_MAX, FLT_MAX));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 10.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14.0f, 12.0f));
     if (!ImGui::Begin(title(), &is_open)) {
         ImGui::End();
         ImGui::PopStyleVar();
         return;
     }
 
+    // Title, a count chip, and Refresh as an icon at the right.
+    const float top = ImGui::GetCursorPosY();
     ImGui::PushFont(Theme::Fonts::heading());
+    const float title_h = ImGui::GetTextLineHeight();
     ImGui::TextUnformatted("Replay Library");
     ImGui::PopFont();
-    ImGui::SameLine();
-    ImGui::TextColored(Theme::Tokens::TX3, "MARKET RECORDINGS");
-    ImGui::SameLine(ImGui::GetWindowWidth() - 90.0f);
-    if (ImGui::Button(loading_ ? "Loading" : "Refresh", ImVec2(72.0f, 24.0f)) && !loading_) {
-        begin_fetch(true);
+    if (catalog_ready_ && !packs_.empty()) {
+        ImGui::SameLine(0.0f, 10.0f);
+        char count[32];
+        std::snprintf(count, sizeof(count), "%zu recording%s", packs_.size(), packs_.size() == 1 ? "" : "s");
+        ImGui::SetCursorPosY(top + (title_h - (ImGui::GetTextLineHeight() + 4.0f)) * 0.5f);
+        Theme::chip(count, Theme::Tokens::TX2, Theme::Tokens::CONTROL);
     }
+    constexpr float kIcon = 26.0f;
+    ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - kIcon);
+    ImGui::SetCursorPosY(top + (title_h - kIcon) * 0.5f);
+    if (Theme::icon_button("##refresh", drawing::UiIcon::Refresh, loading_ ? "Refreshing..." : "Refresh the library", kIcon) && !loading_)
+        begin_fetch(true);
+    ImGui::SetCursorPosY(top + std::max(title_h, kIcon) + 4.0f);
 
     ImGui::PushTextWrapPos(0.0f);
     ImGui::TextColored(
-        Theme::Tokens::TX2,
+        Theme::Tokens::TX3,
         "Short excerpts of larger moves. Clip net shows the preview's change, not the full event's move.");
     ImGui::PopTextWrapPos();
     if (ImGui::IsItemHovered()) {
         Theme::tooltip("Manifest: %s", manifest_url_.c_str());
     }
-    ImGui::Separator();
+    Theme::hairline(ImGui::GetContentRegionAvail().x, 8.0f);
 
     if (!notice_.empty() && ImGui::GetTime() < notice_until_) {
         ImGui::TextColored(Theme::Tokens::BRAND_TX, "%s", notice_.c_str());
@@ -686,9 +786,9 @@ void ReplayLibraryWidget::render() {
         ImGui::TextColored(Theme::Tokens::DOWN, "Could not load the replay library");
         ImGui::TextWrapped("%s", error_.c_str());
         ImGui::Spacing();
-        if (ImGui::Button("Try again")) begin_fetch(true);
+        if (Theme::button("Try again", Theme::ButtonKind::Soft, ImVec2(0.0f, 28.0f), drawing::UiIcon::Refresh)) begin_fetch(true);
         ImGui::SameLine();
-        if (ImGui::Button("Copy manifest URL")) {
+        if (Theme::button("Copy manifest URL", Theme::ButtonKind::Ghost, ImVec2(0.0f, 28.0f), drawing::UiIcon::Copy)) {
             edrl_copy_url(manifest_url_.c_str());
             notice_ = "Manifest URL copied";
             notice_until_ = ImGui::GetTime() + 2.0;
@@ -697,17 +797,13 @@ void ReplayLibraryWidget::render() {
         ImGui::Spacing();
         ImGui::TextColored(Theme::Tokens::TX2, "No recordings are published yet.");
     } else {
-        ImGui::TextColored(Theme::Tokens::TX3, "%zu recording%s available%s",
-                           packs_.size(), packs_.size() == 1 ? "" : "s",
-                           loading_ ? " | refreshing" : "");
-        ImGui::Spacing();
-        const float footer_height = Entitlements::is_pro() ? 48.0f : 76.0f;
+        const float footer_height = Entitlements::is_pro() ? 44.0f : 82.0f;
         const float list_height = std::max(
             120.0f, ImGui::GetContentRegionAvail().y - footer_height);
         ImGui::BeginChild("##replay_library_list", ImVec2(0.0f, list_height), false);
         for (int i = 0; i < static_cast<int>(packs_.size()); ++i) {
             render_pack(packs_[i], i);
-            ImGui::Spacing();
+            ImGui::Dummy(ImVec2(0.0f, 4.0f));
         }
         ImGui::EndChild();
         if (replace_popup_requested_) {
@@ -716,13 +812,13 @@ void ReplayLibraryWidget::render() {
         }
         render_replace_confirmation();
 
-        ImGui::Separator();
+        Theme::hairline(ImGui::GetContentRegionAvail().x, 8.0f);
         ImGui::PushTextWrapPos(0.0f);
-        ImGui::TextColored(Theme::Tokens::TX2, "Pause, slow down and scrub to inspect how the move unfolded.");
+        ImGui::TextColored(Theme::Tokens::TX3, "Pause, slow down and scrub to inspect how the move unfolded.");
         ImGui::PopTextWrapPos();
         if (!Entitlements::is_pro()) {
             ImGui::TextColored(Theme::Tokens::TX3, "These recordings are free. Explore more historical markets with Pro.");
-            if (ImGui::SmallButton("Explore replay plans"))
+            if (Theme::button("Explore replay plans", Theme::ButtonKind::Ghost, ImVec2(0.0f, 26.0f), drawing::UiIcon::ArrowUpRight, true))
                 edrl_open_url("https://edgedepth.com/pricing?utm_source=terminal&utm_medium=replay_library");
         }
 

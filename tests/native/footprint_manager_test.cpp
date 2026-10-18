@@ -155,6 +155,61 @@ int main() {
     expect(!observed(119000), "old provisional minutes expire instead of accumulating forever");
     live.clear(market);
     expect(!observed(180000, 300), "clear removes both historical and observed volume");
-    std::printf("Footprint direction, thresholds, adjacency, cache and as-of: %s\n", failures ? "FAILED" : "PASS");
+
+    // History requests: covered only on a successful reply, retried after a
+    // failure, a refusal or no reply, one request in flight per market.
+    Manager h;
+    const int64_t retry = Manager::kHistoryRetryMinMs, timeout = Manager::kHistoryReplyTimeoutMs;
+    int64_t s = 0, e = 0;
+    auto begin = [&](int64_t start, int64_t end, int64_t now, const std::string& key) {
+        s = start; e = end;
+        return h.begin_history_request(key, s, e, now);
+    };
+    auto ask = [&](int64_t start, int64_t end, int64_t now) { return begin(start, end, now, market); };
+    expect(ask(1000, 2000, 0) && h.is_loading(market), "first request goes out");
+    expect(!ask(3000, 4000, 1), "one request in flight per market");
+    expect(begin(1000, 2000, 1, other) && h.is_loading(other), "a pending market does not block another");
+    h.finish_history_request(market, 0, 0, false, 10);
+    expect(!h.is_loading(market) && !ask(1200, 1800, 11), "legacy sentinel completes and covers the range");
+    expect(ask(500, 1500, 12) && s == 500 && e == 2000, "extension asks for the union");
+    h.finish_history_request(market, 500, 2000, true, 20);
+    expect(!h.is_loading(market), "failure sentinel clears loading");
+    expect(!ask(500, 1500, 20 + retry - 1), "failed range waits for the backoff");
+    expect(!ask(1000, 2000, 20 + retry) && !h.is_loading(market), "coverage from before the failure stays");
+    expect(ask(500, 1500, 20 + retry) && s == 500 && e == 2000, "failed range is never marked covered and is asked again");
+    h.finish_history_request(market, 500, 2000, true, 100);
+    expect(!ask(500, 1500, 100 + 2 * retry - 1) && ask(500, 1500, 100 + 2 * retry),
+           "backoff doubles per consecutive failure");
+    h.finish_history_request(market, 9, 99, false, 7000);
+    expect(h.is_loading(market), "a reply echoing another range does not answer the request");
+    h.finish_history_request(market, 500, 2000, false, 7000);
+    expect(!h.is_loading(market) && !ask(600, 1900, 7001), "echoed success covers the range and resets the backoff");
+
+    expect(ask(600, 2500, 8000) && s == 500 && e == 2500, "panning past coverage asks for the union");
+    expect(!ask(600, 2500, 8000 + timeout - 1) && h.is_loading(market), "no reply: in flight until the timeout");
+    expect(!ask(600, 2500, 8000 + timeout) && !h.is_loading(market),
+           "no reply within the timeout counts as a failure and backs off");
+    h.finish_history_request(market, 500, 2500, true, 8000 + timeout + 1);
+    int64_t t = 8000 + timeout + retry;
+    expect(!ask(1000, 2000, t), "a timed-out extension leaves earlier coverage intact");
+    expect(ask(600, 2500, t) && s == 500 && e == 2500, "a late failure adds no backoff; the timed-out range is asked again");
+    expect(!ask(600, 2500, t + timeout), "second timeout");
+    h.finish_history_request(market, 500, 2500, false, t + timeout + 5);
+    expect(!ask(500, 2500, t + timeout + 6), "a reply that outlived the timeout still covers its range");
+    expect(ask(400, 2500, t + timeout + 6), "and clears the backoff");
+    h.finish_history_request(market, 400, 2500, false, t + timeout + 7);
+
+    for (int i = 0; i < 20; ++i) {
+        const int64_t now = 1000000LL * (i + 1);
+        if (ask(3000 + i, 4000, now)) h.finish_history_request(market, s, e, true, now);
+    }
+    t = 20000000;
+    expect(!ask(3000, 4000, t + Manager::kHistoryRetryMaxMs - 1) && ask(3000, 4000, t + Manager::kHistoryRetryMaxMs),
+           "backoff is capped");
+    h.clear(market);
+    expect(!h.is_loading(market) && ask(1000, 2000, t + Manager::kHistoryRetryMaxMs), "clear forgets coverage and the request");
+    h.finish_history_request(":", 0, 0, true, 0);
+    expect(h.is_loading(market), "a sentinel for an unknown market changes nothing");
+    std::printf("Footprint direction, thresholds, adjacency, cache, as-of and history requests: %s\n", failures ? "FAILED" : "PASS");
     return failures ? 1 : 0;
 }

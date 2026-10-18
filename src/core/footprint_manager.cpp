@@ -77,11 +77,56 @@ void FootprintManager::clear(const std::string& symbol) {
     data_.erase(symbol);
     live_.erase(symbol);
     merged_cache_.erase(symbol);
-    if (last_symbol_ == symbol) {
-        last_start_ = 0;
-        last_end_ = 0;
-        loading_ = false;
+    history_.erase(symbol);
+}
+
+bool FootprintManager::begin_history_request(const std::string& market, int64_t& start_ms,
+                                             int64_t& end_ms, int64_t now_ms) {
+    auto& h = history_[market];
+    if (h.in_flight) {
+        if (now_ms - h.sent_ms < kHistoryReplyTimeoutMs) return false;
+        finish_history_request(market, h.request_start, h.request_end, true, now_ms);
     }
+    if (now_ms < h.retry_ms) return false;
+    const bool covered = h.covered_end > h.covered_start;
+    if (covered && start_ms >= h.covered_start && end_ms <= h.covered_end) return false;
+    // Extend the covered range (union of old + new)
+    if (covered) {
+        start_ms = std::min(start_ms, h.covered_start);
+        end_ms = std::max(end_ms, h.covered_end);
+    }
+    h.request_start = start_ms;
+    h.request_end = end_ms;
+    h.sent_ms = now_ms;
+    h.in_flight = true;
+    return true;
+}
+
+void FootprintManager::finish_history_request(const std::string& market, int64_t start_ms,
+                                              int64_t end_ms, bool failed, int64_t now_ms) {
+    auto it = history_.find(market);
+    if (it == history_.end()) return;
+    auto& h = it->second;
+    const bool echoed = start_ms != 0 || end_ms != 0;
+    const bool answers_last = !echoed || (start_ms == h.request_start && end_ms == h.request_end);
+    // Replies arrive late (after the reply timeout) or for an older range; only
+    // the last range asked for counts, and a late failure changes nothing.
+    if (!answers_last || (!h.in_flight && (failed || !echoed))) return;
+    h.in_flight = false;
+    if (failed) {
+        h.failures = std::min(h.failures + 1, 16);
+        h.retry_ms = now_ms + std::min(kHistoryRetryMinMs << (h.failures - 1), kHistoryRetryMaxMs);
+        return;
+    }
+    h.covered_start = h.request_start;
+    h.covered_end = h.request_end;
+    h.failures = 0;
+    h.retry_ms = 0;
+}
+
+bool FootprintManager::is_loading(const std::string& market) const {
+    const auto it = history_.find(market);
+    return it != history_.end() && it->second.in_flight;
 }
 
 const FootprintManager::MergedCache* FootprintManager::get_merged_grouped(

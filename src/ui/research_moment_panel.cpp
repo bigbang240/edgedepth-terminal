@@ -10,6 +10,7 @@
 #include "research_moment_panel.h"
 
 #include <algorithm>
+#include <cfloat>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -22,6 +23,7 @@
 #include "../core/usage_emit.h"
 #include "../education/transport_emit.h"
 #include "../rendering/theme.h"
+#include "drawing/drawing_icons.h"
 #include "upsell_modal.h"
 
 #ifdef __EMSCRIPTEN__
@@ -42,10 +44,23 @@ constexpr const char* kFiredOne = "1 rulebook condition was firing at this minut
 constexpr const char* kFiredMany = "%d rulebook conditions were firing at this minute.";
 // Round-2 tightening (2026-08-24, James: "hard to read, verbose"): one
 // claim, one pointer. The Pro/Research look-back detail moved out of the
-// body; the paywall states it where it gates.
-constexpr const char* kHonesty =
-    "These readings describe this minute, not what followed. Searching counts every minute "
-    "that looked like this, and what followed each one.";
+// body; the paywall states it where it gates. 2026-10-13: the claim sits
+// under the lead it qualifies, the pointer above the button it describes.
+constexpr const char* kHonesty = "They describe this minute, not what followed.";
+constexpr const char* kSearchFromMany =
+    "Uses the %d marked readings to find similar minutes and what followed. "
+    "Nothing runs until you confirm.";
+constexpr const char* kSearchFromOne =
+    "Uses the marked reading to find similar minutes and what followed. "
+    "Nothing runs until you confirm.";
+constexpr const char* kSearchFromNone =
+    "Finds similar minutes and what followed. Nothing runs until you confirm.";
+constexpr const char* kMarkHint = "The search starts from this reading.";
+// Group headers replace the per-row NEW/STANDING tags and their legend.
+constexpr const char* kGroupNew = "NEW SINCE %s";
+constexpr const char* kGroupStanding = "ALREADY STANDING OUT AT %s";
+constexpr const char* kGroupNewHint = "Not standing out one hour earlier, at %s.";
+constexpr const char* kGroupStandingHint = "Already standing out one hour earlier, at %s.";
 constexpr const char* kLiveNote =
     "Live read: the newest closed minute, not the minute you pointed at.";
 constexpr const char* kProvisionalNote = "Some readings cover a candle that is still forming.";
@@ -63,6 +78,7 @@ constexpr const char* kCtaRetry = "Retry";
 constexpr const char* kCtaClose = "Close";
 
 constexpr float kPanelW = 400.0f;
+constexpr float kMaxHeightShare = 0.85f;  // of the viewport
 constexpr double kTimeoutS = 12.0;
 
 void emit_moment_usage(const char* event, const std::string& symbol, int64_t minute_ms,
@@ -96,6 +112,17 @@ int64_t iso_epoch(const std::string& iso) {
 }
 std::string minute_header(int64_t epoch) {
     char text[128]{};DisplayTimeZone::instance().format(epoch,TimeZoneFormat::FullInspection,text,sizeof(text));return text;
+}
+// "2026-09-02 13:00 UTC+00:00": the panel reads whole minutes, so no seconds.
+std::string minute_title(int64_t epoch) {
+    char text[96]{}, offset[24]{};
+    DisplayTimeZone::instance().format(epoch, TimeZoneFormat::DateTimeMinutes, text, sizeof(text));
+    if (DisplayTimeZone::instance().offset_label(epoch, offset, sizeof(offset)))
+        return std::string(text) + " " + offset;
+    return text;
+}
+std::string minute_clock(int64_t epoch) {
+    char text[32]{};DisplayTimeZone::instance().format(epoch,TimeZoneFormat::TimeMinutes,text,sizeof(text));return text;
 }
 
 bool primary_button(const char* label, float w, float h = 34.0f) {
@@ -147,6 +174,7 @@ void ResearchMomentPanel::open(const std::string& symbol_raw, int64_t minute_ms)
     any_provisional_ = false;
     tags_note_.clear();
     mfields_.clear();
+    marked_count_ = 0;
     bucket_label_.clear();
     message_.clear();
     bridge_available_ = bridge_present();
@@ -281,6 +309,9 @@ void ResearchMomentPanel::apply_result_json(const char* json) {
         for (const auto& c : j["checked"])
             if (c.is_string()) checked.push_back(c.get<std::string>());
     }
+    for (Row& row : standouts_)
+        row.marked = std::find(checked.begin(), checked.end(), row.id) != checked.end();
+    marked_count_ = static_cast<int>(checked.size());
     mfields_ = research_url::join_mfields(checked);
     state_ = live_read_ ? State::ReadyLive : State::Ready;
     emit_moment_usage("research_moment_result", symbol_norm_, minute_ms_, live_read_,
@@ -335,7 +366,7 @@ void ResearchMomentPanel::render() {
     pos.y = std::max(pos.y, vp->Pos.y + 8.0f);
     ImGui::SetNextWindowPos(pos, ImGuiCond_Appearing);
     ImGui::SetNextWindowSizeConstraints(ImVec2(kPanelW, 0.0f),
-                                        ImVec2(kPanelW, vp->Size.y * 0.85f));
+                                        ImVec2(kPanelW, vp->Size.y * kMaxHeightShare));
 
     ImGui::PushStyleColor(ImGuiCol_WindowBg, Tokens::PANEL);
     ImGui::PushStyleColor(ImGuiCol_Border, Tokens::BD2);
@@ -394,35 +425,35 @@ void ResearchMomentPanel::render_body() {
     const float w = ImGui::GetContentRegionAvail().x;
 
     // ── Header: tag + close, then symbol + minute ────────────────────────
+    const ImVec2 head = ImGui::GetCursorScreenPos();
     ImGui::PushFont(Fonts::label());
     ImGui::PushStyleColor(ImGuiCol_Text, Tokens::TX3);
     ImGui::TextUnformatted(kTag);
     ImGui::PopStyleColor();
+    const float tag_h = ImGui::GetTextLineHeight();
     ImGui::PopFont();
-    ImGui::SameLine(w - 12.0f);
-    ImGui::PushStyleColor(ImGuiCol_Text, Tokens::TX3);
-    if (ImGui::Selectable("\xc3\x97", false, 0, ImVec2(12.0f, 0.0f))) {
+    const ImVec2 after_tag = ImGui::GetCursorScreenPos();
+    constexpr float kCloseSz = 22.0f;
+    ImGui::SetCursorScreenPos(ImVec2(head.x + w - kCloseSz, head.y + (tag_h - kCloseSz) * 0.5f));
+    if (Theme::icon_button("##moment_close", drawing::UiIcon::Close, "Close (Esc)", kCloseSz)) {
         close();
-        ImGui::PopStyleColor();
         return;
     }
-    ImGui::PopStyleColor();
+    ImGui::SetCursorScreenPos(ImVec2(after_tag.x, after_tag.y + 2.0f));
 
     ImGui::PushFont(Fonts::ui_semibold());
     ImGui::PushStyleColor(ImGuiCol_Text, Tokens::TX1);
     ImGui::TextUnformatted(symbol_upper_.c_str());
     ImGui::PopStyleColor();
     ImGui::PopFont();
-    ImGui::SameLine();
+    ImGui::SameLine(0.0f, 8.0f);
     ImGui::PushFont(Fonts::mono_sm());
     ImGui::PushStyleColor(ImGuiCol_Text, Tokens::TX2);
-    ImGui::TextWrapped("%s",minute_header(bucket_label_.empty()?minute_ms_:iso_epoch(bucket_label_)).c_str());
+    const int64_t at_ms = bucket_label_.empty() ? minute_ms_ : iso_epoch(bucket_label_);
+    ImGui::TextWrapped("%s", minute_title(at_ms).c_str());
     ImGui::PopStyleColor();
     ImGui::PopFont();
-
-    ImGui::Dummy(ImVec2(0.0f, 6.0f));
-    ImGui::Separator();
-    ImGui::Dummy(ImVec2(0.0f, 8.0f));
+    Theme::hairline(w, 16.0f);
 
     // ── Body per state ───────────────────────────────────────────────────
     if (state_ == State::Loading) {
@@ -469,6 +500,7 @@ void ResearchMomentPanel::render_body() {
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
     }
 
+    // ── The answer, and the one claim that qualifies it ──────────────────
     char lead[128];
     if (standouts_.empty()) {
         snprintf(lead, sizeof(lead), kZeroStandouts, total_readings_);
@@ -480,44 +512,90 @@ void ResearchMomentPanel::render_body() {
     ImGui::TextUnformatted(lead);
     ImGui::PopTextWrapPos();
     ImGui::PopStyleColor();
-    ImGui::Dummy(ImVec2(0.0f, 8.0f));
+    if (!standouts_.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, Tokens::TX3);
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextUnformatted(kHonesty);
+        ImGui::PopTextWrapPos();
+        ImGui::PopStyleColor();
+    }
+    ImGui::Dummy(ImVec2(0.0f, 10.0f));
 
-    // Standout rows: reader name over the registry id, value right-aligned.
-    // Both name AND id are visible, exactly like the web moment panel. The
-    // tag (NEW vs STANDING against -1h), the worded direction and the id are
-    // all bridge-supplied strings rendered verbatim; only their COLORS are
-    // decided here (a new standout gets the accent, a standing one stays
-    // muted - it is the afternoon's weather, not this minute's event).
-    for (const Row& row : standouts_) {
-        const ImVec2 line_start = ImGui::GetCursorScreenPos();
+    // ── Readings ─────────────────────────────────────────────────────────
+    // Reader name over the registry id, value right-aligned; names, values,
+    // directions and ids are bridge strings rendered verbatim, in the
+    // bridge's rarest-first order. With an honest -1h baseline the rows are
+    // grouped by the bridge's isNew flag (order kept within each group): what
+    // is new this hour leads, what was already standing out (the afternoon's
+    // weather, not this minute's event) follows under its own header. The
+    // headers replace per-row NEW/STANDING tags and their legend.
+    //
+    // Columns: a slot marking the readings the search starts from (the
+    // bridge's checked set, only when there is one), the name wrapping in
+    // the space left of the value, and the value sized to the widest (capped
+    // at 40% of the list; a wider value drops under its name).
+    //
+    // The list scrolls in its own region when the panel would outgrow the
+    // viewport, so the action under it never falls out of view.
+    constexpr float kColGap = 10.0f;
+    const float mark_w = marked_count_ > 0 ? 18.0f : 0.0f;
+    const float above = ImGui::GetCursorScreenPos().y - ImGui::GetWindowPos().y;
+    const float list_max = std::max(120.0f, ImGui::GetMainViewport()->Size.y * kMaxHeightShare - above -
+                                                footer_h_ - ImGui::GetStyle().WindowPadding.y);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(0.0f, 0.0f), ImVec2(FLT_MAX, list_max));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+    ImGui::BeginChild("##moment_rows", ImVec2(w, 0.0f), ImGuiChildFlags_AutoResizeY);
+    const float lw = ImGui::GetContentRegionAvail().x;
+    float value_col = 0.0f;
+    ImGui::PushFont(Fonts::mono());
+    for (const Row& row : standouts_)
+        value_col = std::max(value_col, ImGui::CalcTextSize(row.value.c_str()).x);
+    ImGui::PopFont();
+    value_col = std::min(value_col, lw * 0.4f);
+    const float line_h = ImGui::GetTextLineHeight();
+
+    auto draw_row = [&](const Row& row) {
+        ImGui::PushFont(Fonts::mono());
+        const ImVec2 vsz = ImGui::CalcTextSize(row.value.c_str());
+        ImGui::PopFont();
+        const bool beside = vsz.x <= value_col;
+        const ImVec2 start = ImGui::GetCursorScreenPos();
+        const float x0 = ImGui::GetCursorPosX();
+        if (row.marked) {
+            drawing::draw_ui_icon(ImGui::GetWindowDrawList(), drawing::UiIcon::Search,
+                                  ImVec2(start.x + 6.0f, start.y + line_h * 0.5f), 5.0f,
+                                  ImGui::GetColorU32(Tokens::TX2), 1.4f);
+            if (ImGui::IsWindowHovered() &&
+                ImGui::IsMouseHoveringRect(start, ImVec2(start.x + mark_w, start.y + line_h)))
+                Theme::tooltip("%s", kMarkHint);
+        }
+        ImGui::SetCursorPosX(x0 + mark_w);
+        ImGui::PushTextWrapPos(x0 + (beside ? lw - value_col - kColGap : lw));
         ImGui::PushStyleColor(ImGuiCol_Text, Tokens::TX1);
         ImGui::TextUnformatted(row.name.c_str());
         ImGui::PopStyleColor();
-        if (!row.tag.empty()) {
-            ImGui::SameLine(0.0f, 8.0f);
-            ImGui::PushFont(Fonts::label());
-            ImGui::PushStyleColor(ImGuiCol_Text, row.is_new ? Tokens::BRAND : Tokens::TX3);
-            ImGui::TextUnformatted(row.tag.c_str());
-            ImGui::PopStyleColor();
-            ImGui::PopFont();
-        }
+        ImGui::PopTextWrapPos();
+        const float name_bottom = ImGui::GetCursorScreenPos().y;
 
         ImGui::PushFont(Fonts::mono());
-        const float vw = ImGui::CalcTextSize(row.value.c_str()).x;
-        ImGui::SetCursorScreenPos(ImVec2(line_start.x + w - vw, line_start.y));
+        ImGui::SetCursorScreenPos(ImVec2(start.x + lw - vsz.x,
+                                         (beside ? start.y : name_bottom) + (line_h - vsz.y) * 0.5f));
         ImGui::PushStyleColor(ImGuiCol_Text, Tokens::TX1);
         ImGui::TextUnformatted(row.value.c_str());
         ImGui::PopStyleColor();
         ImGui::PopFont();
+        ImGui::SetCursorScreenPos(ImVec2(start.x, std::max(name_bottom, ImGui::GetCursorScreenPos().y)));
 
         if (!row.detail.empty()) {
+            ImGui::SetCursorPosX(x0 + mark_w);
             ImGui::PushStyleColor(ImGuiCol_Text, Tokens::TX2);
-            ImGui::PushTextWrapPos(0.0f);
+            ImGui::PushTextWrapPos(x0 + lw);
             ImGui::TextUnformatted(row.detail.c_str());
             ImGui::PopTextWrapPos();
             ImGui::PopStyleColor();
         }
 
+        ImGui::SetCursorPosX(x0 + mark_w);
         ImGui::PushFont(Fonts::mono_xs());
         ImGui::PushStyleColor(ImGuiCol_Text, Tokens::TX3);
         if (row.provisional) {
@@ -530,17 +608,42 @@ void ResearchMomentPanel::render_body() {
         ImGui::PopStyleColor();
         ImGui::PopFont();
         ImGui::Dummy(ImVec2(0.0f, 6.0f));
-    }
+    };
 
-    if (!tags_note_.empty()) {
-        ImGui::PushStyleColor(ImGuiCol_Text, Tokens::TX3);
-        ImGui::PushTextWrapPos(0.0f);
-        ImGui::TextWrapped("NEW: not yet standing out one hour earlier (%s). STANDING: already was.",minute_header(iso_epoch(bucket_label_)-3600000).c_str());
-        ImGui::PopTextWrapPos();
-        ImGui::PopStyleColor();
-        ImGui::Dummy(ImVec2(0.0f, 6.0f));
-    }
+    const int64_t base_ms = at_ms - 3600000;
+    auto draw_group = [&](const char* title_fmt, const char* hint_fmt, bool accent, int kind) {
+        int count = 0;
+        for (const Row& row : standouts_) {
+            const int k = row.tag.empty() ? 2 : row.is_new ? 0 : 1;
+            if (k == kind) ++count;
+        }
+        if (count == 0) return;
+        if (title_fmt) {
+            char title[64], hint[128];
+            snprintf(title, sizeof(title), title_fmt, minute_clock(base_ms).c_str());
+            snprintf(hint, sizeof(hint), hint_fmt, minute_header(base_ms).c_str());
+            ImGui::PushFont(Fonts::label());
+            ImGui::PushStyleColor(ImGuiCol_Text, accent ? Tokens::BRAND : Tokens::TX3);
+            ImGui::TextUnformatted(title);
+            ImGui::PopStyleColor();
+            ImGui::PopFont();
+            if (ImGui::IsItemHovered()) Theme::tooltip("%s", hint);
+            ImGui::Dummy(ImVec2(0.0f, 4.0f));
+        }
+        for (const Row& row : standouts_) {
+            const int k = row.tag.empty() ? 2 : row.is_new ? 0 : 1;
+            if (k == kind) draw_row(row);
+        }
+        ImGui::Dummy(ImVec2(0.0f, 4.0f));
+    };
+    draw_group(kGroupNew, kGroupNewHint, true, 0);
+    draw_group(kGroupStanding, kGroupStandingHint, false, 1);
+    draw_group(nullptr, nullptr, false, 2);  // untagged: no honest baseline
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
 
+    // ── Footnotes ────────────────────────────────────────────────────────
+    const float footer_top = ImGui::GetCursorScreenPos().y;
     if (fired_rules_ > 0) {
         char fired[96];
         if (fired_rules_ == 1) {
@@ -565,19 +668,23 @@ void ResearchMomentPanel::render_body() {
         ImGui::Dummy(ImVec2(0.0f, 6.0f));
     }
 
+    // ── The one action, with what it does directly above it ──────────────
+    Theme::hairline(w, 14.0f);
+    char scope[192];
+    if (marked_count_ > 1) snprintf(scope, sizeof(scope), kSearchFromMany, marked_count_);
+    else snprintf(scope, sizeof(scope), "%s", marked_count_ == 1 ? kSearchFromOne : kSearchFromNone);
     ImGui::PushStyleColor(ImGuiCol_Text, Tokens::TX3);
     ImGui::PushTextWrapPos(0.0f);
-    ImGui::TextUnformatted(kHonesty);
+    ImGui::TextUnformatted(scope);
     ImGui::PopTextWrapPos();
     ImGui::PopStyleColor();
-
-    ImGui::Dummy(ImVec2(0.0f, 12.0f));
+    ImGui::Dummy(ImVec2(0.0f, 10.0f));
     // The flagship CTA (2026-08-24): the tallest button in the terminal on
     // purpose - "find similar" is the whole journey, so it reads as the
-    // panel's one obvious next step.
-    if (primary_button(kCtaSearch, w, 44.0f)) open_handoff(live_read_);
-    ImGui::Dummy(ImVec2(0.0f, 6.0f));
-    if (ghost_button(kCtaClose, w)) close();
+    // panel's one obvious next step. Close is the header x and Esc.
+    const bool search = primary_button(kCtaSearch, w, 44.0f);
+    footer_h_ = ImGui::GetCursorScreenPos().y - footer_top;
+    if (search) open_handoff(live_read_);
 }
 
 }  // namespace ui

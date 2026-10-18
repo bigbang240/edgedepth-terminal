@@ -25,7 +25,7 @@ static void check(bool value, const char* message) {
 }
 int main() {
     EM_ASM({ globalThis.window = globalThis.window || {}; });
-    for (auto stream : {Terminal::Stream::LiquidationLevels, Terminal::Stream::PatternAdmin, Terminal::Stream::IcebergState}) {
+    for (auto stream : {Terminal::Stream::LiquidationLevels, Terminal::Stream::PatternAdmin}) {
         sent.clear();
         StreamManager sm(1);
         int owner = 0;

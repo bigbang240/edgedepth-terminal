@@ -4,6 +4,7 @@
 #include "imgui_internal.h"   // ImGuiSelectableFlags_SpanAvailWidth
 #include <cctype>
 #include <cfloat>
+#include <cmath>
 #include <string>
 
 #include <algorithm>
@@ -343,8 +344,9 @@ namespace Theme {
         // James 2026-10-11: "remove the blue bit from above a widget heading, or improve it so it's cleaner to see
         // which tab we are on". The tab strip sits a step below the panels; a panel's selected tab takes the panel's
         // own surface, so it reads as the front of its panel, and other tabs sit dimmed on the strip (main.cpp's tab
-        // pass). Only the focused panel's selected tab carries a line, in the accent (neutral white by default), where
-        // ImGui drew its default blue; other panels carry none.
+        // pass). Only the focused panel's selected tab carries a line; other panels carry none. James 2026-10-15: the
+        // white line read as a hard rule above the widget ("maybe a thin strip of grey"), so it is a 1 px hairline a
+        // step brighter than the panel borders (BD3, the hover-border grey of the chrome preset), whatever the accent.
         c[ImGuiCol_TitleBg]           = BASE;
         c[ImGuiCol_TitleBgActive]     = BASE;
         c[ImGuiCol_TitleBgCollapsed]  = PANEL;
@@ -353,7 +355,7 @@ namespace Theme {
         c[ImGuiCol_TabActive]         = PANEL;   // TabSelected
         c[ImGuiCol_TabUnfocused]      = BASE;    // TabDimmed
         c[ImGuiCol_TabUnfocusedActive]= PANEL;   // TabDimmedSelected
-        c[ImGuiCol_TabSelectedOverline]       = BRAND;
+        c[ImGuiCol_TabSelectedOverline]       = BD3;
         c[ImGuiCol_TabDimmedSelectedOverline] = ImVec4(0, 0, 0, 0);
 
         // ── selection / headers - brand-soft, used sparingly ─────────────────
@@ -405,7 +407,7 @@ namespace Theme {
         s.GrabRounding      = Radius::R1;
         s.PopupRounding     = Radius::R3;   // floating chrome
         s.TabRounding       = 0.0f;         // dock tabs stay square with their panels
-        s.TabBarOverlineSize = 2.0f;        // the focused panel's line (see the tab colours above)
+        s.TabBarOverlineSize = 1.0f;        // the focused panel's hairline (see the tab colours above)
         // One close per panel: the tab's own x, shown on hover (the dock node's second x at the far right of every
         // tab bar is gone, as the window-menu arrow went on 2026-10-11).
         s.TabCloseButtonMinWidthSelected   = 0.0f;
@@ -597,6 +599,29 @@ namespace Theme {
         return w;
     }
 
+    ImVec4 ocean(float t) {
+        t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+        const float f = t * 5.0f;
+        const int i = std::min(4, static_cast<int>(f));
+        const float fr = f - static_cast<float>(i);
+        const ImVec4& a = Tokens::OCEAN[i];
+        const ImVec4& b = Tokens::OCEAN[i + 1];
+        return ImVec4(a.x + (b.x - a.x) * fr, a.y + (b.y - a.y) * fr, a.z + (b.z - a.z) * fr, 1.0f);
+    }
+
+    void depth_bar(ImDrawList* dl, ImVec2 min, ImVec2 max, const char* text, float frac, bool from_right, float text_y) {
+        const float cell_w = max.x - min.x;
+        const float tw = ImGui::CalcTextSize(text).x;
+        const float inset = 5.0f;
+        const float bar_w = std::min(cell_w, std::max(tw + inset * 2.0f, std::round(std::pow(frac, 0.6f) * cell_w)));
+        const ImVec4 c = ocean(0.34f + 0.52f * frac);
+        const ImVec2 a = from_right ? ImVec2(max.x - bar_w, min.y) : min;
+        const ImVec2 b = from_right ? max : ImVec2(min.x + bar_w, max.y);
+        dl->AddRectFilled(a, b, col(ImVec4(c.x, c.y, c.z, 0.34f + 0.36f * frac)), 3.0f);
+        const float x = from_right ? max.x - inset - tw : min.x + inset;
+        dl->AddText(ImVec2(std::round(x), text_y), col(frac >= 0.3f ? Tokens::TX1 : Tokens::TX2), text);
+    }
+
     void info_hint(const char* text) {
         const float s = std::round(ImGui::GetFontSize() * 0.80f);
         const ImVec2 p = ImGui::GetCursorScreenPos();
@@ -697,7 +722,15 @@ namespace Theme {
         //              fields, muted notes.
         // The surface sits a step above the canvas with a soft shadow, so a menu reads as lifted off the chart.
         int g_menu_depth = 0;                 // > 0 inside a row's settings (detail) or an open group
-        ImVector<ImVec2> g_detail_guides;     // each open detail's guide line: x, top
+        // Each open detail: its guide line (x, top), or, for the outermost one, the inset card drawn behind it once its
+        // height is known (James 2026-10-15: "make it look more polished"; a layer's settings read as one block under
+        // their row instead of loose rows on a guide line). The card is drawn into channel 0 of a split draw list after
+        // the settings (channel 1), so it sits under them; one splitter, so only the outermost detail has a card.
+        struct Detail { ImVec2 guide; float card_x0 = 0, card_x1 = 0; bool card = false; };
+        ImVector<Detail> g_details;
+        ImDrawListSplitter g_detail_splitter;
+        bool g_card_open = false;
+        constexpr float kCardPadY = 4.0f;     // inside the card, above the first setting and below the last
         constexpr float kSubRowH = 26.0f;
         constexpr float kSwitchW = 26.0f, kSwitchH = 14.0f;
         constexpr float kDetailIndent = kLabelX - 8.0f;  // a setting's label lines up with its row's label
@@ -728,28 +761,31 @@ namespace Theme {
                 dl->AddRect(b0, b1, u32(hovered ? Tokens::BD3 : Tokens::BD2), Radius::R1, 0, 1.0f);
             }
         }
+    }  // namespace
 
-        ImVec2 tag_size(const char* tag) {
-            ImGui::PushFont(Fonts::label());
-            const ImVec2 t = ImGui::CalcTextSize(tag);
-            ImGui::PopFont();
-            return ImVec2(std::round(t.x + 10.0f), std::round(t.y + 5.0f));
-        }
+    ImVec2 tag_size(const char* tag) {
+        ImGui::PushFont(Fonts::label());
+        const ImVec2 t = ImGui::CalcTextSize(tag);
+        ImGui::PopFont();
+        return ImVec2(std::round(t.x + 10.0f), std::round(t.y + 5.0f));
+    }
 
-        // Who a row is for or why it is idle, as a quiet chip at the row's right end ("ADMIN", "PILOT").
-        void draw_tag(ImDrawList* dl, ImVec2 right_mid, const char* tag) {
-            char caps[32];
-            size_t i = 0;
-            for (; tag[i] && i + 1 < sizeof(caps); ++i) caps[i] = static_cast<char>(std::toupper(static_cast<unsigned char>(tag[i])));
-            caps[i] = 0;
-            const ImVec2 sz = tag_size(caps);
-            const ImVec2 p(right_mid.x - sz.x, std::round(right_mid.y - sz.y * 0.5f));
-            dl->AddRectFilled(p, ImVec2(p.x + sz.x, p.y + sz.y), u32(Tokens::CONTROL), Radius::R1);
-            ImGui::PushFont(Fonts::label());
-            dl->AddText(ImVec2(p.x + 5.0f, p.y + 2.5f), u32(Tokens::TX3), caps);
-            ImGui::PopFont();
-        }
+    // Who a row is for or why it is idle, as a quiet chip at the row's right end ("ADMIN", "PILOT"); also a hover's
+    // qualifier (the rails hover's "PROVISIONAL").
+    void draw_tag(ImDrawList* dl, ImVec2 right_mid, const char* tag, const ImVec4& fill) {
+        char caps[32];
+        size_t i = 0;
+        for (; tag[i] && i + 1 < sizeof(caps); ++i) caps[i] = static_cast<char>(std::toupper(static_cast<unsigned char>(tag[i])));
+        caps[i] = 0;
+        const ImVec2 sz = tag_size(caps);
+        const ImVec2 p(right_mid.x - sz.x, std::round(right_mid.y - sz.y * 0.5f));
+        dl->AddRectFilled(p, ImVec2(p.x + sz.x, p.y + sz.y), u32(fill), Radius::R1);
+        ImGui::PushFont(Fonts::label());
+        dl->AddText(ImVec2(p.x + 5.0f, p.y + 2.5f), u32(Tokens::TX3), caps);
+        ImGui::PopFont();
+    }
 
+    namespace {
         // A setting under a row: label, optional mono hint, a switch at the right.
         bool sub_switch(const char* label, bool on, const char* hint) {
             const float label_w = text_w(Fonts::ui(), label);
@@ -811,7 +847,10 @@ namespace Theme {
         if (open) {
             menu_shadow();
             g_menu_depth = 0;
-            g_detail_guides.resize(0);
+            g_details.resize(0);
+            // A detail left open by a menu that returned early: forget its split (that draw list is gone) so the next
+            // card can split again.
+            if (g_card_open) { g_detail_splitter.Clear(); g_card_open = false; }
         }
         return open;
     }
@@ -906,8 +945,36 @@ namespace Theme {
         return toggle_row(label, on, locked, hint, trailing_w, false);
     }
 
-    bool menu_layer(const char* label, bool on, bool locked, const char* tag) {
-        return toggle_row(label, on, locked, tag, 0.0f, true);
+    bool menu_layer(const char* label, bool on, bool locked, const char* tag, bool* settings) {
+        if (!settings || locked) {
+            const bool clicked = toggle_row(label, on, locked, tag, 0.0f, true);
+            ui_test::mark(std::string("layer.") + label);
+            return clicked;
+        }
+        *settings = false;
+        const float tag_w = tag ? tag_size(tag).x + 8.0f : 0.0f;
+        ImGui::PushStyleColor(ImGuiCol_Text, on ? Tokens::TX1 : Tokens::TX2);
+        const MenuRow r = menu_row(label, nullptr, true, true, 30.0f + tag_w);
+        ImGui::PopStyleColor();
+        ui_test::mark(std::string("layer.") + label);
+        auto* dl = ImGui::GetWindowDrawList();
+        draw_check(dl, r.icon, on, r.hovered);
+        if (tag) draw_tag(dl, ImVec2(r.max.x - kMenuPadX - 30.0f, r.icon.y), tag);
+        const ImVec2 cursor = ImGui::GetCursorScreenPos();
+        const ImVec2 at(r.max.x - kMenuPadX - 26.0f, r.min.y + 2.0f);
+        ImGui::PushID(label);
+        ImGui::SetCursorScreenPos(at);
+        const bool clicked = ImGui::InvisibleButton("settings", ImVec2(26.0f, 26.0f));
+        ui_test::mark(std::string("layer.") + label + ".settings");
+        const bool hot = ImGui::IsItemHovered();
+        if (hot) dl->AddRectFilled(at, ImVec2(at.x + 26, at.y + 26), u32(Tokens::HOVER), Radius::R1);
+        drawing::draw_ui_icon(dl, drawing::UiIcon::ChevronRight, ImVec2(at.x + 13, at.y + 13), 5,
+                             u32(hot ? Tokens::TX1 : Tokens::TX3), 1.3f);
+        if (hot) tooltip("%s settings", label);
+        ImGui::PopID();
+        ImGui::SetCursorScreenPos(cursor);
+        *settings = clicked || r.right_clicked;
+        return r.clicked && !hot && !*settings;
     }
 
     bool menu_item_locked(const char* label, const char* reason, bool pro, bool enabled) {
@@ -993,25 +1060,56 @@ namespace Theme {
 
     void begin_menu_detail() {
         const ImVec2 p = ImGui::GetCursorScreenPos();
-        g_detail_guides.push_back(ImVec2(std::round(p.x + kMenuPadX + kMenuIconW * 0.5f) + 0.5f, p.y));
+        Detail d;
+        d.guide = ImVec2(std::round(p.x + kMenuPadX + kMenuIconW * 0.5f) + 0.5f, p.y);
+        if (!g_card_open) {
+            // The card spans the settings' rows (their hover fills it edge to edge), from a step right of the row's
+            // check box to the menu's right edge; the settings' labels keep the row label's column inside it.
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            d.card = true;
+            d.card_x0 = std::round(p.x + kDetailIndent);
+            d.card_x1 = std::round(p.x + ImGui::GetContentRegionAvail().x);
+            g_detail_splitter.Split(dl, 2);
+            g_detail_splitter.SetCurrentChannel(dl, 1);
+            g_card_open = true;
+        }
+        g_details.push_back(d);
         ++g_menu_depth;
         ImGui::Indent(kDetailIndent);
         ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrap_width());
+        if (d.card) ImGui::SetCursorPosY(ImGui::GetCursorPosY() + kCardPadY);
     }
 
     void end_menu_detail() {
-        ImGui::Dummy(ImVec2(0.0f, 4.0f));
+        const bool card = !g_details.empty() && g_details.back().card;
+        // The last setting's bottom, whatever spacing it left after itself.
+        const float last = ImGui::GetItemRectMax().y;
+        if (!card) ImGui::Dummy(ImVec2(0.0f, 4.0f));
         ImGui::PopTextWrapPos();
         ImGui::Unindent(kDetailIndent);
         g_menu_depth = std::max(0, g_menu_depth - 1);
-        if (!g_detail_guides.empty()) {
-            // The guide: from just under the row's check box to the last setting, joining them to their row.
-            const ImVec2 g = g_detail_guides.back();
-            g_detail_guides.pop_back();
-            const float bottom = ImGui::GetCursorScreenPos().y - 8.0f;
-            if (bottom > g.y + 4.0f)
-                ImGui::GetWindowDrawList()->AddLine(ImVec2(g.x, g.y - 6.0f), ImVec2(g.x, bottom), u32(Tokens::BD2), 1.0f);
+        if (g_details.empty()) return;
+        const Detail d = g_details.back();
+        g_details.pop_back();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        if (d.card) {
+            // Behind the settings: a fill a step above the menu with a hairline edge, rounded as the rows' hover. The
+            // next row starts one item spacing under it.
+            const float bottom = std::max(last, d.guide.y + 4.0f) + kCardPadY;
+            g_detail_splitter.SetCurrentChannel(dl, 0);
+            const ImVec2 a(d.card_x0, d.guide.y), b(d.card_x1, bottom);
+            dl->AddRectFilled(a, b, u32(ImLerp(Tokens::MENU, Tokens::HOVER, 0.42f)), Radius::R2);
+            dl->AddRect(a, b, u32(Tokens::BD1), Radius::R2, 0, 1.0f);
+            g_detail_splitter.Merge(dl);
+            g_card_open = false;
+            ImGui::SetCursorScreenPos(ImVec2(ImGui::GetCursorScreenPos().x, bottom));
+            ImGui::Dummy(ImVec2(0.0f, 0.0f));
+            return;
         }
+        // A detail inside a card: the guide, from just under the row's check box to the last setting.
+        const float bottom = ImGui::GetCursorScreenPos().y - 8.0f;
+        if (bottom > d.guide.y + 4.0f)
+            dl->AddLine(ImVec2(d.guide.x, d.guide.y - 6.0f), ImVec2(d.guide.x, bottom), u32(Tokens::BD2), 1.0f);
     }
 
     int menu_choice(const char* id, const char* const* labels, int n, int selected) {
@@ -1076,6 +1174,7 @@ namespace Theme {
             if (ImGui::InvisibleButton("##seg", ImVec2(widths[i], h))) out = i;
             const bool hovered = ImGui::IsItemHovered();
             ImGui::PopID();
+            if (ui_test::enabled()) ui_test::mark(std::string(id) + "." + std::string(labels[i], ImGui::FindRenderedTextEnd(labels[i])));
             if (i == selected)
                 dl->AddRectFilled(ImVec2(x, p.y + inset), ImVec2(x + widths[i], p.y + h - inset), u32(Tokens::CONTROL_ACTIVE), Radius::R1);
             else if (hovered)

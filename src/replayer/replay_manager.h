@@ -244,6 +244,8 @@ public:
     // frame paused until the user reopens replay; never silently resume live.
     void on_transport_interrupted(const WebSocketClient* socket);
     bool transport_interrupted() const { return transport_interrupted_; }
+    // A deliberate retry needs a retained historical context and a usable lane.
+    bool can_retry_historical_position() const;
 
     // ─── Transport-loss recovery ─────────────────────────────────────────
     // A dropped replay socket ends its session on the box. Instead of a dead
@@ -639,6 +641,16 @@ private:
         int64_t lost_at_ms = 0;       // wall ms of the drop
         int64_t attempt_at_ms = 0;    // wall ms the current attempt went out
         int64_t next_try_at_ms = 0;   // wall ms the next attempt may go out
+        // Why the socket went, for the "lost" telemetry (hub task replay-socket-drops):
+        // the browser's close code and wasClean (1006 unclean: no close frame came
+        // back, the path dropped), how long the socket had been open, how long since
+        // its last binary frame, and whether the tab was hidden.
+        int close_code = 0;
+        bool close_clean = false;
+        std::string close_reason;
+        double socket_open_ms = -1;
+        double last_frame_age_ms = -1;
+        bool hidden = false;
     };
     static constexpr int     RECONNECT_MAX_ATTEMPTS = 3;
     static constexpr int64_t RECONNECT_ATTEMPT_TIMEOUT_MS = 30000;
@@ -646,7 +658,7 @@ private:
     ReconnectStatus reconnect_;
     bool reconnect_issuing_ = false;  // our own re-request, not a viewer's new replay
     bool paused_for_hidden_ = false;  // on_visibility_change paused this replay
-    bool arm_reconnect();
+    bool arm_reconnect(const WebSocketClient* socket);
     void begin_reconnect_attempt();
     void finish_reconnect(bool resumed);
     void cancel_reconnect();
@@ -696,6 +708,18 @@ private:
     static constexpr int64_t JOIN_WS_WAIT_MAX_MS = 15000;
     bool pending_join_ = false;           // A join is waiting on the WS
     int64_t pending_join_since_ms_ = 0;   // Wall time the join was first deferred
+
+    // ─── Create-and-join (replay_create.h) ────────────────────────────────
+    // A generic replay creates its session inside join_replay. While this is
+    // set the join carrying the create body is waiting (socket or token) or in
+    // flight; replay_joined, replay_create_error or an old box's fallback
+    // error clears it. The body is kept so the fallback POST sends the same bytes.
+    bool create_via_join_ = false;
+    std::string pending_create_body_;
+    int64_t create_requested_ms_ = 0;
+    // The box created the session and is sending the chart's first history
+    // page behind replay_joined, so the replay context must not ask again.
+    bool history_preloaded_ = false;
 
     // ─── Drip-feed state (after rewind, feed buffered data as clock advances)
     bool drip_feed_active_ = false;
@@ -753,6 +777,8 @@ private:
     void send_control_with_value(const char* action, const char* key, double value);
     void send_control_with_int64(const char* action, const char* key, int64_t value);
     void join_session();
+    void send_create_and_join();
+    void post_session_create(const std::string& body);
     void transition(State new_state);
     void reset();
     int64_t now_ms() const;

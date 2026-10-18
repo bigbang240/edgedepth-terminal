@@ -57,6 +57,10 @@ public:
     // Threading: when set, dispatch_* methods queue instead of calling
     // widget callbacks directly. Call drain_dispatches() on main thread.
     void set_dispatch_queue(DispatchQueue* q) { dispatch_queue_ = q; }
+    // Received trades and candles still waiting for the main thread, and every
+    // dispatch ever dropped by a full queue (both false/0 without a data thread).
+    bool dispatch_backlogged() const;
+    uint64_t dispatch_dropped() const;
 
     void subscribe_direct(const StreamKey& key, void* owner);
     void unsubscribe_direct(const StreamKey& key, void* owner);
@@ -129,6 +133,7 @@ public:
     bool request_historical_liqmap2(const Terminal::Pair& pair, int64_t start_ms, int64_t end_ms) const;
     bool request_liqmap2_scorecard(const Terminal::Pair& pair) const;
     bool request_historical_liqmap2_rails(const Terminal::Pair& pair, int64_t start_ms, int64_t end_ms) const;
+    bool request_historical_hl_rails(const Terminal::Pair& coin, int64_t start_ms, int64_t end_ms) const;
     void request_historical_oi(const Terminal::Pair& pair, int64_t timeframe, int count) const;
     void request_historical_funding(const Terminal::Pair& pair, int64_t timeframe, int count) const;
     // Indicators V1 (F3 absolute range): vpin_buckets history. start_ms/end_ms

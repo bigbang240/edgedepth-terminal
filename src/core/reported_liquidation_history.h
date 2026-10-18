@@ -1,10 +1,12 @@
 #pragma once
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <map>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 #include <nlohmann/json.hpp>
 
@@ -19,14 +21,14 @@ public:
     // lookback, so coverage is kept for 92 days of tiles. Markets run about 500 to 1,100 reports a day (Bybit and
     // Binance BTC, ETH, SOL, STRK, Oct 2026), so 200,000 reports hold months of an ordinary market.
     static constexpr size_t max_events = 200000, max_tiles = 92 * 96;
-    static constexpr int day_tiles = 96, legacy_batch_tiles = 24;
+    static constexpr int day_tiles = 96, week_tiles = 7 * day_tiles, legacy_batch_tiles = 24;
     std::vector<Event> events;
     struct Coverage { int64_t end = 0, read_at = 0; };
     std::map<int64_t,Coverage> loaded;
     bool limited = false;
     std::string error;
     int64_t subscribed_at = 0;
-    uint64_t revision = 0;
+    uint64_t revision = 0;  // changes with the reports, never reused by another market's cache (charts key on it)
     bool connected = false;
     uint64_t connection_generation = 0;
     ReportedLiquidationHistory() = default;
@@ -39,14 +41,15 @@ public:
     // Explicit reload may reclaim an exhausted cache so an older, narrower
     // viewport can be loaded. Reconnects retain received events instead.
     void reload() {
-        if(limited) { events.clear(); ++revision; }
+        if(limited) { events.clear(); bump(); }
         reset_requests();
     }
     void connection(bool open,int64_t now,uint64_t generation=0) {
         if (generation != connection_generation) {
             connection_generation=generation; connected=false; cancel();
         }
-        if(open && !connected) { subscribed_at=now; reset_requests(); }
+        // A new connection may reach an upgraded server: try a week again.
+        if(open && !connected) { subscribed_at=now; batch_tiles=week_tiles; reset_requests(); }
         if(!open && connected) cancel();
         if(open != connected) settle();
         connected=open;
@@ -70,13 +73,13 @@ public:
             if(e.filled_qty>0)at->filled_qty=e.filled_qty;
             return;
         }
-        events.insert(at,e); ++revision;
+        events.insert(at,e); bump();
         enforce_limit();
     }
     void trim_after(int64_t cutoff) {
         cancel();loaded.clear();
         events.erase(std::upper_bound(events.begin(),events.end(),cutoff,[](int64_t t,const Event& e){return t<e.timestamp_ms;}),events.end());
-        ++revision;
+        bump();
     }
     bool covers(int64_t from,int64_t to) const {
         if(to<=from)return false;
@@ -88,43 +91,56 @@ public:
         }
         return false;
     }
+    // also_from/also_to: a second window planned with the first (a candle chart's callout window, behind its view).
     nlohmann::json request(const std::string& exchange,const std::string& symbol,
-                          int64_t from,int64_t to,int64_t now,int64_t lookback,double steady) {
+                          int64_t from,int64_t to,int64_t now,int64_t lookback,double steady,
+                          int64_t also_from=0,int64_t also_to=0) {
         if(loading() && steady-sent_at>10000){cancel();error="History unavailable on this connection";retry_at=steady+30000;}
         if(!connected || loading() || steady<retry_at || limited)return {};
-        // The whole window within the lookback, newest first, a day per request (six hours on older servers).
-        // A window older than the lookback stays uncovered, and covers() says so; nothing is clipped silently.
-        from=std::max({int64_t(1),from,now-lookback+1000});
-        to=std::min(to,now-2000);
-        if(to<=from)return {};
-        const int64_t last=(to-1)/tile_ms*tile_ms, first=from/tile_ms*tile_ms;
+        // Both windows within the lookback, walked as one, newest first, a week per request (a day, six hours or
+        // 15 minutes on older servers). Overlapping or touching windows merge, so the callout window rides the
+        // view's requests instead of following them. A window older than the lookback stays uncovered, and
+        // covers() says so; nothing is clipped silently.
+        const int64_t edge=now-lookback+1000;
+        struct Span { int64_t first=0,last=0,to=0; } spans[2];
+        int count=0;
+        for(auto [f,t]:{std::pair{from,to},std::pair{also_from,also_to}}){
+            f=std::max({int64_t(1),f,edge});t=std::min(t,now-2000);
+            if(t>f)spans[count++]={f/tile_ms*tile_ms,(t-1)/tile_ms*tile_ms,t};
+        }
+        if(!count)return {};
+        if(count==2){
+            if(std::pair{spans[1].last,spans[1].to}>std::pair{spans[0].last,spans[0].to})std::swap(spans[0],spans[1]);
+            if(spans[1].last+tile_ms>=spans[0].first){spans[0].first=std::min(spans[0].first,spans[1].first);count=1;}
+        }
         // A settled window is rescanned at most twice a second: a wide view holds thousands of tiles. Two are
-        // remembered, as a chart asks for its view and then the window behind its callouts' typical candle.
-        for(const auto& w:idle)if(steady<w.until && w.first==first && w.last==last)return {};
+        // remembered, for two charts on one market.
+        const std::array<int64_t,4> window{spans[0].first,spans[0].last,count>1?spans[1].first:0,count>1?spans[1].last:0};
+        for(const auto& w:idle)if(steady<w.until && w.window==window)return {};
         // Load settled/missing sections before refreshing the moving tail.
-        for(int pass=0;pass<2;++pass)for(int64_t start=last;start>=first;start-=tile_ms){
-            int64_t a=std::max(start,now-lookback+1000);
-            const int64_t b=std::min(start+tile_ms,to);
-            auto it=loaded.find(a);
-            const bool missing=it==loaded.end();
+        for(int pass=0;pass<2;++pass)for(int s=0;s<count;++s)for(int64_t start=spans[s].last;start>=spans[s].first;start-=tile_ms){
+            int64_t a=std::max(start,edge);
+            const int64_t b=std::min(start+tile_ms,spans[s].to);
+            const Coverage* held=held_at(start,a);
+            const bool missing=!held;
             if((pass==0)!=missing)continue;
             // Re-read recent tiles to recover delayed DB writes and reconnect
             // overlap. A successful DB read does not assert source completeness.
-            if(!missing && (it->second.end>=b && b<now-120000))continue;
-            if(!missing && now-it->second.read_at<10000)continue;
+            if(!missing && (held->end>=b && b<now-120000))continue;
+            if(!missing && now-held->read_at<10000)continue;
             if(b<=a)continue;
             // Coalesce only adjacent missing tiles; retain small tail refreshes.
-            if(missing)for(int n=1;n<batch_tiles && start-int64_t(n)*tile_ms>=first;++n){
-                const int64_t previous=std::max(start-int64_t(n)*tile_ms,now-lookback+1000);
-                if(loaded.find(previous)!=loaded.end())break;
-                a=previous;
+            if(missing)for(int n=1;n<batch_tiles && start-int64_t(n)*tile_ms>=spans[s].first;++n){
+                const int64_t previous=start-int64_t(n)*tile_ms;
+                if(held_at(previous,std::max(previous,edge)))break;
+                a=std::max(previous,edge);
             }
             pending_from=a;pending_to=b;pair_exchange=exchange;pair_symbol=symbol;
             pending_id="reported-liq-"+std::to_string(++serial);pending[pending_id]=this;
             sent_at=steady;error.clear();
             return {{"method","get_reported_liquidations"},{"data",{{"request_id",pending_id},{"pair",{{"exchange",exchange},{"symbol",symbol}}},{"from_ms",a},{"to_ms",b}}}};
         }
-        idle[idle_next]={first,last,steady+500};idle_next^=1;
+        idle[idle_next]={window,steady+500};idle_next^=1;
         return {};
     }
     static void receive(const nlohmann::json& j) {
@@ -134,14 +150,24 @@ public:
     }
 private:
     inline static uint64_t serial=0;
+    inline static uint64_t revisions=0;
+    void bump(){revision=++revisions;}
     inline static std::map<std::string,ReportedLiquidationHistory*> pending;
     std::string pending_id,pair_exchange,pair_symbol;
     int64_t pending_from=0,pending_to=0;
     double sent_at=0,retry_at=0;
-    struct Idle { int64_t first=0,last=0; double until=0; } idle[2];
+    struct Idle { std::array<int64_t,4> window{}; double until=0; } idle[2];
     int idle_next=0;
     void settle(){idle[0]=idle[1]=Idle{};}
-    int batch_tiles=day_tiles; // A day; shrink on dense ranges or older servers.
+    int batch_tiles=week_tiles; // A week; shrink on dense ranges or older servers.
+    // The coverage read for the tile at start, from a (start, or the lookback edge inside the oldest tile). The
+    // edge moves with the clock, so the oldest tile's key is any read inside it at or before a, never a itself.
+    const Coverage* held_at(int64_t start,int64_t a) const {
+        auto it=loaded.upper_bound(a);
+        if(it==loaded.begin())return nullptr;
+        --it;
+        return it->first>=start?&it->second:nullptr;
+    }
     void enforce_limit(){
         if(events.size()<=max_events)return;
         events.erase(events.begin(),events.begin()+static_cast<ptrdiff_t>(events.size()-max_events));
@@ -156,11 +182,12 @@ private:
         if(j.contains("error")) {
             if(pending_to-pending_from>tile_ms &&
                (j["error"]=="report_limit" || j["error"]=="outside_history_window")) {
-                // Servers before 2026-10-11 accept six hours, the oldest only 15 minutes. Dense batches split
-                // without recording coverage or discarding received reports.
+                // Servers before 2026-10-18 accept a day, before 2026-10-11 six hours, the oldest only 15 minutes:
+                // a refused span steps down one size at a time. Dense batches halve. Neither records coverage nor
+                // discards received reports.
                 const int asked=int((pending_to-pending_from+tile_ms-1)/tile_ms);
-                batch_tiles=j["error"]=="outside_history_window"?(asked>legacy_batch_tiles?legacy_batch_tiles:1):
-                    std::max(1,asked/2);
+                batch_tiles=j["error"]=="outside_history_window"?
+                    (asked>day_tiles?day_tiles:asked>legacy_batch_tiles?legacy_batch_tiles:1):std::max(1,asked/2);
                 error.clear();return;
             }
             if(j["error"]=="busy"){error="History busy; retrying";retry_at=sent_at+1500;}
@@ -202,9 +229,9 @@ private:
             if(k==incoming.size() || (i<events.size() && key(events[i])<=key(incoming[k])))append(events[i++]);
             else append(incoming[k++]);
         }
-        events.swap(merged);++revision;
+        events.swap(merged);bump();
         // Keep coverage tile-granular so zoom/pan and moving-tail refreshes
-        // reuse the existing cache rather than re-reading a six-hour batch.
+        // reuse the existing cache rather than re-reading a whole batch.
         for(int64_t start=pending_from;start<pending_to;){
             const int64_t end=std::min((start/tile_ms+1)*tile_ms,pending_to);
             loaded[start]={end,j["retrieved_at_ms"].template get<int64_t>()};

@@ -54,12 +54,13 @@ namespace Indicators {
         }
 
         void remove_indicator(size_t index);
+        void swap_indicators(size_t first, size_t second);
 
         template<typename T>
         bool remove_indicator_of_type() {
             for (size_t i = 0; i < indicators.size(); ++i) {
                 if (dynamic_cast<T*>(indicators[i].get())) {
-                    indicators.erase(indicators.begin() + i);
+                    remove_indicator(i);
                     return true;
                 }
             }
@@ -94,7 +95,7 @@ namespace Indicators {
         std::vector<int> stacked_plot_indices() const;
 
         std::vector<std::unique_ptr<IndicatorBase>> indicators;
-        std::vector<bool> pinned_;     // parallel to indicators; survives reorder via resize
+        std::vector<bool> pinned_;     // parallel to indicators; moves with its indicator
         int  active_tab_ = 0;
         bool collapsed_ = false;
         // F2 pilot: index of the indicator whose settings popover is open

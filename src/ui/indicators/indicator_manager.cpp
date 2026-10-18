@@ -2,6 +2,7 @@
 #include "ui/chart_widget.h"
 #include "ui/custom_implot.h"
 #include "rendering/theme.h"
+#include "core/ui_test_marks.h"
 #include <algorithm>
 #include <cstdio>
 
@@ -21,20 +22,35 @@ namespace Indicators {
         if (index < indicators.size()) {
             indicators.erase(indicators.begin() + index);
             if (index < pinned_.size()) pinned_.erase(pinned_.begin() + index);
+            if (active_tab_ > static_cast<int>(index)) --active_tab_;
+            active_tab_ = std::clamp(active_tab_, 0, std::max(0, static_cast<int>(indicators.size()) - 1));
+            if (settings_open_idx_ == static_cast<int>(index)) {
+                settings_open_idx_ = -1;
+                settings_popup_pending_ = false;
+            } else if (settings_open_idx_ > static_cast<int>(index)) --settings_open_idx_;
+        }
+    }
+
+    void IndicatorManager::swap_indicators(size_t first, size_t second) {
+        if (first >= indicators.size() || second >= indicators.size()) return;
+        std::swap(indicators[first], indicators[second]);
+        const bool pin = pinned_[first];
+        pinned_[first] = pinned_[second]; pinned_[second] = pin;
+        for (int* index : {&active_tab_, &settings_open_idx_}) {
+            if (*index == static_cast<int>(first)) *index = static_cast<int>(second);
+            else if (*index == static_cast<int>(second)) *index = static_cast<int>(first);
         }
     }
 
     // Stacked plots this frame: every pinned indicator, plus the active tab if
-    // it isn't already pinned. Active goes last so it owns the time axis.
+    // it isn't already pinned. Selection never changes the saved panel order.
     std::vector<int> IndicatorManager::stacked_plot_indices() const {
         std::vector<int> out;
         out.reserve(indicators.size());
         for (int i = 0; i < static_cast<int>(indicators.size()); ++i) {
-            if (i < static_cast<int>(pinned_.size()) && pinned_[i] && i != active_tab_)
+            if ((i < static_cast<int>(pinned_.size()) && pinned_[i]) || i == active_tab_)
                 out.push_back(i);
         }
-        if (active_tab_ >= 0 && active_tab_ < static_cast<int>(indicators.size()))
-            out.push_back(active_tab_);
         return out;
     }
 
@@ -80,17 +96,16 @@ namespace Indicators {
         if (active_tab_ >= static_cast<int>(indicators.size()))
             active_tab_ = static_cast<int>(indicators.size()) - 1;
         if (active_tab_ < 0) active_tab_ = 0;
-        IndicatorBase* active = indicators[active_tab_].get();
+        const std::vector<int> plot_idx = stacked_plot_indices();
 
         const float avail_w = ImGui::GetContentRegionAvail().x;
         const ImVec2 h0 = ImGui::GetCursorScreenPos();
         ImDrawList* dl = ImGui::GetWindowDrawList();
 
         int pending_delete = -1;
-        // The pane's close control removes every subplot rather than hiding
-        // the pane: a hidden pane left the Indicators menu reporting them as
-        // active with nothing on screen. Applied after the plots end, like
-        // a single removal.
+        int pending_move_from = -1, pending_move_to = -1;
+        // Only the collapsed strip closes the whole stack. Expanded plots
+        // remove themselves, after every ImPlot has finished rendering.
         bool pending_close = false;
 
         // ── Pane controls: tab pills (left) · live value · collapse · close
@@ -98,7 +113,10 @@ namespace Indicators {
         //    volume bars sit flush under the chart, or in a slim strip while
         //    collapsed. ImPlot registers its frame with AllowOverlap, so items
         //    submitted after EndPlot take the hover over the plot. ──
-        auto draw_controls = [&](ImVec2 o, float w, float h) {
+        auto draw_controls = [&](ImVec2 o, float w, float h, int slot) {
+            const bool top = slot <= 0;
+            const int index = slot < 0 ? active_tab_ : plot_idx[slot];
+            IndicatorBase* active = indicators[index].get();
             const float row_h = 20.0f;
             const float row_y = o.y + (h - row_h) * 0.5f;
             // Over a plot the band sits on the tallest bars; a soft backdrop
@@ -110,8 +128,12 @@ namespace Indicators {
             ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(2.0f, 0.0f));
             ImGui::PushFont(Theme::Fonts::ui());
             ImGui::SetCursorScreenPos(ImVec2(o.x + 6.0f, row_y + (row_h - ImGui::GetFrameHeight()) * 0.5f));
-            for (int i = 0; i < static_cast<int>(indicators.size()); ++i) {
-                if (i) ImGui::SameLine();
+            bool first_label = true;
+            for (int i = top ? 0 : index; i < (top ? static_cast<int>(indicators.size()) : index + 1); ++i) {
+                // Each stacked plot names itself. Unstacked choices remain reachable in the top row.
+                if (!collapsed_ && i != index && pinned_[i]) continue;
+                if (!first_label) ImGui::SameLine();
+                first_label = false;
                 ImGui::PushID(i);
                 const bool on = (i == active_tab_);
                 const bool pin = (i < static_cast<int>(pinned_.size()) && pinned_[i]);
@@ -166,11 +188,15 @@ namespace Indicators {
                 const float cx = rx + btn * 0.5f, cy = by + btn * 0.5f, r = 3.5f;
                 dl->AddLine(ImVec2(cx - r, cy - r), ImVec2(cx + r, cy + r), c, 1.3f);
                 dl->AddLine(ImVec2(cx - r, cy + r), ImVec2(cx + r, cy - r), c, 1.3f);
-                if (hov) Theme::tooltip("Remove subplots");
-                if (clk) pending_close = true;
+                if (ui_test::enabled()) ui_test::mark(std::string("indicator.close.") + active->get_name());
+                if (hov) Theme::tooltip(collapsed_ ? "Remove subplots" : "Remove %s", active->get_name());
+                if (clk) {
+                    if (collapsed_) pending_close = true;
+                    else pending_delete = index;
+                }
             }
-            rx -= btn + 2.0f;
-            {
+            if (top) {
+                rx -= btn + 2.0f;
                 ImGui::SetCursorScreenPos(ImVec2(rx, by));
                 const bool clk = ImGui::InvisibleButton("##indi_col", ImVec2(btn, btn));
                 const bool hov = ImGui::IsItemHovered();
@@ -187,8 +213,30 @@ namespace Indicators {
                 if (hov) Theme::tooltip(collapsed_ ? "Expand" : "Collapse");
                 if (clk) collapsed_ = !collapsed_;
             }
+            if (!collapsed_) {
+                // Swap adjacent visible panels; mutations wait until all plots have ended.
+                for (const int direction : {1, -1}) {
+                    rx -= btn + 2.0f;
+                    const int target = slot + direction;
+                    const bool enabled = target >= 0 && target < static_cast<int>(plot_idx.size());
+                    ImGui::SetCursorScreenPos(ImVec2(rx, by));
+                    ImGui::BeginDisabled(!enabled);
+                    const bool clk = ImGui::InvisibleButton(direction < 0 ? "##indi_up" : "##indi_down", ImVec2(btn, btn));
+                    if (ui_test::enabled()) ui_test::mark(std::string(direction < 0 ? "indicator.up." : "indicator.down.") + active->get_name());
+                    const bool hov = ImGui::IsItemHovered();
+                    const ImU32 c = Theme::u32(enabled ? (hov ? Theme::Tokens::TX1 : Theme::Tokens::TX3) : Theme::Tokens::TX4);
+                    if (hov) dl->AddRectFilled(ImVec2(rx, by), ImVec2(rx + btn, by + btn), Theme::u32(Theme::Tokens::HOVER), 2.0f);
+                    const float cx = rx + btn * 0.5f, cy = by + btn * 0.5f;
+                    const ImVec2 pts[] = {ImVec2(cx - 3, cy), ImVec2(cx, cy + 3 * direction), ImVec2(cx + 3, cy)};
+                    dl->AddPolyline(pts, 3, c, 0, 1.4f);
+                    dl->AddLine(ImVec2(cx, cy - 4 * direction), ImVec2(cx, cy + 3 * direction), c, 1.4f);
+                    if (hov) Theme::tooltip(direction < 0 ? "Move up" : "Move down");
+                    if (clk) { pending_move_from = index; pending_move_to = plot_idx[target]; }
+                    ImGui::EndDisabled();
+                }
+            }
 
-            // Live value of the active tab, right of the plot, left of the buttons.
+            // Live value of this plot, right of the plot, left of the buttons.
             // Explicit tag color (regime etc.) wins over direction coloring.
             double latest = 0.0;
             if (active && active->get_latest_value(latest)) {
@@ -212,7 +260,7 @@ namespace Indicators {
             }
 
             // Per-indicator settings popover (opened from the tab menu).
-            if (settings_open_idx_ >= 0) {
+            if (top && settings_open_idx_ >= 0) {
                 if (settings_open_idx_ < static_cast<int>(indicators.size()) &&
                     indicators[settings_open_idx_]->has_settings()) {
                     if (settings_popup_pending_) {
@@ -242,15 +290,9 @@ namespace Indicators {
                 pending_close = false; pending_delete = -1;
                 return true;
             }
-            if (pending_delete < 0) return false;
-            indicators.erase(indicators.begin() + pending_delete);
-            if (pending_delete < static_cast<int>(pinned_.size()))
-                pinned_.erase(pinned_.begin() + pending_delete);
-            pending_delete = -1;
-            if (indicators.empty()) return true;
-            if (active_tab_ >= static_cast<int>(indicators.size()))
-                active_tab_ = static_cast<int>(indicators.size()) - 1;
-            return false;
+            if (pending_delete >= 0) remove_indicator(pending_delete);
+            else if (pending_move_from >= 0) swap_indicators(pending_move_from, pending_move_to);
+            return indicators.empty();
         };
 
         // Seam between the chart and the pane: one hairline, no band.
@@ -259,7 +301,7 @@ namespace Indicators {
 
         if (collapsed_) {
             const float strip_h = Theme::Layout::PANEL_HEADER_H;
-            draw_controls(h0, avail_w, strip_h);
+            draw_controls(h0, avail_w, strip_h, -1);
             ImGui::SetCursorScreenPos(ImVec2(h0.x, h0.y + strip_h));
             ImGui::Dummy(ImVec2(0.0f, 0.0f));
             apply_pending_delete();
@@ -271,7 +313,6 @@ namespace Indicators {
         //    Heights are per-indicator (drag the splitter strip between two
         //    plots to resize the one above; the chart reallocates next frame
         //    via pane_height()). ──
-        const std::vector<int> plot_idx = stacked_plot_indices();
         const float total_h = ImGui::GetContentRegionAvail().y;
         if (total_h < 30.0f || plot_idx.empty()) return;
 
@@ -310,17 +351,6 @@ namespace Indicators {
 
                 ImPlot::SetupAxisLinks(ImAxis_X1, nullptr, nullptr);
                 ind->render_content(x_min, x_max);
-
-                // Indicator name tag, top-left of the LOWER stacked plots. The
-                // top plot carries the tab row instead (draw_controls below),
-                // which is what used to print the name twice on the Vol pane.
-                if (slot > 0) {
-                    const ImVec2 pp = ImPlot::GetPlotPos();
-                    ImGui::PushFont(Theme::Fonts::label());
-                    dl->AddText(ImVec2(pp.x + 6.0f, pp.y + 4.0f),
-                                Theme::u32(Theme::Tokens::TX3), ind->get_name());
-                    ImGui::PopFont();
-                }
 
                 // Latest-value axis tag - explicit tag color (regime etc.)
                 // wins; otherwise direction-colored as before
@@ -366,14 +396,14 @@ namespace Indicators {
 
                 ImPlot::EndPlot();
 
-                // Pane controls ride the top plot's upper band. Restore the
+                // Each plot owns its controls. Restore the
                 // layout cursor afterwards so the next stacked plot lands
                 // where EndPlot left it.
-                if (slot == 0) {
-                    const ImVec2 after = ImGui::GetCursorScreenPos();
-                    draw_controls(plot_pos, plot_size.x, 24.0f);
-                    ImGui::SetCursorScreenPos(after);
-                }
+                const ImVec2 after = ImGui::GetCursorScreenPos();
+                ImGui::PushID(plot_idx[slot]);
+                draw_controls(plot_pos, plot_size.x, 24.0f, slot);
+                ImGui::PopID();
+                ImGui::SetCursorScreenPos(after);
             }
             ImPlot::PopStyleVar();
 

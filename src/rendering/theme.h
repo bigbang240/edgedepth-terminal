@@ -232,6 +232,12 @@ namespace Theme {
     // right_x, centred on cy; at least as wide as "+00.00%" so a column of pills lines up. Returns its width.
     float change_pill(ImDrawList* dl, float right_x, float cy, double pct, float px);
     float change_pill_width(float px);   // the column's width (that of "+00.00%")
+    // The OCEAN ramp at t in [0, 1] (DOM depth: small = deep blue, large = green/yellow).
+    ImVec4 ocean(float t);
+    // A DOM depth cell in [min, max]: a bar from the price side (from_right for bids, whose price column is on their
+    // right) that always holds its whole number and runs on by size (frac^0.6 of the cell), brighter on the OCEAN
+    // ramp as it grows, kept short of the palest end so the number stays readable. The number sits at text_y.
+    void depth_bar(ImDrawList* dl, ImVec2 min, ImVec2 max, const char* text, float frac, bool from_right, float text_y);
     // A small circled "i" whose hover shows text; replaces "?" buttons.
     void info_hint(const char* text);
     // A hairline across width at the cursor, with vertical room around it.
@@ -270,7 +276,7 @@ namespace Theme {
                      float trailing_w = 0.0f);
     // A layer or indicator row (Layers, Indicators): menu_toggle with the tag
     // ("admin", "pilot", "not on HL") drawn as a quiet chip at the right.
-    bool menu_layer(const char* label, bool on, bool locked = false, const char* tag = nullptr);
+    bool menu_layer(const char* label, bool on, bool locked = false, const char* tag = nullptr, bool* settings = nullptr);
     // An action the viewer cannot take yet, under its own name: lock, label,
     // and the reason on a second line. pro adds the mint PRO tag.
     bool menu_item_locked(const char* label, const char* reason, bool pro, bool enabled = true);
@@ -302,6 +308,11 @@ namespace Theme {
     // The upgrade tag (mint outline, "PRO"): menus, timeframe groups, locks.
     ImVec2 pro_tag_size();
     void draw_pro_tag(ImDrawList* dl, ImVec2 top_left);
+    // The quiet tag (micro caps on a soft fill, "ADMIN", "PROVISIONAL"): layer rows and hovers. draw_tag upper-cases
+    // and puts its right edge at right_mid; tag_size measures the text as given. A hover's lighter surface takes a
+    // lighter fill (CONTROL_HOVER) so the chip still reads.
+    ImVec2 tag_size(const char* tag);
+    void draw_tag(ImDrawList* dl, ImVec2 right_mid, const char* tag, const ImVec4& fill = Tokens::CONTROL);
 
     // ── Chart chips and loading ─────────────────────────────────────────────
     // Chips drawn over a chart (OHLC readout, status, layer keys) register their rectangle for the frame; the chart's

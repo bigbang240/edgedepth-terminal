@@ -87,6 +87,22 @@ public:
     void request_history(const Terminal::Pair& pair, int64_t start_ms, int64_t end_ms,
                          StreamManager* sm);
 
+    // History request bookkeeping, per market (main thread). A range counts as
+    // covered only once its completion sentinel reports success. A failure, a
+    // refusal or no reply within kHistoryReplyTimeoutMs backs off, then lets the
+    // range be asked again; a failed range is never marked covered.
+    static constexpr int64_t kHistoryReplyTimeoutMs = 20000;
+    static constexpr int64_t kHistoryRetryMinMs = 3000;   // doubles per failure
+    static constexpr int64_t kHistoryRetryMaxMs = 60000;
+    // True when [start_ms, end_ms] should be asked for now. The range is then
+    // widened to include what is already covered and becomes the one in flight.
+    bool begin_history_request(const std::string& market, int64_t& start_ms,
+                               int64_t& end_ms, int64_t now_ms);
+    // Completion sentinel. start/end echo the request; 0/0 (older servers,
+    // packs) answers whatever is in flight for the market.
+    void finish_history_request(const std::string& market, int64_t start_ms,
+                                int64_t end_ms, bool failed, int64_t now_ms);
+
     // Called by message handler when a TickVolumeUpdate arrives (live or historical).
     void on_tick_volume_update(const std::string& symbol, const pb::TickVolumeUpdate& update);
 
@@ -156,7 +172,7 @@ public:
     float imbalance_ratio  = 3.0f;    // threshold for imbalance detection
 
     // ── State queries ────────────────────────────────────────────────────
-    bool is_loading() const { return loading_; }
+    bool is_loading(const std::string& market) const;
     int  candle_count(const std::string& symbol) const;
 
 private:
@@ -167,7 +183,6 @@ private:
     std::unordered_map<std::string, std::unordered_map<int64_t, CandleFootprint>> live_;
     const CandleFootprint* available(const std::string& market, int64_t start,
                                     int64_t as_of_ms) const;
-    bool loading_ = false;
 
     // Data version - incremented on every on_tick_volume_update
     uint64_t data_version_ = 0;
@@ -176,8 +191,15 @@ private:
     std::unordered_map<std::string,
         std::unordered_map<int64_t, MergedCache>> merged_cache_;
 
-    // Track requested range to avoid duplicate requests
-    std::string last_symbol_;
-    int64_t last_start_ = 0;
-    int64_t last_end_   = 0;
+    struct HistoryRange {
+        int64_t covered_start = 0;  // last successful request (covered_end > covered_start)
+        int64_t covered_end   = 0;
+        int64_t request_start = 0;  // last range asked for
+        int64_t request_end   = 0;
+        int64_t sent_ms       = 0;
+        int64_t retry_ms      = 0;  // no new request before this
+        int failures          = 0;
+        bool in_flight        = false;
+    };
+    std::unordered_map<std::string, HistoryRange> history_;
 };

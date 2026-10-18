@@ -1,5 +1,6 @@
 #include "core/liqmap2_scorecard.h"
 #include "core/realtime_archive.h"
+#include "core/refill_history.h"
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_opengl.h>
 #include <SDL3/SDL_events.h>
@@ -246,6 +247,22 @@ static void on_ws_message(const uint8_t* data, size_t len, WsLane lane) {
                     liquidity_response::History::receive(parsed);
                 return;
             }
+            if (type == "refill_levels") {
+                // Same lane rule as liquidity_response; the store also drops the other context's mode.
+                const bool replay = g_app.replay_mgr && g_app.replay_mgr->is_active();
+                if ((lane == WsLane::Replay && replay && g_app.replay_mgr->active_socket() == g_app.replay_ws_client.get()) ||
+                    (lane == WsLane::Live && (!replay || g_app.replay_mgr->active_socket() == g_app.ws_client.get())))
+                    refill::receive(parsed);
+                return;
+            }
+            if (type == "refill_history") {
+                // Recorded levels for candle charts: the same lane rule; the store matches the request id and mode.
+                const bool replay = g_app.replay_mgr && g_app.replay_mgr->is_active();
+                if ((lane == WsLane::Replay && replay && g_app.replay_mgr->active_socket() == g_app.replay_ws_client.get()) ||
+                    (lane == WsLane::Live && (!replay || g_app.replay_mgr->active_socket() == g_app.ws_client.get())))
+                    refill::history::receive(parsed, emscripten_get_now());
+                return;
+            }
             if (type == "flow_positioning") {
                 const bool replay = g_app.replay_mgr && g_app.replay_mgr->is_active();
                 if ((lane == WsLane::Replay && replay && g_app.replay_mgr->active_socket() == g_app.replay_ws_client.get()) ||
@@ -436,6 +453,8 @@ static void tick_restart_refetch() {
 
 static void on_ws_status(const std::string& status) {
     liquidity_response::History::invalidate_all("Transport changed; waiting for observations");
+    refill::on_transport_changed();
+    refill::history::on_transport_changed();
 #ifdef EDGEDEPTH_EXPOSURE_V2_DEV
             exposure::History::invalidate_all("V2 transport changed; reload required");
             exposure::SummaryHistory::invalidate_all("V2 transport changed; reload required");
@@ -536,6 +555,8 @@ WebSocketClient* archive_lane_socket() {
 // paper-trading traffic on a socket that serves neither.
 static void on_replay_ws_status(const std::string& status) {
     liquidity_response::History::invalidate_all("Replay transport changed; waiting for observations");
+    refill::on_transport_changed();
+    refill::history::on_transport_changed();
 #ifdef EDGEDEPTH_EXPOSURE_V2_DEV
             exposure::History::invalidate_all("V2 replay transport changed; reload required");
             exposure::SummaryHistory::invalidate_all("V2 replay transport changed; reload required");
@@ -640,9 +661,13 @@ void check_initialization() {
     // Pack mode boots with NO WebSocket (the .edpack + metadata fetch are the
     // only network I/O - the box stays out of the per-viewer loop), so init
     // proceeds on the pack path without a socket.
-    const bool comms_ready =
-        (g_app.ws_client && g_app.ws_client->is_connected()) ||
-        EducationBoot::instance().is_pack();
+    // Embedded tick replays use the replay lane; a slow/restarting live hub
+    // must not hold their chart initialization. Curated archives still use hub.
+    const auto& boot = EducationBoot::instance();
+    WebSocketClient* boot_socket = boot.is_embedded() && !boot.is_event()
+        ? replay_lane_socket() : g_app.ws_client.get();
+    const bool comms_ready = boot.is_pack() ||
+        (boot_socket && boot_socket->is_connected());
     if (!chart_initialized && comms_ready) {
         // Wait for metadata, but only to avoid a visible placeholder: widgets
         // built without it rebind through Widget::refresh_instrument() when the
@@ -672,7 +697,8 @@ void check_initialization() {
             g_app.candle_mgr->initial_load();
         }
         auto initial_chart = std::make_unique<ChartWidget>(pair, g_app.app_ctx, tick_size);
-        if (EducationBoot::instance().is_pack() && EducationBoot::instance().pack_realtime())
+        if ((EducationBoot::instance().is_pack() && EducationBoot::instance().pack_realtime()) ||
+            (!Entitlements::hosted() && !boot.is_embedded() && !boot.is_pack()))
             initial_chart->set_rt_mode(true);
 #ifdef __EMSCRIPTEN__
         // Recent-BTC links continue the welcome demo's recorded depth view.
@@ -959,46 +985,95 @@ void render_lesson_loading_overlay() {
     fg->AddText(ImVec2(std::round(c.x - ts.x * 0.5f), c.y + r + 16.0f), Theme::u32(Theme::Tokens::TX2), msg);
 }
 
-// Historical event and lesson pages never fall back to live data. This modal
-// remains until a deliberate seek from the chrome retries elsewhere (see
-// ReplayManager::seek), navigation or reload, and captures canvas input while visible.
+// Keep failed historical data frozen and capture chart input. Recovery actions
+// explicitly re-seed the retained session; a lost session requires a reload.
 void render_historical_replay_error_overlay() {
     const auto& boot = EducationBoot::instance();
     if ((!boot.is_event() && !boot.is_lesson()) || !g_app.replay_mgr) return;
-    if (g_app.replay_mgr->state() != ReplayManager::State::Error) return;
+    auto& replay = *g_app.replay_mgr;
+    if (replay.state() != ReplayManager::State::Error) return;
 
     ImGuiViewport* vp = ImGui::GetMainViewport();
+    constexpr ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration |
+        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking;
     ImGui::SetNextWindowPos(vp->Pos);
     ImGui::SetNextWindowSize(vp->Size);
     ImGui::SetNextWindowViewport(vp->ID);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(10, 14, 18, 250));
+    ImVec4 veil = Theme::Tokens::BASE;
+    veil.w = 0.58f;
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, veil);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24.0f, 24.0f));
-    constexpr ImGuiWindowFlags flags =
-        ImGuiWindowFlags_NoDecoration |
-        ImGuiWindowFlags_NoMove |
-        ImGuiWindowFlags_NoResize |
-        ImGuiWindowFlags_NoSavedSettings;
-    if (ImGui::Begin("##historical_replay_error", nullptr, flags)) {
-        const char* title = "Historical replay unavailable";
-        const auto& error = g_app.replay_mgr->info().error_message;
-        const char* detail = error.empty()
-            ? "The recorded replay could not be loaded at this position. Scrub to another time to retry, or return to the event page for its price chart and evidence."
-            : error.c_str();
-        const ImVec2 title_size = ImGui::CalcTextSize(title);
-        const float detail_width = std::min(560.0f, std::max(120.0f, vp->Size.x - 48.0f));
-        const float center_x = vp->Size.x * 0.5f;
-        const float center_y = vp->Size.y * 0.5f;
-        ImGui::SetCursorPos(ImVec2(center_x - title_size.x * 0.5f, center_y - 24.0f));
-        ImGui::TextColored(ImVec4(0.95f, 0.76f, 0.32f, 1.0f), "%s", title);
-        ImGui::SetCursorPos(ImVec2(center_x - detail_width * 0.5f, center_y + 12.0f));
-        ImGui::PushTextWrapPos(center_x + detail_width * 0.5f);
-        ImGui::TextColored(ImVec4(0.71f, 0.78f, 0.84f, 1.0f), "%s", detail);
-        ImGui::PopTextWrapPos();
+    ImGui::Begin("##historical_replay_error", nullptr, flags | ImGuiWindowFlags_NoBringToFrontOnFocus);
+    ImGui::End();
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor();
+
+    const float width = std::min(520.0f, std::max(180.0f, vp->Size.x - 32.0f));
+    ImGui::SetNextWindowPos(ImVec2(vp->Pos.x + vp->Size.x * 0.5f,
+                                 vp->Pos.y + vp->Size.y * 0.5f),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(width, 0.0f));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(width, 0.0f), ImVec2(width, vp->Size.y - 24.0f));
+    ImGui::SetNextWindowViewport(vp->ID);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, Theme::Tokens::MENU);
+    ImGui::PushStyleColor(ImGuiCol_Border, Theme::Tokens::BD2);
+    ImGui::PushStyleColor(ImGuiCol_Text, Theme::Tokens::TX1);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24.0f, 22.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10.0f, 12.0f));
+    bool retry = false, restart = false, reload = false;
+    if (ImGui::Begin("##replay_recovery_card", nullptr, flags | ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextColored(Theme::Tokens::WARN, "REPLAY PAUSED");
+        ImGui::PushFont(Theme::get_bold_font());
+        ImGui::TextWrapped("Couldn't load this replay position");
+        ImGui::PopFont();
+        ImGui::PushStyleColor(ImGuiCol_Text, Theme::Tokens::TX2);
+        const bool can_retry = replay.can_retry_historical_position();
+        ImGui::TextWrapped(can_retry
+            ? "Try this position again, or play from the beginning of the recording."
+            : "Reload the page to reconnect to this recording.");
+        if (replay.info().current_time_ms > 0) {
+            char when[80]{}, zone[64]{};
+            auto& tz = DisplayTimeZone::instance();
+            tz.format(replay.info().current_time_ms, TimeZoneFormat::DateTimeSeconds, when, sizeof(when));
+            tz.visible_label(replay.info().current_time_ms, true, zone, sizeof(zone));
+            ImGui::TextWrapped("%s  %s", when, zone);
+        }
+        ImGui::PopStyleColor();
+        const bool stacked = width < 440.0f;
+        const float button_width = stacked ? ImGui::GetContentRegionAvail().x
+            : (ImGui::GetContentRegionAvail().x - 10.0f) * 0.5f;
+        if (can_retry) {
+            ImGui::PushStyleColor(ImGuiCol_Button, Theme::Tokens::BRAND);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::Tokens::BRAND);
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, Theme::Tokens::BRAND);
+            ImGui::PushStyleColor(ImGuiCol_Text, Theme::Tokens::BRAND_INK);
+            retry = ImGui::Button("Retry position", ImVec2(button_width, 38.0f));
+            ImGui::PopStyleColor(4);
+            if (!stacked) ImGui::SameLine();
+            restart = ImGui::Button("Play from start", ImVec2(button_width, 38.0f));
+        } else {
+            reload = ImGui::Button("Reload replay", ImVec2(-1.0f, 38.0f));
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, Theme::Tokens::TX3);
+        if (!replay.info().error_message.empty() && ImGui::TreeNode("Details")) {
+            ImGui::TextWrapped("%s", replay.info().error_message.c_str());
+            ImGui::TreePop();
+        }
+        ImGui::PopStyleColor();
     }
     ImGui::End();
-    ImGui::PopStyleVar(2);
-    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(4);
+    ImGui::PopStyleColor(3);
+    if (retry) replay.seek(replay.info().current_time_ms, true);
+    if (restart) replay.seek(replay.info().start_time_ms, true);
+#ifdef __EMSCRIPTEN__
+    if (reload) EM_ASM({ window.location.reload(); });
+#else
+    (void)reload;
+#endif
 }
 
 void drain_data_dispatches(double budget_ms, bool profile) {
@@ -1128,7 +1203,7 @@ void update_and_render_widgets() {
         g_profiler.end(sec);
         if (floating) ImGui::PopStyleVar();
     }
-    // Floating panels: the menus' shadow outside the frame, and the accent line on the focused one's title bar,
+    // Floating panels: the menus' shadow outside the frame, and the focus hairline on the focused one's title bar,
     // as on the focused panel's tab.
     {
         const ImGuiWindow* nav = GImGui->NavWindow ? GImGui->NavWindow->RootWindow : nullptr;
@@ -1140,9 +1215,10 @@ void update_and_render_widgets() {
             const ImVec2 a = w->Pos, b(w->Pos.x + w->Size.x, w->Pos.y + w->Size.y);
             Theme::float_shadow(w->DrawList, a, b, w->WindowRounding);
             if (w == nav && !(w->Flags & ImGuiWindowFlags_NoTitleBar)) {
+                // The same 1 px grey as a focused dock tab's line (theme.cpp), inside the rounded corners.
                 const float r = w->WindowRounding;
                 w->DrawList->PushClipRectFullScreen();
-                w->DrawList->AddRectFilled(ImVec2(a.x + r, a.y), ImVec2(b.x - r, a.y + 2.0f), Theme::u32(Theme::Tokens::BRAND));
+                w->DrawList->AddRectFilled(ImVec2(a.x + r, a.y), ImVec2(b.x - r, a.y + 1.0f), Theme::u32(Theme::Tokens::BD3));
                 w->DrawList->PopClipRect();
             }
         }
@@ -2295,6 +2371,8 @@ int main(int, char**) {
     // Wire rewind callback: when << is pressed, clear widget data
     g_app.replay_mgr->set_rewind_callback([](int64_t cutoff_ms) {
         liquidity_response::History::invalidate_all("Replay rewound; waiting for observations");
+        refill::on_rewind();
+        refill::history::on_rewind();
 #ifdef EDGEDEPTH_EXPOSURE_V2_DEV
             exposure::History::invalidate_all("V2 rewind; reload required");
             exposure::SummaryHistory::invalidate_all("V2 rewind; reload required");

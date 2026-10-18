@@ -31,6 +31,14 @@ public:
     static constexpr size_t MAX_CANDLES = 200000;
     static constexpr int LOAD_COOLDOWN_MS = 500;
     static constexpr size_t INITIAL_PRELOAD_CANDLES = 2880;
+    // The history page a replay START asks for. The chart cannot play until it
+    // lands (context_primed), and it rides the same cold socket as the book, so
+    // its size was on the critical path: 2,880 five-minute candles were 117 KB,
+    // one more slow-start round trip across 330 ms after the book had arrived
+    // (measured 2026-10-13). 720 is five screens at every timeframe's default
+    // zoom (visible_candles_for_timeframe tops out at 180), and scrolling left
+    // loads older candles on demand exactly as it always has.
+    static constexpr size_t REPLAY_START_PRELOAD_CANDLES = 720;
 
     // Recent-tick ring buffer caps (Line chart). Bounded by BOTH count and age;
     // whichever bites first drops the oldest. ~50k ticks / ~5 min of fresh trade
@@ -97,7 +105,7 @@ public:
     bool empty() const { return candles_.empty() && !has_current_candle_; }
     size_t count() const { return candles_.size(); }
     uint64_t history_revision() const { return history_revision_; }
-    bool is_loading() const { return is_loading_; }
+    bool is_loading() const { return is_loading_ || older_pending_; }
     bool is_initial_load_complete() const { return initial_load_complete_; }
     double last_close_price() const { return last_close_price_; }
     int64_t oldest_timestamp() const { return oldest_candle_timestamp_; }
@@ -175,7 +183,11 @@ private:
     Terminal::Candle carried_candle_{};
     bool carried_candle_valid_ = false;
 
-    bool is_loading_ = false;
+    bool is_loading_ = false;      // the series is being rebuilt (initial load, TF switch, seek)
+    // An older-history request (scroll-back, reference load) is in flight. It
+    // only prepends, so unlike is_loading_ it never holds back replay trades:
+    // the server and the pack engine send no frame when nothing is older.
+    bool older_pending_ = false;
     bool recent_pending_ = false;  // next historical batch merges in place (request_recent)
     void merge_recent(std::span<const Terminal::Candle> batch);
     bool initial_load_complete_ = false;

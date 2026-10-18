@@ -64,6 +64,7 @@ enum class UiIcon : uint8_t {
     Rows,           // row density
     Grid,           // categories
     Target,         // centre on price (DOM)
+    More,           // three dots: a card's secondary actions
 };
 
 void draw_tool_icon(ImDrawList* dl, Tool t, ImVec2 c, float s, ImU32 col,

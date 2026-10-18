@@ -102,6 +102,15 @@ public:
                 if (bubble.timestamp_ms >= from && bubble.timestamp_ms <= to) emit(bubble);
         }
     }
+    // The latest time through which a reader at `as_of` sees every window it ever will: nothing at or before it is
+    // still pending, and nothing published after `as_of`. A running total (refill::Absorption) may cache sums up to
+    // it. Call once per frame: a paused reader walks the publications made since it paused.
+    int64_t stable_through(int64_t as_of) const {
+        int64_t limit = pending_.empty() ? clock_ms_ : pending_.begin()->first - 1;
+        for (auto it = published_.rbegin(); it != published_.rend() && it->second.at_ms > as_of; ++it)
+            limit = std::min(limit, it->first - 1);
+        return limit;
+    }
     size_t size() const { return size_; }
     void reset() { *this = {}; }
 private:

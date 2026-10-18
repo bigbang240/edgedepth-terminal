@@ -233,19 +233,23 @@ void test_symbol_and_speed_gates() {
     expect_true(!Entitlements::symbol_replay_allowed("btc"), "a partial symbol is refused");
     expect_true(!Entitlements::symbol_replay_allowed("btcusdtx"), "a superstring symbol is refused");
 
-    // Speed: the server clamps silently, the client locks the buttons. The
-    // epsilon means the 2x button itself is never one ULP away from locked.
+    // Free is exactly 1x, including slow motion and malformed requests.
+    for (double speed : {0.0, 0.1, 0.2, 0.5, 2.0, 4.0}) {
+        expect_true(!Entitlements::speed_allowed(speed), "every non-1x speed is locked on free");
+        expect_true(Entitlements::clamp_speed_for_tier(speed) == 1.0, "free always normalizes to 1x");
+    }
     expect_true(Entitlements::speed_allowed(1.0), "1x is allowed on free");
     expect_true(Entitlements::speed_allowed(Entitlements::FREE_MAX_SPEED), "the cap itself is allowed");
     expect_true(!Entitlements::speed_allowed(4.0), "4x is locked on free");
     expect_true(Entitlements::clamp_speed_for_tier(8.0) == Entitlements::FREE_MAX_SPEED,
                 "a faster request clamps to the cap");
     expect_true(Entitlements::clamp_speed_for_tier(1.0) == 1.0, "a slower request is untouched");
-    expect_true(Entitlements::clamp_speed_for_tier(0.5) == 0.5, "sub-1x is untouched");
+    expect_true(Entitlements::clamp_speed_for_tier(0.5) == 1.0, "slow motion requires Pro");
 
     // Pro has no symbol or speed gate at all.
     Entitlements::current() = Entitlements::Tier::Pro;
     expect_true(Entitlements::symbol_replay_allowed("linkusdt"), "pro replays any symbol");
+    expect_true(Entitlements::speed_allowed(0.1), "pro can use slow motion");
     expect_true(Entitlements::speed_allowed(64.0), "pro replays at any speed");
     expect_true(Entitlements::clamp_speed_for_tier(64.0) == 64.0, "pro speed is never clamped");
 }

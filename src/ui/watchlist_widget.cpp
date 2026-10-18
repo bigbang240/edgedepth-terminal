@@ -367,11 +367,18 @@ void WatchlistWidget::render_category_selector() {
     char cbuf[16]; snprintf(cbuf, sizeof(cbuf), "%d", ct);
     Theme::push_font(Theme::Fonts::ui(), 13 * WK);
     const float count_w = ImGui::CalcTextSize(cbuf).x;
-    const float count_x = p0.x + category_w - 28 * WK - count_w;
-    dl->AddText(ImVec2(count_x, p0.y + (h - ImGui::GetFontSize()) * 0.5f), Theme::u32(Theme::Tokens::TX3), cbuf);
     ImGui::PopFont();
     Theme::push_font(Theme::Fonts::ui_semibold(), 15 * WK);
-    dl->PushClipRect(ImVec2(p0.x + 30 * WK, p0.y), ImVec2(std::max(p0.x + 31 * WK, count_x - 6 * WK), p0.y + h), true);
+    // The count is also in the header/popover. Preserve the category label first.
+    const bool show_count = category_w >= 30 * WK + ImGui::CalcTextSize(name).x + 6 * WK + count_w + 28 * WK;
+    const float label_end = p0.x + category_w - 28 * WK - (show_count ? count_w + 6 * WK : 0);
+    if (show_count) {
+        Theme::push_font(Theme::Fonts::ui(), 13 * WK);
+        dl->AddText(ImVec2(p0.x + category_w - 28 * WK - count_w, p0.y + (h - ImGui::GetFontSize()) * 0.5f),
+                    Theme::u32(Theme::Tokens::TX3), cbuf);
+        ImGui::PopFont();
+    }
+    dl->PushClipRect(ImVec2(p0.x + 30 * WK, p0.y), ImVec2(std::max(p0.x + 31 * WK, label_end), p0.y + h), true);
     dl->AddText(ImVec2(p0.x + 30 * WK, p0.y + (h - ImGui::GetFontSize()) * 0.5f), Theme::u32(Theme::Tokens::TX1), name);
     dl->PopClipRect();
     ImGui::PopFont();

@@ -103,7 +103,7 @@ inline FrameTimeTracker g_frame_tracker;
 class FrameProfiler {
 public:
     using Clock = std::chrono::steady_clock;
-    static constexpr int MAX_SECTIONS = 48;
+    static constexpr int MAX_SECTIONS = 64;
     static constexpr std::size_t CPU_HISTORY_SIZE = 2048;
     using CpuTracker = FixedSampleTracker<CPU_HISTORY_SIZE>;
     using SampleStats = CpuTracker::Stats;

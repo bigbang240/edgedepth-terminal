@@ -14,7 +14,7 @@ if (!root || !evidence)
     "Usage: node browser-probe.cjs <WASM build dir> <evidence dir>",
   );
 fs.mkdirSync(evidence, { recursive: true });
-const start = 1791239280000,
+const start = process.env.TEST_TIER === "free" ? Math.floor(Date.now() / 60000) * 60000 - 600000 : 1791239280000,
   end = start + 5000,
   id = "funnel-completion-fixture";
 const cat = (...b) => Buffer.concat(b),
@@ -93,7 +93,7 @@ const server = http.createServer((req, res) => {
   );
   fs.createReadStream(file).pipe(res);
 });
-const sockets = new wsServer({ server });
+const sockets = new wsServer({ server, verifyClient: ({ req }) => req.url !== "/live-offline" });
 function json(ws, type, data) {
   ws.send(JSON.stringify({ type, data }));
 }
@@ -138,6 +138,8 @@ sockets.on("connection", (ws) =>
     const q = JSON.parse(raw);
     requests.push(q);
     if (q.method === "join_replay") {
+      // A join carrying the create body is the session start (replay_create.h).
+      if (q.data && q.data.create) creates++;
       replaySocket = ws;
       json(ws, "replay_joined", {
         session_id: id,
@@ -212,22 +214,29 @@ sockets.on("connection", (ws) =>
       console.log("PAGE ERROR", e.message);
     });
     page.on("console", (m) => {
+      // SDL_Log writes this informational connection notice to stderr.
+      if (m.text() === "Replay lane socket connected") return;
+      // This fixture deliberately refuses only the live lane. All other errors fail.
+      if (process.env.LIVE_OFFLINE && /WebSocket connection to .*\/live-offline.* failed:/.test(m.text())) return;
       if (
         m.type() === "error" ||
         /IM_ASSERT|User Error|Assertion failed/.test(m.text())
       )
         errors.push(m.text());
     });
-    await page.addInitScript(() => {
-      window.__EDGEDEPTH_TIER__ = "admin";
+    await page.addInitScript((tier) => {
+      window.__EDGEDEPTH_TIER__ = tier;
       window.__EDGEDEPTH_REPLAY_TOKEN__ = "fixture-only";
+      window.__EDGEDEPTH_USER_EMAIL__ = "fixture@example.invalid";
       window.__EDGEDEPTH_LESSON__ = {
         mode: "studio",
         symbol: "btcusdt",
         exchange: "binancef",
         chrome: "research",
       };
-    });
+      window.__speedUpsells = [];
+      window.addEventListener("edgedepth:usage", (e) => window.__speedUpsells.push(e.detail));
+    }, process.env.TEST_TIER || "admin");
     await page.route("**/*", (route) =>
       new URL(route.request().url()).hostname === "127.0.0.1"
         ? route.continue()
@@ -254,7 +263,7 @@ sockets.on("connection", (ws) =>
           }),
     );
     await page.goto(
-      `${base}/terminal/binancef/btcusdt?ws=${encodeURIComponent(ws)}&replay_ws=${encodeURIComponent(ws)}`,
+      `${base}/terminal/binancef/btcusdt?ws=${encodeURIComponent(process.env.LIVE_OFFLINE ? base.replace("http", "ws") + "/live-offline" : ws)}&replay_ws=${encodeURIComponent(ws)}`,
     );
     await page.waitForFunction(
       () =>
@@ -291,7 +300,31 @@ sockets.on("connection", (ws) =>
         throw e;
       });
     await page.screenshot({ path: path.join(evidence, "playing.png") });
+    if (process.env.LIVE_OFFLINE) {
+      await page.waitForFunction(() => window.__speedUpsells.some(e => e.event === "session_start"), {}, { timeout: 2000 });
+    }
+    if (process.env.TEST_TIER === "free") {
+      for (const choice of [10, 400, "1", "6", "ArrowDown", "ArrowUp"]) {
+        const before = requests.filter(q => q.method === "control_replay" && q.data.action === "set_speed").length;
+        if (typeof choice === "number") await page.evaluate(s => window.Module.__studio_cmd_set_speed(s), choice);
+        else await page.keyboard.press(choice);
+        await page.waitForFunction(() => window.__speedUpsells.some(e => e.event === "upsell_impression" && e.props.trigger === "speed" && e.props.variant === "pro"), {}, { timeout: 2000 });
+        assert.equal(await page.evaluate(() => window.__EDGEDEPTH_STUDIO_STATE__.speed), 1);
+        assert.equal(requests.filter(q => q.method === "control_replay" && q.data.action === "set_speed").length, before);
+        await page.screenshot({ path: path.join(evidence, `locked-${choice}.png`) });
+        await page.keyboard.press("Escape");
+        await page.evaluate(() => { window.__speedUpsells = []; });
+        await page.waitForTimeout(100);
+      }
+    }
     clearInterval(statusTimer);
+    if (process.env.TEST_TIER !== "free") {
+      for (const speed of [10, 400]) {
+        await page.evaluate(s => window.Module.__studio_cmd_set_speed(s), speed);
+        await page.waitForFunction(s => Math.abs(window.__EDGEDEPTH_STUDIO_STATE__.speed - s / 100) < .001, speed);
+        assert.ok(requests.some(q => q.method === "control_replay" && q.data.action === "set_speed" && Math.abs(q.data.speed - speed / 100) < .001));
+      }
+    }
     seed(replaySocket, end);
     json(replaySocket, "replay_status", {
       status: "paused",
@@ -374,7 +407,7 @@ sockets.on("connection", (ws) =>
       ),
     );
     console.log(
-      "PASS: final frame retained past 3 seconds; exact end clock; replay-again uses same session; stale completion ignored during seek",
+      `PASS: final frame retained; replay-again uses same session; stale completion ignored; tier=${process.env.TEST_TIER || "admin"}; live-offline=${!!process.env.LIVE_OFFLINE}`,
     );
   } finally {
     clearInterval(statusTimer);

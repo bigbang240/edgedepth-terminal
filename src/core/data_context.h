@@ -126,7 +126,8 @@ struct DataContext {
         const std::string& exchange,
         int ws_handle,
         int64_t start_time_ms,
-        int64_t default_timeframe_sec = 300);
+        int64_t default_timeframe_sec = 300,
+        bool primary_history_preloaded = false);
 
     // No copy - unique_ptrs own the managers.
     // Destructor + move ops defined in .cpp where full types are visible.

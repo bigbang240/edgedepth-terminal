@@ -46,7 +46,7 @@ sockets.on('connection',ws=>{const subs=new Map();let sequence=100,bookSequence=
  try{
   const page=await browser.newPage({viewport:{width:1600,height:900}}),errors=[];
   page.on('pageerror',e=>errors.push(e.message));page.on('console',m=>{if(/IM_ASSERT|Assertion failed|User Error/.test(m.text()))errors.push(m.text())});
-  await page.addInitScript(()=>{window.__EDGEDEPTH_TIER__='admin';window.__EDGEDEPTH_REPLAY_TOKEN__='fixture-only';
+  await page.addInitScript(()=>{window.__EDGEDEPTH_TEST_UI__=true;window.__EDGEDEPTH_TIER__='admin';window.__EDGEDEPTH_REPLAY_TOKEN__='fixture-only';
    sessionStorage.setItem('edgedepth.workspace.tab.v1',JSON.stringify({version:1,layout:'',widgets:[{type:'chart',title:'',settings:{timeframe:60,chart_type:0,rt_mode:true,rt_span_ms:90000,rt_depth:true,rt_bubbles:false,rt_trade_line:false,rt_dom:false,liq_observed_enabled:true,liq_markers:true,liq_obs_auto_size:true,rt_liq_strip:true,rt_liq_collapsed:false}}]}));
   });
   await page.route('**/*',r=>new URL(r.request().url()).origin===base?r.continue():r.fulfill({contentType:'application/json',body:JSON.stringify(new URL(r.request().url()).pathname.includes('symbols/metadata')?{symbols:[{...pair,tick_size:.1,step_size:.001,base_asset:'ORCA',quote_asset:'USDT'}]}:{})}));
@@ -83,25 +83,27 @@ sockets.on('connection',ws=>{const subs=new Map();let sequence=100,bookSequence=
   if(process.env.CHECK_RT_MENU){
    const settings=()=>page.evaluate(()=>{Module._workspace_flush();return JSON.parse(sessionStorage.getItem('edgedepth.workspace.tab.v1')).widgets.find(w=>w.type==='chart').settings});
    const click=async(x,y)=>{await page.mouse.click(x,y);await page.mouse.move(5,5);await page.waitForTimeout(200);};
-   await click(403,125);await page.screenshot({path:path.join(evidence,'menu-wide.png')});
-   await click(400,297);assert.equal((await settings()).rt_dom,true,'depth ladder control');
-   await click(400,297);assert.equal((await settings()).rt_dom,false);
-   await click(400,255);assert.ok((await settings()).rt_span_ms>1800000,'whole-session navigation');
-   await click(403,125);await click(400,165); // Pause before returning live.
-   await click(400,225);assert.ok(Math.abs((await settings()).rt_span_ms-30000/.88)<1,'return-live navigation includes right margin');
-   await click(403,125);await page.screenshot({path:path.join(evidence,'menu-returned-live.png')});
-   await click(400,370);await page.screenshot({path:path.join(evidence,'session-history.png')});
-   await page.keyboard.press('Escape');await click(1540,125);
-   await page.screenshot({path:path.join(evidence,'settings-wide.png')});
-   await page.keyboard.press('Escape');await click(592,125);
+   const named=async id=>{await page.waitForFunction(id=>window.__EDGEDEPTH_UI_RECTS__?.[id],id);const [a,b,c,d]=await page.evaluate(id=>window.__EDGEDEPTH_UI_RECTS__[id],id);await page.mouse.move((a+c)/2,(b+d)/2);await page.waitForTimeout(100);await click((a+c)/2,(b+d)/2);};
+   await named('chart.settings');await page.screenshot({path:path.join(evidence,'menu-wide.png')});
+   await named('rt.ladder');assert.equal((await settings()).rt_dom,true,'depth ladder control');
+   await named('rt.ladder');assert.equal((await settings()).rt_dom,false);
+   await named('rt.whole');assert.ok((await settings()).rt_span_ms>1800000,'whole-session navigation');
+   await named('chart.settings');await named('rt.pause');
+   await named('rt.live');assert.ok(Math.abs((await settings()).rt_span_ms-30000/.88)<1,'return-live navigation includes right margin');
+   await named('chart.settings');await page.screenshot({path:path.join(evidence,'menu-returned-live.png')});
+   await page.keyboard.press('Escape');await named('chart.liquidations');
    await page.screenshot({path:path.join(evidence,'layers-wide.png')});
-   await click(650,556);let s=await settings();
+   await named('layer.Reported liquidations');let s=await settings();
    assert.equal(s.rt_liq_observed_enabled,false);assert.equal(s.liq_observed_enabled,true,'RT switch changed Chart reports');
-   await click(650,556);await click(650,394);s=await settings();
+   await named('layer.Reported liquidations');await page.keyboard.press('Escape');await named('chart.layers');await named('layer.Trade bubbles');s=await settings();
    assert.equal(s.rt_bubbles,true);assert.equal(s.candle_bubbles,false,'RT switch changed Chart bubbles');
-   await click(650,394);await page.keyboard.press('Escape');
+   await named('layer.Trade bubbles');
+   await named('layer.Order book depth.settings');
+   assert.equal((await settings()).rt_depth,true,'depth disclosure keeps source on');
+   assert.ok(!(await page.evaluate(()=>window.__EDGEDEPTH_UI_RECTS__))['layer.Trade bubbles'],'RT settings page isolates the source');
+   await page.keyboard.press('Escape');
    await page.setViewportSize({width:700,height:800});await page.waitForTimeout(400);
-   await click(194,163);await page.screenshot({path:path.join(evidence,'menu-narrow.png')});
+   await named('chart.layers');await page.screenshot({path:path.join(evidence,'menu-narrow.png')});
    fs.writeFileSync(path.join(evidence,'menu-settings.json'),JSON.stringify(await settings(),null,2));
    console.log('PASS: RT menu navigation, panel visibility and independent layer switches');
   }

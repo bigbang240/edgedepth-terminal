@@ -34,7 +34,7 @@ For a file, replay pack or custom feed, see [data sources](DATA_SOURCES.md).
   public futures endpoints, and Binance may be unavailable in some regions.
   Repeated `could not load symbol list` or `binance stream dropped, reconnecting`
   warnings in `docker compose logs gateway` mean it cannot reach Binance. Use
-  **Replay → Open Replay Library** instead (recordings come from
+  **Replay → Replay Library** instead (recordings come from
   `replays.edgedepth.com`, not Binance), or the
   [hosted replay](https://app.edgedepth.com/demo/20260809_071325_tutusdt_pump_4h_4h_371pct?utm_source=github&utm_medium=oss&utm_campaign=terminal),
   which needs no install or account.

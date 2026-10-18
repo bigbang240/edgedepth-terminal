@@ -65,7 +65,7 @@ void CandleManager::initial_load() {
 }
 
 void CandleManager::request_historical(size_t count, int64_t end_time_ms) {
-    is_loading_ = true;
+    older_pending_ = true;
     if (end_time_ms > 0) {
         stream_mgr_.request_historical_candles(pair_, timeframe_seconds_, count, end_time_ms);
     } else {
@@ -224,6 +224,7 @@ void CandleManager::change_timeframe(const int64_t new_timeframe_seconds) {
     follow_live_ = true;
     initial_load_complete_ = false;
     is_loading_ = false;
+    older_pending_ = false;
     seam_from_ms_ = 0;  // The new timeframe's batch opens its own.
     // Update keys
     timeframe_seconds_ = new_timeframe_seconds;
@@ -302,6 +303,7 @@ void CandleManager::reset_for_seek(int64_t seek_time_ms) {
     // it arrives (handle_candle_batch skips the pop-as-building-candle logic
     // when initial_load_complete_ is already true).
     is_loading_ = true;
+    older_pending_ = false;
 
     stream_mgr_.request_candles_before(pair_, timeframe_seconds_, seek_time_ms, preload_count_);
 }
@@ -376,9 +378,10 @@ void CandleManager::handle_trade(const Terminal::Trade& trade) {
     // After a seek, suppress trade-based candle building until the historical
     // batch arrives. Without this, trades create a building candle at the seek
     // target before the batch, then the batch collides with it - producing
-    // doubled candles with wrong open/high/low. Seeks are replay-only; a live
-    // scroll-back or reference load only prepends older candles, and gating
-    // it dropped the live edge's trades for the whole round trip.
+    // doubled candles with wrong open/high/low. Seeks are replay-only. A
+    // scroll-back or reference load (older_pending_) only prepends older
+    // candles: gating on it dropped trades for the whole round trip, and froze
+    // a replay chart for good when nothing older existed (no answer comes).
     if (is_loading_ && replay_start_time_ms_ > 0) return;
     if (seam_from_ms_ > 0 && live_from_ms_ == 0) live_from_ms_ = get_candle_timestamp(trade.timestamp_ms);
     // Track latest replay time for timeframe-change batch requests
@@ -805,6 +808,7 @@ void CandleManager::handle_candle_batch(std::span<const Terminal::Candle> batch)
     }
     if (batch.empty()) {
         is_loading_ = false;
+        older_pending_ = false;
         carried_candle_valid_ = false;
         return;
     }
@@ -830,6 +834,7 @@ void CandleManager::handle_candle_batch(std::span<const Terminal::Candle> batch)
     }
     if (inserted == 0) {
         is_loading_ = false;
+        older_pending_ = false;
         carried_candle_valid_ = false;
         return;
     }
@@ -896,6 +901,7 @@ void CandleManager::handle_candle_batch(std::span<const Terminal::Candle> batch)
     }
 
     is_loading_ = false;
+    older_pending_ = false;
     mark_dirty();
 }
 
@@ -1003,7 +1009,7 @@ void CandleManager::adopt_replay_building_candle() {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 bool CandleManager::should_load_more(double visible_x_min) const {
-    if (is_loading_ || candles_.empty()) return false;
+    if (is_loading() || candles_.empty()) return false;
     if (visible_x_min <= 0) return false;
     const double oldest_time = static_cast<double>(oldest_candle_timestamp_);
     const double distance = visible_x_min - oldest_time;
@@ -1016,7 +1022,7 @@ bool CandleManager::should_load_more(double visible_x_min) const {
 }
 
 void CandleManager::check_and_load_more(double visible_x_min) {
-    if (!initial_load_complete_ || is_loading_ || candles_.empty()) return;
+    if (!initial_load_complete_ || is_loading() || candles_.empty()) return;
 
     const auto now = std::chrono::steady_clock::now();
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1024,7 +1030,7 @@ void CandleManager::check_and_load_more(double visible_x_min) {
     if (elapsed < LOAD_COOLDOWN_MS) return;
 
     if (should_load_more(visible_x_min)) {
-        is_loading_ = true;
+        older_pending_ = true;
         last_load_time_ = now;
         stream_mgr_.request_historical_candles(
             pair_, timeframe_seconds_,

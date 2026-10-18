@@ -752,10 +752,12 @@ namespace {
         ImDrawList* dl = ImGui::GetWindowDrawList();
         ImGui::PushFont(Fonts::ui());
         const float h = 30.0f, padx = 11.0f, caretw = 30.0f;
-        static const char* const kRtLabel = "Real-time";
-        // Pill geometry: dot + label + trailing glyph (lock while locked, caret
+        // Named for what it shows (James 2026-10-13: people should know what it is), shortened when the bar is
+        // narrow. A small heatmap glyph leads it.
+        const char* const kRtLabel = compact ? "Real-time" : "Real-time heatmap";
+        // Pill geometry: glyph + label + trailing glyph (lock while locked, caret
         // while on), inset 3px inside the 30px band like the "on" favourite chip.
-        const float rt_gap = 10.0f, rt_padx = 10.0f, rt_dot = 6.0f, rt_dot_gap = 7.0f;
+        const float rt_gap = 10.0f, rt_padx = 10.0f, rt_dot = 13.0f, rt_dot_gap = 7.0f;
         const float rt_label_w = ImGui::CalcTextSize(kRtLabel).x;
         const float rt_tag_w = rt_preview ? ImGui::CalcTextSize(rt_tag).x + 8.0f : 0.0f;
         const float rt_trail_w = rt_locked ? Theme::pro_tag_size().x + 8.0f
@@ -818,23 +820,37 @@ namespace {
         const ImVec2 rp0(rx + 3.0f, p0.y + 3.0f), rp1(rx + rt_w - 3.0f, p0.y + h - 3.0f);
         ImGui::SetCursorScreenPos(ImVec2(rx, p0.y));
         const bool rt_clicked = ImGui::InvisibleButton("##rt_pill", ImVec2(rt_w, h));
+        ui_test::mark("chart.realtime");
         const bool rt_hov = ImGui::IsItemHovered();
         const bool settings_open = ImGui::IsPopupOpen("##rt_settings");
         const bool rt_hot = rt_hov || settings_open;
         if (rt_hov && rt_locked) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-        if (rt_hot) dl->AddRectFilled(rp0, rp1, u32(Tokens::HOVER));
-        if (realtime) dl->AddLine(ImVec2(rp0.x + 6, rp1.y),
-            ImVec2(rp1.x - 6, rp1.y), u32(Tokens::TX1), 2);
-        const ImVec4 rt_text_col = realtime ? Tokens::BRAND_TX
-                                 : rt_locked ? (rt_hot ? Tokens::TX1 : Tokens::TX2)
-                                 : (rt_hot ? Tokens::TX1 : Tokens::TX2);
+        // A bordered chip, unlike the plain timeframe labels beside it: it is a different view, not another duration.
+        dl->AddRectFilled(rp0, rp1, u32(realtime ? Tokens::CONTROL_ACTIVE : rt_hot ? Tokens::CONTROL_HOVER : Tokens::CONTROL), Radius::R2);
+        dl->AddRect(rp0, rp1, u32(realtime ? Tokens::BD2 : Tokens::BD1), Radius::R2);
+        if (realtime) dl->AddLine(ImVec2(rp0.x + 8, rp1.y - 1.0f),
+            ImVec2(rp1.x - 8, rp1.y - 1.0f), u32(Tokens::TX1), 2);
+        const ImVec4 rt_text_col = realtime ? Tokens::BRAND_TX : Tokens::TX1;
         const ImU32 rt_ink = u32(rt_text_col);
         const float rt_mid = p0.y + h * 0.5f;
         float gx = rp0.x + rt_padx - 3.0f;
-        // status dot: filled while streaming, hollow otherwise
-        const ImVec2 dot_c(gx + rt_dot * 0.5f, rt_mid);
-        if (realtime) dl->AddCircleFilled(dot_c, rt_dot * 0.5f, u32(Tokens::BRAND), 12);
-        else          dl->AddCircle(dot_c, rt_dot * 0.5f, rt_ink, 12, 1.0f);
+        // A 4 x 3 heatmap in the real-time ramp's colours, one row warm: what the view looks like. Dimmed while
+        // locked. These are data colours, not chrome.
+        {
+            static constexpr ImU32 kCells[3][4] = {
+                {IM_COL32(28, 92, 153, 255), IM_COL32(75, 181, 190, 255), IM_COL32(28, 92, 153, 255), IM_COL32(15, 30, 64, 255)},
+                {IM_COL32(240, 205, 75, 255), IM_COL32(248, 108, 40, 255), IM_COL32(240, 205, 75, 255), IM_COL32(248, 108, 40, 255)},
+                {IM_COL32(15, 30, 64, 255), IM_COL32(28, 92, 153, 255), IM_COL32(75, 181, 190, 255), IM_COL32(28, 92, 153, 255)}};
+            const float cell = 2.5f, gap = 1.0f;
+            const float y0 = std::round(rt_mid - (3 * cell + 2 * gap) * 0.5f);
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 4; ++c) {
+                    const ImVec2 a(gx + c * (cell + gap), y0 + r * (cell + gap));
+                    ImU32 col = kCells[r][c];
+                    if (rt_locked) col = (col & 0x00FFFFFFu) | (IM_COL32_A_MASK & IM_COL32(0, 0, 0, 150));
+                    dl->AddRectFilled(a, ImVec2(a.x + cell, a.y + cell), col, 0.5f);
+                }
+        }
         gx += rt_dot + rt_dot_gap;
         {
             const ImVec2 ts = ImGui::CalcTextSize(kRtLabel);
@@ -870,7 +886,8 @@ namespace {
                                               "Free preview: 3 minutes a day on any market, %s left today. Binance BTC is always free.",
                                               rt_preview::format_left(rt_left_ms).c_str());
             else if (realtime) Theme::tooltip("Click to return to candles. The arrow opens view controls.");
-            else               Theme::tooltip("Switch to real-time mode: observed depth, every trade as a bubble, and the spread on one axis.");
+            else               Theme::tooltip("Real-time heatmap: the live order book as it changes, every trade as a bubble\n"
+                                              "and the spread, second by second. Click to switch; candles are one click back.");
         }
         if (rt_clicked && chart) {
             const bool on_caret = realtime && !rt_locked && ImGui::GetIO().MousePos.x >= trail_x0 - 4.0f;
@@ -1084,24 +1101,41 @@ namespace {
         ImGui::SetCursorScreenPos(ImVec2(rx, top_y + (Layout::TOPBAR_H - 26.0f) * 0.5f));
         static const char* const VIEW_LBL[] = {"Live", "Replay"};
         const int view_clicked = seg_control("viewseg", VIEW_LBL, 2, replaying ? 1 : 0);
+        ui_test::mark("topbar.replay");   // the last segment drawn
         if (view_clicked == 0 && replaying && ctx.replayer) {
             ctx.replayer->stop();                 // Live → exit replay, back to live
         } else if (view_clicked == 1 && !replaying) {
             // Replay always starts from a chosen PAST candle (right-click → "Replay
             // from here") - the toggle is a status + exit control, not a way to
-            // fabricate an arbitrary window. Nudge discovery of the right-click entry.
+            // fabricate an arbitrary window. It opens the ways in: recent moves,
+            // the library and the right-click entry.
             ImGui::OpenPopup("##replay_hint");
         }
         if (Theme::begin_popup("##replay_hint")) {
-            ImGui::PushStyleColor(ImGuiCol_Text, Tokens::TX2);
-            ImGui::TextUnformatted("Right-click a candle on the chart, then \xE2\x80\x9CReplay from here\xE2\x80\x9D.");
-            ImGui::PopStyleColor();
-            ImGui::Separator();
-            if (ImGui::MenuItem("Open Replay Library")) {
+#ifdef __EMSCRIPTEN__
+            // First: the first Pro account replays the day's biggest movers
+            // (hub task jump-to-the-move). The web's MovesPanel listens for this
+            // event: the past week's recorded moves, newest first, each opening
+            // 15 minutes before its high or low.
+            if (Entitlements::hosted()) {
+                if (ImGui::MenuItem("Recent moves", "past 7 days"))
+                    EM_ASM({ window.dispatchEvent(new CustomEvent('edgedepth:moves-open')); });
+                ui_test::mark("replay_menu.recent_moves");
+            }
+#endif
+            if (ImGui::MenuItem("Replay Library", "featured")) {
                 Menu::g_widget_add_request.type =
                     Menu::SymbolPickerState::PendingWidget::ReplayLibrary;
                 Menu::g_widget_add_request.pending = true;
             }
+            ui_test::mark("replay_menu.library");
+            ImGui::Separator();
+            ImGui::PushStyleColor(ImGuiCol_Text, Tokens::TX2);
+            // Straight quotes: the bundled Inter is a Latin-1 subset, so curly quotes drew as "?".
+            ImGui::TextUnformatted(Entitlements::hosted()
+                ? "Or right-click any candle, then \"Replay from here\"."
+                : "Choose a recording, then pause and scrub the move.");
+            ImGui::PopStyleColor();
 #ifdef __EMSCRIPTEN__
             if (Entitlements::hosted() && ImGui::MenuItem("Replay tools and help")) {
                 EM_ASM({ window.dispatchEvent(new CustomEvent('edgedepth:terminal-guide-open')); });

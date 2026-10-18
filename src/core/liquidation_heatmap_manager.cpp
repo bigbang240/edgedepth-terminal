@@ -738,6 +738,80 @@ void LiquidationHeatmapManager::apply_liqmap2_rails_history(const Terminal::Pair
     }
 }
 
+namespace {
+hl_rails::Rail hl_rail_of(const pb::HLRail& r) {
+    hl_rails::Rail x;
+    x.id = r.id();
+    x.is_long = r.is_long();
+    x.price = r.price();
+    x.born_ms = r.born_ms();
+    return x;
+}
+
+hl_rails::Step hl_step_of(const pb::HLRail& r) {
+    hl_rails::Step s;
+    s.at_ms = r.step_ms() > 0 ? r.step_ms() : r.born_ms();
+    s.usd = r.usd();
+    s.zone_lo = r.zone_lo();
+    s.zone_hi = r.zone_hi();
+    for (int g = 0; g < hl_rails::kGroups && g < r.lev_usd_size(); ++g) s.lev[g] = r.lev_usd(g);
+    s.positions = r.positions();
+    return s;
+}
+}  // namespace
+
+hl_rails::Store& LiquidationHeatmapManager::hl_rails_store(const Terminal::Pair& coin) {
+    const LiqHeatmapKey key{coin.exchange, coin.symbol};
+    if (!hl_rails_.contains(key) && hl_rails_.size() >= hl_rails::kMaxMarkets) hl_rails_.erase(hl_rails_.begin());
+    return hl_rails_[key];
+}
+
+void LiquidationHeatmapManager::apply_hl_rails(const Terminal::Pair& coin, const pb::HLRails& m) {
+    hl_rails::Latest latest;
+    latest.timestamp_ms = m.timestamp_ms();
+    latest.mark = m.mark_price();
+    latest.config_id = m.config_id();
+    latest.census_version = m.census_version();
+    latest.usable_notional_usd = m.usable_notional_usd();
+    latest.coverage_denominator_usd = m.coverage_denominator_usd();
+    latest.usable_positions = m.usable_positions();
+    latest.sampled_positions = m.sampled_positions();
+    std::vector<hl_rails::Rail> standing, ended;
+    standing.reserve(m.rails_size());
+    for (const auto& r : m.rails()) {
+        standing.push_back(hl_rail_of(r));
+        standing.back().steps.push_back(hl_step_of(r));
+    }
+    for (const auto& e : m.ended()) {
+        hl_rails::Rail x;
+        x.id = e.id();
+        x.end_ms = e.end_ms();
+        x.end = e.end();
+        ended.push_back(std::move(x));
+    }
+    const std::vector<int64_t> resumed(m.resumed().begin(), m.resumed().end());
+    hl_rails_store(coin).apply_live(latest, standing, ended, resumed);
+}
+
+void LiquidationHeatmapManager::apply_hl_rails_history(const Terminal::Pair& coin, const pb::HLRailsHistory& h) {
+    auto& store = hl_rails_store(coin);
+    store.covered_from(h.start_ms());
+    for (const auto& rec : h.rails()) {
+        if (!rec.has_rail()) continue;
+        hl_rails::Rail x = hl_rail_of(rec.rail());
+        for (const auto& s : rec.steps()) x.steps.push_back(hl_step_of(s));
+        if (x.steps.empty()) x.steps.push_back(hl_step_of(rec.rail()));
+        x.end_ms = rec.end_ms();
+        x.end = rec.end();
+        store.apply_record(rec.config_id(), x);
+    }
+}
+
+const hl_rails::Store* LiquidationHeatmapManager::get_hl_rails(const Terminal::Pair& coin) const {
+    const auto it = hl_rails_.find({coin.exchange, coin.symbol});
+    return it == hl_rails_.end() ? nullptr : &it->second;
+}
+
 const liqmap2_rails::Store* LiquidationHeatmapManager::get_liqmap2_rails(const Terminal::Pair& pair) const {
     const auto it = liqmap2_rails_.find({pair.exchange, pair.symbol});
     return it == liqmap2_rails_.end() ? nullptr : &it->second;

@@ -1,4 +1,3 @@
-#include "core/entitlements.h"
 #include "message_handler.h"
 #include "core/trade_identity.h"
 #include <unordered_map>
@@ -232,6 +231,19 @@ void MessageHandler::route_message(const pb::WSPayload& ws_payload, const Messag
             }
             break;
         }
+        case pb::Stream::STREAM_HL_RAILS:
+        case pb::Stream::STREAM_HISTORICAL_HL_RAILS: {
+            const bool history = ws_payload.stream() == pb::Stream::STREAM_HISTORICAL_HL_RAILS;
+            if (ctx.dispatch_queue) {
+                std::string captured(static_cast<const char*>(inner_data), inner_size);
+                ctx.dispatch_queue->push({[pair, captured, history, lhm = ctx.liq_heatmaps](StreamManager&) {
+                    handle_hl_rails_message(pair, captured.data(), captured.size(), history, lhm);
+                }});
+            } else {
+                handle_hl_rails_message(pair, inner_data, inner_size, history, ctx.liq_heatmaps);
+            }
+            break;
+        }
         case pb::Stream::STREAM_PATTERN_ADMIN:
             handle_pattern_admin_message(pair, inner_data, inner_size, ctx.streams);
             break;
@@ -371,20 +383,6 @@ void MessageHandler::route_message(const pb::WSPayload& ws_payload, const Messag
                     }});
                 } else {
                     handle_positioning_state_message(pair, inner_data, inner_size, ctx.analytics);
-                }
-            }
-            break;
-        case pb::Stream::STREAM_ICEBERG_STATE:
-            if (ctx.analytics && inner_size <= 4096) {
-                auto update = std::make_shared<pb::IcebergStats>();
-                if (!update->ParseFromArray(inner_data, static_cast<int>(inner_size))) break;
-                const auto key = Terminal::pair_key(pair.exchange, pair.symbol);
-                if (ctx.dispatch_queue) {
-                    ctx.dispatch_queue->push({[update, key, am = ctx.analytics](StreamManager& streams) {
-                        if (!streams.is_replay_mode()) am->apply_iceberg(key, *update, static_cast<int64_t>(Entitlements::wall_now_ms()));
-                    }});
-                } else if (ctx.streams && !ctx.streams->is_replay_mode()) {
-                    ctx.analytics->apply_iceberg(key, *update, static_cast<int64_t>(Entitlements::wall_now_ms()));
                 }
             }
             break;
@@ -911,6 +909,24 @@ void MessageHandler::handle_liqmap2_rails_message(
     }
     auto* h = google::protobuf::Arena::CreateMessage<pb::LiqMapV2RailsHistory>(&s_arena);
     if (h->ParseFromArray(data, static_cast<int>(size))) liq_heatmap_mgr->apply_liqmap2_rails_history(key_of(h->pair()), *h);
+}
+
+// Hyperliquid rails (stream 42 live, 43 history), keyed by the coin the message names ({"hl", COIN}).
+void MessageHandler::handle_hl_rails_message(
+    const Terminal::Pair& pair,
+    const void* data, size_t size,
+    bool history,
+    LiquidationHeatmapManager* liq_heatmap_mgr)
+{
+    if (!liq_heatmap_mgr) return;
+    const auto key_of = [&pair](const pb::Pair& p) { return !p.symbol().empty() ? Terminal::Pair{p.exchange(), p.symbol()} : pair; };
+    if (!history) {
+        auto* m = google::protobuf::Arena::CreateMessage<pb::HLRails>(&s_arena);
+        if (m->ParseFromArray(data, static_cast<int>(size))) liq_heatmap_mgr->apply_hl_rails(key_of(m->pair()), *m);
+        return;
+    }
+    auto* h = google::protobuf::Arena::CreateMessage<pb::HLRailsHistory>(&s_arena);
+    if (h->ParseFromArray(data, static_cast<int>(size))) liq_heatmap_mgr->apply_hl_rails_history(key_of(h->pair()), *h);
 }
 
 void MessageHandler::handle_historical_liq_heatmap_batch(

@@ -23,7 +23,6 @@ bool hosted = false;  // the web host mounts the bridge for admins only (server-
 bool zone_hovered = false;  // last frame's zone-label hover: the cursor readout yields to its tooltip
 bool rails_on = true;       // Liquidation rails layer, toggled in menu()
 bool observed_on = false;   // rails fuel: observed Hyperliquid positions instead of the scenario map (admin)
-bool modelled_on = false;   // rails fuel: the V2 modelled map instead of the scenario map (admin)
 constexpr int64_t kRailsHorizonMs = 24LL*3600*1000;
 constexpr int kHistoryHorizon = 1;  // historical rails weigh fuel by the 4h chance
 
@@ -216,12 +215,11 @@ bool owns_forward_area(const Terminal::Pair& pair, int64_t clock, bool replay) {
 void step_aside() { zone_hovered = false; }
 
 bool observed_fuel_selected() { return observed_on; }
-bool modelled_fuel_selected() { return modelled_on; }
 
-void menu(const Terminal::Pair& pair, bool& enabled, bool observed_allowed, bool modelled_allowed) {
+void menu(const Terminal::Pair& pair, bool& enabled, bool observed_allowed, const char* rails_off) {
     if (!available(pair)) return;
     // An admin preview carries the "admin" tag; its sub-rows sit under it while it is on. "Touch-odds rails"
-    // is this layer's own fuel-times-chance rails, not the V2 map's rails (Liquidation map > View > Rails).
+    // is this layer's own fuel-times-chance rails, not the V2 map's rails.
     const bool preview = snapshot.access == "admin_preview";
     if (Theme::menu_layer("Touch odds (20 min)", enabled, false, preview ? "admin" : nullptr)) enabled = !enabled;
     if (ImGui::IsItemHovered())
@@ -229,18 +227,17 @@ void menu(const Terminal::Pair& pair, bool& enabled, bool observed_allowed, bool
                        "Bands overlap: never add them.");
     if (!enabled) return;
     Theme::begin_menu_detail();
-    if (Theme::menu_toggle("Touch-odds rails", rails_on)) rails_on = !rails_on;
-    if (ImGui::IsItemHovered())
-        Theme::tooltip("Fuel x chance of touch by 1h, 4h and 24h. Not a magnet.\n"
-                       "Fuel: the V2 map on live charts, the scenario map in replay.");
-    // One fuel at a time: choosing observed or modelled clears the other.
-    if (rails_on && observed_allowed && Theme::menu_toggle("Fuel: observed HL positions", observed_on)) {
-        observed_on = !observed_on;
-        if (observed_on) modelled_on = false;
-    }
-    if (rails_on && modelled_allowed && Theme::menu_toggle("Fuel: V2 map", modelled_on)) {
-        modelled_on = !modelled_on;
-        if (modelled_on) observed_on = false;
+    // Where the rails cannot draw (the V2 rails hold the forward area on every live chart that has V2, James
+    // 2026-10-15: the switches "did nothing"), one line says why instead of switches that change nothing.
+    if (rails_off) {
+        Theme::menu_note(rails_off);
+    } else {
+        if (Theme::menu_toggle("Touch-odds rails", rails_on)) rails_on = !rails_on;
+        if (ImGui::IsItemHovered())
+            Theme::tooltip("Fuel x chance of touch by 1h, 4h and 24h, in place of the bands. Not a magnet.\n"
+                           "Fuel: the scenario map, or observed positions on Hyperliquid charts.");
+        if (rails_on && observed_allowed && Theme::menu_toggle("Fuel: observed HL positions", observed_on))
+            observed_on = !observed_on;
     }
     Theme::end_menu_detail();
 }
@@ -617,7 +614,7 @@ void rails_history(const Terminal::Pair& pair, uint64_t source_key, double bw,
     ImPlot::PopPlotClipRect();
 }
 
-void render(const Terminal::Pair& pair, int64_t clock, const char* price_fmt, bool replay) {
+void render(const Terminal::Pair& pair, int64_t clock, const char* price_fmt, bool replay, bool rails_drawn) {
     read();
     if (snapshot.history != replay) return;
     if (!matches(pair)) return;
@@ -628,7 +625,9 @@ void render(const Terminal::Pair& pair, int64_t clock, const char* price_fmt, bo
     }
     ImPlot::PushPlotClipRect();
     cascade_chip(pos, clock);
-    if (!snapshot.bands_at(clock) || rails_active(pair, clock, replay)) { crosshair(pos, size, clock); ImPlot::PopPlotClipRect(); return; }
+    // The bands give the forward area only to rails that draw: a rails switch left on under the V2 rails used to
+    // hide them and draw nothing in their place.
+    if (!snapshot.bands_at(clock) || rails_drawn) { crosshair(pos, size, clock); ImPlot::PopPlotClipRect(); return; }
     const auto lim = ImPlot::GetPlotLimits();
     const double start = std::max<double>(clock, snapshot.asof);
     if (start < lim.X.Min || start >= lim.X.Max) { ImPlot::PopPlotClipRect(); return; }  // panned away from now
@@ -637,11 +636,21 @@ void render(const Terminal::Pair& pair, int64_t clock, const char* price_fmt, bo
     // True to time where the margin allows; never narrower than a readable column.
     const float x1 = std::min(right_edge, std::max(ImPlot::PlotToPixels(double(snapshot.expires_at), 0.0).x, x0 + 72.0f));
     if (x1 - x0 < 24.0f) { ImPlot::PopPlotClipRect(); return; }
+    // Neutral veils (James 2026-10-15: the blue outlined boxes read as clutter): each band a faint fill that deepens
+    // with its chance, so nested bands shade towards price on their own, and one hairline on its far edge (the edge
+    // away from price) with its chance beside it. The hovered band lifts.
     auto* dl = ImPlot::GetPlotDrawList();
-    const ImVec4 hue = Theme::Tokens::REST;
+    const ImVec4& hue = Theme::Tokens::TX1;
     const auto mouse = ImGui::GetMousePos();
     const bool hovered = ImPlot::IsPlotHovered();
     int hover = -1;
+    for (int i = 0; i < snapshot.band_count && hovered; ++i) {
+        const auto& b = snapshot.bands[i];
+        const float top = ImPlot::PlotToPixels(0.0, b.high).y, bottom = ImPlot::PlotToPixels(0.0, b.low).y;
+        // The innermost band under the pointer: the one with the highest chance.
+        if (mouse.x >= x0 && mouse.x <= x1 && mouse.y >= top - 1.0f && mouse.y <= bottom + 1.0f &&
+            (hover < 0 || b.p > snapshot.bands[hover].p)) hover = i;
+    }
     float label_y[6]; int labels = 0;
     ImGui::PushFont(Theme::Fonts::mono_sm());
     for (int i = 0; i < snapshot.band_count; ++i) {
@@ -649,19 +658,21 @@ void render(const Terminal::Pair& pair, int64_t clock, const char* price_fmt, bo
         float top = ImPlot::PlotToPixels(0.0, b.high).y, bottom = ImPlot::PlotToPixels(0.0, b.low).y;
         if (bottom < pos.y || top > pos.y + size.y) continue;
         if (bottom - top < 2.0f) { const float mid = (top + bottom) * 0.5f; top = mid - 1.0f; bottom = mid + 1.0f; }
-        dl->AddRectFilled(ImVec2(x0, top), ImVec2(x1, bottom), Theme::u32(hue, float(0.04 + 0.14 * b.p)));
-        dl->AddRect(ImVec2(x0, top), ImVec2(x1, bottom), Theme::u32(hue, 0.55f), 0.0f, 0, 1.0f);
-        if (hovered && mouse.x >= x0 && mouse.x <= x1 && mouse.y >= top && mouse.y <= bottom) hover = i;
+        const bool hot = i == hover;
+        dl->AddRectFilled(ImVec2(x0, top), ImVec2(x1, bottom), Theme::u32(hue, float(0.025 + 0.07 * b.p) * (hot ? 1.8f : 1.0f)),
+                          Theme::Radius::R1);
+        // Above price (side > 0) the far edge is the band's top; below, its bottom.
+        const float edge = std::round(b.side > 0 ? top : bottom) + 0.5f;
+        dl->AddLine(ImVec2(x0 + 2.0f, edge), ImVec2(x1 - 2.0f, edge), Theme::u32(hot ? Theme::Tokens::TX2 : Theme::Tokens::TX3, hot ? 0.9f : 0.45f), 1.0f);
         char pct[16];
         std::snprintf(pct, sizeof(pct), "%.0f%%", 100.0 * b.p);
         const ImVec2 tsz = ImGui::CalcTextSize(pct);
-        const float y = (top + bottom) * 0.5f;
+        // Inside the band beside its far edge, so the figure reads as that edge's chance.
+        const float y = b.side > 0 ? edge + 3.0f + tsz.y * 0.5f : edge - 3.0f - tsz.y * 0.5f;
         bool overlaps = false;
         for (int k = 0; k < labels; ++k) overlaps = overlaps || std::abs(label_y[k] - y) < tsz.y + 2.0f;
-        if (overlaps || x1 - x0 < tsz.x + 12.0f) continue;
-        const ImVec2 at(x0 + 5.0f, y - tsz.y * 0.5f);
-        dl->AddRectFilled(ImVec2(at.x - 3.0f, at.y - 1.0f), ImVec2(at.x + tsz.x + 3.0f, at.y + tsz.y + 1.0f), Theme::u32(Theme::Tokens::PANEL, 0.94f));
-        dl->AddText(at, Theme::u32(Theme::Tokens::TX1), pct);
+        if (overlaps || x1 - x0 < tsz.x + 12.0f || bottom - top < tsz.y + 4.0f) continue;
+        dl->AddText(ImVec2(x0 + 6.0f, std::round(y - tsz.y * 0.5f)), Theme::u32(hot ? Theme::Tokens::TX1 : Theme::Tokens::TX2), pct);
         label_y[labels++] = y;
     }
     ImGui::PopFont();

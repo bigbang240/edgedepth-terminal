@@ -1,7 +1,11 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // replay_manager.cpp - Client-side replay orchestration
 //
-// Two-phase startup:
+// Startup, generic replays (replay_create.h, 2026-10-13):
+//   WS join_replay { create: <the POST body>, entitlement_token } → the box
+//   serving the socket verifies the token, creates the session and streams.
+// Archive replays, hosts that pass replay_create=post, and boxes that predate
+// create-and-join use the original two phases:
 //   1. POST /replay/session → session_id (via EM_ASM XHR, async)
 //   2. WS join_replay { session_id, entitlement_token } → backend verifies
 //      ownership, then streams data
@@ -16,6 +20,7 @@
 
 #include "replay_manager.h"
 #include "pack_replay_engine.h"
+#include "replay_create.h"
 #include "core/websocket.h"
 #include "core/candle_manager.h"
 #include "core/orderbook_manager.h"
@@ -28,6 +33,7 @@
 #include "core/volume_profile_manager.h"
 #include "core/education_boot.h"
 #include "core/entitlements.h"
+#include "core/ui_test_marks.h"
 #include "core/usage_emit.h"
 #include "core/recorder_glue.h"
 #include "core/display_time_zone.h"
@@ -101,6 +107,29 @@ static std::string current_replay_token() {
     std::string token(raw);
     std::free(raw);
     return token;
+}
+
+// The host's choice of create path (replay_create.h): "post" in the window
+// global or ?replay_create=post forces the old POST then join.
+EM_JS(char*, edx_copy_replay_create_choice, (), {
+    var choice = "";
+    try {
+        choice = new URLSearchParams(window.location.search).get('replay_create') ||
+                 window.__EDGEDEPTH_REPLAY_CREATE__ || "";
+    } catch (e) {}
+    choice = String(choice);
+    var len = lengthBytesUTF8(choice) + 1;
+    var buf = _malloc(len);
+    stringToUTF8(choice, buf, len);
+    return buf;
+});
+
+static std::string host_replay_create_choice() {
+    char* raw = edx_copy_replay_create_choice();
+    if (!raw) return {};
+    std::string choice(raw);
+    std::free(raw);
+    return choice;
 }
 
 // The HTTP origin that serves POST /replay/session and /replay/session/archive.
@@ -269,7 +298,7 @@ void ReplayManager::request_replay(
         end_time_ms = std::min(now_ms(), start_time_ms + (2LL * 3600LL * 1000LL));
     }
 
-    // Clamp speed - tier cap first (free ≤1×, silent, mirrors the server clamp),
+    // Normalize speed by tier first (Free exactly 1x, matching the server),
     // then the absolute preset range.
     speed = static_cast<float>(Entitlements::clamp_speed_for_tier(speed));
     speed = std::clamp(speed, MIN_SPEED, MAX_SPEED);
@@ -329,10 +358,29 @@ void ReplayManager::request_replay(
 
     std::string body = payload.dump();
 
-    char start_buf[32], end_buf[32];
-    format_timestamp(start_time_ms, start_buf, sizeof(start_buf));
-    format_timestamp(end_time_ms, end_buf, sizeof(end_buf));
+#ifdef __EMSCRIPTEN__
+    // One message where the host allows it: join_replay carries this body and
+    // the box serving the socket creates the session it joins (replay_create.h).
+    if (replay_create::path_from_choice(host_replay_create_choice()) ==
+        replay_create::Path::OneMessage) {
+        pending_create_body_ = body;
+        create_via_join_ = true;
+        create_requested_ms_ = now_ms();
+        send_create_and_join();
+        return;
+    }
+    post_session_create(body);
+#else
+    // Non-WASM fallback (for testing)
+    info_.error_message = "Replay requires WASM build";
+    transition(State::Error);
+#endif
+}
 
+// POST /replay/session, then join_session() from on_session_created. The
+// original two-request start; kept for hosts that ask for it and for boxes
+// that predate create-and-join.
+void ReplayManager::post_session_create(const std::string& body) {
 #ifdef __EMSCRIPTEN__
     const std::string base = replay_http_base();
     // Fire async XHR to create replay session
@@ -402,9 +450,7 @@ void ReplayManager::request_replay(
         __edx_send();
     }, body.c_str(), base.c_str());
 #else
-    // Non-WASM fallback (for testing)
-    info_.error_message = "Replay requires WASM build";
-    transition(State::Error);
+    (void)body;
 #endif
 }
 
@@ -430,6 +476,7 @@ void ReplayManager::request_archive_replay(
         reset();
     }
 
+    speed = static_cast<float>(Entitlements::clamp_speed_for_tier(speed));
     speed = std::clamp(speed, MIN_SPEED, MAX_SPEED);
 
     // Pending request - archive path. The backend resolves event_id → archive_path
@@ -566,6 +613,7 @@ void ReplayManager::request_pack_replay(
         reset();
     }
 
+    speed = static_cast<float>(Entitlements::clamp_speed_for_tier(speed));
     speed = std::clamp(speed, MIN_SPEED, MAX_SPEED);
 
     pack_mode_ = true;
@@ -784,10 +832,72 @@ void ReplayManager::join_session() {
 
 }
 
+// Send the join_replay that creates the session it joins (replay_create.h).
+// Latches like join_session() when the replay socket is not up yet, and also
+// while the host has not yet published the entitlement token, bounded as the
+// POST bounded it, so a tokenless boot still gets the box's coded refusal.
+void ReplayManager::send_create_and_join() {
+    if (!create_via_join_ || info_.state != State::Creating) return;
+    const auto latch = [this] {
+        if (!pending_join_) {
+            pending_join_ = true;
+            pending_join_since_ms_ = now_ms();
+        }
+    };
+    if (!ws() || !ws()->is_connected()) {
+        latch();
+        return;
+    }
+    std::string token;
+#ifdef __EMSCRIPTEN__
+    token = current_replay_token();
+#endif
+    if (replay_create::should_wait_for_token(!token.empty(), now_ms() - create_requested_ms_)) {
+        latch();
+        return;
+    }
+    pending_join_ = false;
+    json create;
+    try {
+        create = json::parse(pending_create_body_);
+    } catch (const std::exception&) {
+        create_via_join_ = false;
+        info_.error_message = "Couldn't start replay. Please try again.";
+        transition(State::Error);
+        return;
+    }
+    transition(State::Joining);
+    const int64_t tf_s = info_.timeframe_ms > 0 ? info_.timeframe_ms / 1000 : 0;
+    if (!ws()->send_text(replay_create::join_message(create, token, tf_s,
+            static_cast<int64_t>(CandleManager::REPLAY_START_PRELOAD_CANDLES)))) {
+        create_via_join_ = false;
+        info_.error_message = "Failed to send join_replay";
+        transition(State::Error);
+    }
+}
+
 // Per-frame: complete a join that was deferred because the WS wasn't connected
 // when the session-created callback fired. See join_session().
 void ReplayManager::flush_pending_join() {
     if (!pending_join_) return;
+
+    // A create-and-join waits for the socket and the token itself; the same
+    // safety valve bounds a socket that never comes up.
+    if (create_via_join_) {
+        if (info_.state != State::Creating) {
+            pending_join_ = false;
+            return;
+        }
+        if (now_ms() - pending_join_since_ms_ > JOIN_WS_WAIT_MAX_MS) {
+            pending_join_ = false;
+            create_via_join_ = false;
+            info_.error_message = "WebSocket never connected for replay join";
+            transition(State::Error);
+            return;
+        }
+        send_create_and_join();
+        return;
+    }
 
     // A stop/reset (or a new request) between latch and flush invalidates this.
     // Only a session still in Creating with a real id is joinable.
@@ -820,7 +930,7 @@ void ReplayManager::on_transport_interrupted(const WebSocketClient* socket) {
     info_.current_time_ms = interpolated_time_ms();
     info_.last_status_update = now_ms();
     // Before the latch: arm_reconnect reads the play/pause state being lost.
-    const bool recovering = reconnect_.active || arm_reconnect();
+    const bool recovering = reconnect_.active || arm_reconnect(socket);
     transport_interrupted_ = true;
     info_.error_message = recovering
         ? "Connection lost. Reconnecting to resume where you were."
@@ -833,9 +943,18 @@ void ReplayManager::on_transport_interrupted(const WebSocketClient* socket) {
 // Transport-loss recovery
 // ═══════════════════════════════════════════════════════════════════════════════
 
-bool ReplayManager::arm_reconnect() {
+bool ReplayManager::arm_reconnect(const WebSocketClient* socket) {
     if (EducationBoot::instance().is_lesson()) return false;
     ReconnectPlan plan;
+    if (socket) {
+        const WebSocketClient::CloseInfo& closed = socket->last_close();
+        plan.close_code = closed.code;
+        plan.close_clean = closed.clean;
+        plan.close_reason = closed.reason;
+        plan.socket_open_ms = closed.open_ms;
+        plan.last_frame_age_ms = socket->last_frame_age_ms();
+    }
+    plan.hidden = !usage::is_document_visible();
     plan.is_archive = info_.session_type == "archive" || pending_.is_archive;
     plan.event_id   = pending_.event_id;
     plan.symbols    = info_.symbols.empty() ? pending_.symbols : info_.symbols;
@@ -986,12 +1105,23 @@ void ReplayManager::cancel_reconnect() {
 
 void ReplayManager::emit_reconnect_usage(const char* phase) {
     const ReconnectPlan& plan = reconnect_plan_;
+    json props = {{"phase", phase}, {"attempt", reconnect_.attempt},
+                  {"archive", plan.is_archive},
+                  {"gap_ms", plan.lost_at_ms > 0 ? now_ms() - plan.lost_at_ms : 0},
+                  {"resume_at_ms", reconnect_.resume_at_ms}};
+    if (std::strcmp(phase, "lost") == 0) {
+        // measurement_version 2 adds why the socket went (hub task replay-socket-drops).
+        props["measurement_version"] = 2;
+        props["close_code"] = plan.close_code;
+        props["close_clean"] = plan.close_clean;
+        props["close_reason"] = plan.close_reason.substr(0, 64);
+        props["socket_open_s"] = plan.socket_open_ms < 0 ? -1 : static_cast<int64_t>(plan.socket_open_ms / 1000.0);
+        props["last_frame_age_ms"] = plan.last_frame_age_ms < 0 ? -1 : static_cast<int64_t>(plan.last_frame_age_ms);
+        props["hidden"] = plan.hidden;
+    }
     usage::dispatch_detail(json{{"event", "replay_reconnect"}, {"mode", usage_source()},
         {"symbol", plan.symbols.empty() ? "" : plan.symbols.front()},
-        {"props", {{"phase", phase}, {"attempt", reconnect_.attempt},
-                   {"archive", plan.is_archive},
-                   {"gap_ms", plan.lost_at_ms > 0 ? now_ms() - plan.lost_at_ms : 0},
-                   {"resume_at_ms", reconnect_.resume_at_ms}}}}.dump());
+        {"props", props}}.dump());
 }
 
 void ReplayManager::on_visibility_change(bool hidden) {
@@ -1058,6 +1188,11 @@ void ReplayManager::stop() {
 void ReplayManager::set_speed(float speed) {
     speed = std::clamp(speed, MIN_SPEED, MAX_SPEED);
     if (!is_active()) return;
+    // All inputs share this gate, including keyboard, DOM and pack controls.
+    if (!Entitlements::speed_allowed(speed)) {
+        ui::UpsellModal::instance().open(ui::UpsellModal::Trigger::Speed);
+        return;
+    }
 
     // Snapshot current interpolated time so the speed change doesn't
     // cause a time jump between now and the next replay_status.
@@ -1083,15 +1218,13 @@ void ReplayManager::set_speed(float speed) {
 
 void ReplayManager::speed_up() {
     if (current_speed_preset_idx_ < NUM_SPEED_PRESETS - 1) {
-        current_speed_preset_idx_++;
-        set_speed(SPEED_PRESETS[current_speed_preset_idx_]);
+        set_speed(SPEED_PRESETS[current_speed_preset_idx_ + 1]);
     }
 }
 
 void ReplayManager::speed_down() {
     if (current_speed_preset_idx_ > 0) {
-        current_speed_preset_idx_--;
-        set_speed(SPEED_PRESETS[current_speed_preset_idx_]);
+        set_speed(SPEED_PRESETS[current_speed_preset_idx_ - 1]);
     }
 }
 
@@ -1108,9 +1241,7 @@ void ReplayManager::seek(int64_t timestamp_ms, bool deliberate) {
         // deliberate seek retries from another position (the backend, or the
         // local pack engine, re-seeds and re-primes on seek). Connection loss
         // stays terminal.
-        const auto& boot = EducationBoot::instance();
-        const bool retry = deliberate && info_.state == State::Error && replay_ctx_ &&
-            (boot.is_event() || boot.is_lesson() || boot.is_pack());
+        const bool retry = deliberate && can_retry_historical_position();
         if (!retry) return;
         transport_interrupted_ = false;
         info_.error_message.clear();
@@ -1459,6 +1590,14 @@ void ReplayManager::skip_backward_to(int64_t timestamp_ms) {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 
+bool ReplayManager::can_retry_historical_position() const {
+    const auto& boot = EducationBoot::instance();
+    return info_.state == State::Error && replay_ctx_ && !info_.session_id.empty() &&
+        info_.end_time_ms > info_.start_time_ms && !reconnect_.active && !reconnect_.failed &&
+        (boot.is_event() || boot.is_lesson() || boot.is_pack()) &&
+        (pack_mode_ || (ws() && ws()->is_connected()));
+}
+
 bool ReplayManager::is_active() const {
     switch (info_.state) {
         case State::Creating:
@@ -1551,7 +1690,7 @@ void ReplayManager::tick_buffering_gate() {
             return;
         }
         send_control("pause");
-        info_.error_message = "Replay depth unavailable: recorded depth could not be synchronized at this position. Scrub to another time to retry.";
+        info_.error_message = "Replay did not become ready within 20 seconds. Retry this position or choose another time.";
         transition(State::Error);
         buffering_since_ms_ = 0;
         return;
@@ -1581,7 +1720,36 @@ bool ReplayManager::handle_ws_message(const std::string& type, const void* json_
                        ? msg["data"]
                        : msg;
 
+    if (type == "replay_create_error") {
+        // The box refused a create-and-join with the code the POST would have
+        // answered; the same mapping gives the same login / upsell surface.
+        if (!create_via_join_) return true;
+        create_via_join_ = false;
+        const auto refusal = replay_create::refusal_from(data);
+        on_session_error(refusal.status, refusal.body.c_str());
+        return true;
+    }
+
+    if (type == "error" && create_via_join_ && info_.state == State::Joining) {
+        std::string error = data.value("error", "");
+        if (error.empty()) error = msg.value("error", "");
+        if (replay_create::box_lacks_create_and_join(error)) {
+            // An older box: create the session the original way and join it.
+            create_via_join_ = false;
+            transition(State::Creating);
+            post_session_create(pending_create_body_);
+            return true;
+        }
+    }
+
     if (type == "replay_joined") {
+        if (create_via_join_) {
+            // The box created this session; mirror the free daily count the
+            // POST path records in on_session_created (display only).
+            create_via_join_ = false;
+            history_preloaded_ = true;   // the box sends the first chart page next
+            if (!Entitlements::is_pro()) Entitlements::note_session_started();
+        }
         info_.confirmed_time_ms = 0;
         if (data.contains("session_id")) {
             info_.session_id = data["session_id"].get<std::string>();
@@ -1932,6 +2100,7 @@ void ReplayManager::transition(State new_state) {
     info_.state = new_state;
     if (new_state == State::Buffering && reconnect_plan_.in_flight) reconnect_plan_.joined = true;
     if (new_state == State::Error) {
+        create_via_join_ = false;   // nothing answers a create once the replay has failed
         usage::dispatch_detail(json{{"event", "replay_error"}, {"mode", usage_source()},
             {"props", {{"source", usage_source()}, {"exchange", exchange_}, {"symbol", usage_symbol()}}}}.dump());
     }
@@ -2011,6 +2180,11 @@ void ReplayManager::reset() {
     transport_interrupted_ = false;
     paused_for_hidden_ = false;
     pending_ = PendingRequest{};
+    pending_join_ = false;
+    create_via_join_ = false;
+    pending_create_body_.clear();
+    create_requested_ms_ = 0;
+    history_preloaded_ = false;
     scrubber_dragging_ = false;
     last_seek_time_ms_ = 0;
     lightweight_seek_count_ = 0;
@@ -2068,8 +2242,10 @@ void ReplayManager::create_replay_data_context() {
             info_.exchange,
             ws_handle,
             playback_start_ms,
-            info_.timeframe_ms / 1000  // Use the chart's timeframe, not hardcoded 5m
+            info_.timeframe_ms / 1000,  // Use the chart's timeframe, not hardcoded 5m
+            history_preloaded_
         ));
+    history_preloaded_ = false;
     replay_ctx_ = std::move(ctx);
 
     // Notify AppState to swap AppContext pointers to replay managers
@@ -2788,7 +2964,6 @@ bool ReplayManager::process_keyboard_shortcuts() {
         // 1=0.1x, 2=0.2x, 3=0.5x, 4=1x, 5=2x, 6=4x
         for (int i = 0; i < NUM_SPEED_PRESETS && i < 9; i++) {
             if (ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_1 + i), false)) {
-                current_speed_preset_idx_ = i;
                 set_speed(SPEED_PRESETS[i]);
                 return true;
             }
@@ -2815,7 +2990,7 @@ bool ReplayManager::process_keyboard_shortcuts() {
 // independent of which chromes are allowed.
 static bool focused_replay_nav_allowed() {
     const auto& boot = EducationBoot::instance();
-    return !boot.is_embedded() || boot.is_research_replay();
+    return Entitlements::hosted() && (!boot.is_embedded() || boot.is_research_replay());
 }
 
 // Navigate the host browser to the focused research-replay viewer for an
@@ -2825,6 +3000,9 @@ static bool focused_replay_nav_allowed() {
 void ReplayManager::open_focused_replay(const std::string& exchange, const std::string& symbol,
                                         int64_t from_ms, int64_t to_ms, int64_t seek_ms,
                                         const std::vector<std::string>& with) {
+    // Self-hosted terminals have local packs, not the hosted replay route.
+    // This also guards keyboard shortcuts and compare-replay entry points.
+    if (!Entitlements::hosted()) return;
     // The venue ALWAYS travels, binancef included. It used to be implied, and
     // an implied venue is how a Bybit chart replayed as Binance: the page
     // could only default. An explicit binancef costs nothing and reads true.
@@ -2882,12 +3060,13 @@ bool ReplayManager::render_chart_context_menu(
     using drawing::UiIcon;
     bool initiated = false;
 
-    if (hovered_time_ms > 0) {
+    if (Entitlements::hosted() && hovered_time_ms > 0) {
         char time_buf[48];
         format_timestamp_full(hovered_time_ms, time_buf, sizeof(time_buf));
 
         // Section label (redesign 1f: the replay actions live under a REPLAY group).
         Theme::menu_section("REPLAY");
+        ui_test::mark("replay_context.hosted");
 
         // Plan gate: a non-Pro user can only replay BTCUSDT on Binance Futures,
         // within the last 3 days. Rather than hide the item (confusing), show WHY
@@ -3515,12 +3694,11 @@ void ReplayManager::render_speed_control() {
             if (locked)
                 ui::UpsellModal::instance().open(ui::UpsellModal::Trigger::Speed);
             else if (can_control) {
-                current_speed_preset_idx_ = i;
                 set_speed(SPEED_PRESETS[i]);
             }
         }
         if (locked && hovered)
-            Theme::tooltip("Pro plays up to 10\xc3\x97");
+            Theme::tooltip("Pro unlocks slow motion and up to 4\xc3\x97");
         x += w + pill_gap;
     }
     ImGui::PopFont();
@@ -4084,15 +4262,15 @@ void ReplayManager::render_replay_launcher() {
             ImGui::SliderInt("##daysago", &launcher_days_ago_, 2, 30, "%d days ago");
         }
 
-        // ── Speed row (0.5/1/2 free · 3/5/10 Pro) ────────────────────────────
+        // Speed row: the same presets and access policy as playback controls.
         ImGui::Dummy(ImVec2(0.0f, 10.0f));
         ImGui::PushFont(Fonts::label());
         ImGui::PushStyleColor(ImGuiCol_Text, Tokens::TX3);
         ImGui::TextUnformatted("SPEED");
         ImGui::PopStyleColor();
         ImGui::PopFont();
-        static const float kRow[] = { 0.5f, 1.0f, 2.0f, 3.0f, 5.0f, 10.0f };
-        for (int i = 0; i < 6; ++i) {
+        const auto& kRow = SPEED_PRESETS;
+        for (int i = 0; i < NUM_SPEED_PRESETS; ++i) {
             const bool locked = !Entitlements::speed_allowed(kRow[i]);
             const bool sel = std::abs(launcher_speed_ - kRow[i]) < 0.01f && !locked;
             if (i) ImGui::SameLine(0, 6);

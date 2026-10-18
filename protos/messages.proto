@@ -69,6 +69,8 @@ enum Stream {
     // from receiving rollout-only geometry.
     STREAM_PATTERN_ADMIN = 35;
     STREAM_RT_HISTORY = 36;
+    // RETIRED 2026-10-12: legacy iceberg display stream (IcebergStats). Kept to pin
+    // the wire ID; never reuse 37. The terminal no longer subscribes or parses it.
     STREAM_ICEBERG_STATE = 37;
     // Live V2 modelled liquidation map (LiqMapV2Frame) and its get_historical_liqmap2 response
     // (LiqMapV2History). Modelled from the venue's open interest, never observed positions (34).
@@ -78,6 +80,10 @@ enum Stream {
     // response (LiqMapV2RailsHistory). Admin only until the rails forward check passes and James releases them.
     STREAM_LIQMAP2_RAILS = 40;
     STREAM_HISTORICAL_LIQMAP2_RAILS = 41;
+    // Hyperliquid rails built on the server from our node's census (HLRails on hlrails.hl.<COIN>) and the
+    // get_historical_hl_rails response (HLRailsHistory). Backend proto/hlrails.proto; keep the two in step.
+    STREAM_HL_RAILS = 42;
+    STREAM_HISTORICAL_HL_RAILS = 43;
 }
 
 message WSPayload {
@@ -583,6 +589,10 @@ message TickVolumeUpdate {
     double poc = 13;
     double vah = 14;
     double val = 15;
+    // Fields 16-18 (delta metrics) are not read here.
+    // Completion sentinel only (timestamp_ms 0): non-empty when the history
+    // request failed or was refused; start_time/end_time echo the request.
+    string history_error = 19;
 }
 
 // Batch of TickVolumeUpdate messages for historical footprint delivery.
@@ -879,26 +889,6 @@ message RealtimeTradeBin {
   int64 last_id = 10;
 }
 
-// Live display snapshot, never a reconstruction or proof of hidden inventory.
-// Sides are taker sides. Volumes include only in-window bulks of qualifying
-// repeated-trade clusters; not the detector's projected total hidden size.
-message IcebergStats {
-  uint32 schema_version = 1;
-  int64 timestamp_ms = 2;
-  int64 source_trade_ms = 3;
-  int64 window_start_ms = 4;
-  int64 window_end_ms = 5;
-  int64 detector_start_ms = 6;
-  int32 buy_clusters = 7;
-  int32 sell_clusters = 8;
-  double buy_executed_usd = 9;
-  double sell_executed_usd = 10;
-  bool history_limited = 11;
-  double min_confidence = 12;
-  int32 min_refreshes = 13;
-  double min_bulk_usd = 14;
-}
-
 // V2 modelled liquidation map frame (backend proto/liqmap2.proto, cmd/liqmap2-publisher; hub task
 // liq-map-v2). One per market per minute: standing long liquidations below the mark and short ones
 // above it, ascending price on the 0.25% log grid, at most 256 within 20% of the mark, in USD after
@@ -1003,4 +993,61 @@ message LiqMapV2RailsHistory {
   int64 start_ms = 2;
   int64 end_ms = 3;
   repeated LiqMapV2RailRecord rails = 4;
+}
+
+// Hyperliquid rails (backend proto/hlrails.proto, cmd/hlrails-publisher; field numbers frozen, keep in step): observed
+// Hyperliquid positions by the price at which they liquidate, one rail per 0.25% census bin at the bin's price for life,
+// born only among the bins holding most of their side's dollars. Positions that exist, from a sample of wallets: not a
+// forecast that price goes there.
+message HLRail {
+  int64 id = 1;                // unique within the coin and config_id
+  bool is_long = 2;            // long positions liquidate below the mark, shorts above it
+  double price = 3;            // the bin's price, fixed for life (Hyperliquid's price)
+  int64 born_ms = 4;
+  double zone_lo = 5;          // the bin's price span
+  double zone_hi = 6;
+  double usd = 7;              // position notional liquidating in the bin, every leverage
+  repeated double lev_usd = 8; // usd by real leverage: up to 7x, 8x to 17x, 18x to 37x, 38x and up
+  int64 positions = 9;
+  int64 step_ms = 10;          // when usd, lev_usd and positions were last set
+}
+
+message HLRailEnd {
+  int64 id = 1;
+  bool is_long = 2;
+  double price = 3;
+  int64 born_ms = 4;
+  int64 end_ms = 5;
+  string end = 6;              // touched | closed | gap
+}
+
+message HLRails {
+  Pair pair = 1;               // hl, COIN
+  int64 timestamp_ms = 2;      // the census snapshot
+  double mark_price = 3;
+  string config_id = 4;
+  repeated HLRail rails = 5;   // every standing rail, ascending price
+  repeated HLRailEnd ended = 6; // since the previous message for the coin
+  repeated int64 resumed = 7;  // rails ended "closed" earlier whose end is lifted (they are in rails again)
+  double usable_notional_usd = 8;      // the census behind the snapshot, as the frame says
+  double coverage_denominator_usd = 9; // the coin's open interest at the mark; 0 unknown
+  uint32 usable_positions = 10;
+  uint32 sampled_positions = 11;
+  uint32 census_version = 12;
+}
+
+message HLRailRecord {
+  HLRail rail = 1;             // its latest stored step
+  repeated HLRail steps = 2;   // every stored step, oldest first
+  int64 end_ms = 3;            // 0 while live
+  string end = 4;
+  string config_id = 5;
+}
+
+// get_historical_hl_rails response: every stored rail of one coin alive within [start, end].
+message HLRailsHistory {
+  Pair pair = 1;
+  int64 start_ms = 2;
+  int64 end_ms = 3;
+  repeated HLRailRecord rails = 4;
 }

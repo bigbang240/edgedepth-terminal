@@ -264,6 +264,28 @@ int main() {
     expect(!manager.realtime_ready(pair, 10016), "future depth cannot prime replay");
     expect(!manager.realtime_ready(pair, 26000), "old seed cannot prime a later seek");
     expect(!manager.realtime_ready(pair, 10317, 10317), "client waits for reconstruction already acknowledged on the JSON lane");
+    {
+        // A replay primes with recording held (until depth_ready). The primed
+        // book is recorded when recording resumes, so the held clock at the
+        // book's own time is ready without waiting for a later delta.
+        OrderbookManager held;
+        held.set_realtime_recording(false);
+        held.apply_orderbook_snapshot_from_pb(pair, seed);
+        expect(!held.realtime_ready(pair, 10017), "a held book is not ready before depth_ready");
+        held.set_realtime_recording(true);
+        expect(held.realtime_ready(pair, 10017, 10017), "the primed book is ready at its own time once recording resumes");
+        expect(!held.realtime_ready(pair, 10016), "resuming cannot make future depth ready");
+        // A chain that broke while held stays unready when recording resumes.
+        OrderbookManager broken;
+        broken.set_realtime_recording(false);
+        broken.apply_orderbook_snapshot_from_pb(pair, seed);
+        pb::BookUpdate gap;
+        gap.set_timestamp_ms(10050); gap.set_first_update_id(150);
+        gap.set_last_update_id(151); gap.set_previous_update_id(149);
+        broken.apply_book_update_from_pb(pair, gap);
+        broken.set_realtime_recording(true);
+        expect(!broken.realtime_ready(pair, 10050), "resuming never records a broken chain");
+    }
     pb::BookTickerUpdate quote;
     quote.set_timestamp_ms(99999); quote.set_best_bid(105); quote.set_best_bid_qty(10);
     manager.apply_book_ticker_from_pb(pair, quote);

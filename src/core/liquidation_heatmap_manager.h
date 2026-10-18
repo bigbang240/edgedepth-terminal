@@ -2,6 +2,7 @@
 #include "core/census_history.h"
 #include "core/liqmap2_store.h"
 #include "core/liqmap2_rails.h"
+#include "core/hl_rails.h"
 #include "core/reported_liquidation_history.h"
 
 #include "types/types.h"
@@ -55,8 +56,14 @@ public:
     void apply_liqmap2_rails(const Terminal::Pair& pair, const pb::LiqMapV2Rails& msg);
     void apply_liqmap2_rails_history(const Terminal::Pair& pair, const pb::LiqMapV2RailsHistory& history);
     const liqmap2_rails::Store* get_liqmap2_rails(const Terminal::Pair& pair) const;
+    // ─── Hyperliquid rails built on the server (stream 42, history 43) ─────
+    // One hl_rails::Store per coin ({"hl", COIN}), at most hl_rails::kMaxMarkets.
+    void apply_hl_rails(const Terminal::Pair& coin, const pb::HLRails& msg);
+    void apply_hl_rails_history(const Terminal::Pair& coin, const pb::HLRailsHistory& history);
+    const hl_rails::Store* get_hl_rails(const Terminal::Pair& coin) const;
 private:
     liqmap2_rails::Store& rails_store(const Terminal::Pair& pair);
+    hl_rails::Store& hl_rails_store(const Terminal::Pair& coin);
 public:
 
 
@@ -108,6 +115,7 @@ private:
     std::map<LiqHeatmapKey, CensusHistory> census_history_; // at most four markets
     std::map<LiqHeatmapKey, liqmap2::History> liqmap2_history_; // at most liqmap2::kMaxMarkets
     std::map<LiqHeatmapKey, liqmap2_rails::Store> liqmap2_rails_; // at most liqmap2_rails::kMaxMarkets
+    std::map<LiqHeatmapKey, hl_rails::Store> hl_rails_;           // by coin, at most hl_rails::kMaxMarkets
     // Profile mode: latest snapshot per symbol
     std::map<LiqHeatmapKey, Terminal::LiquidationHeatmapSnapshot> snapshots_;
 

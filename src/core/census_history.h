@@ -53,8 +53,11 @@ public:
             old->second.census_quality.version > frame.census_quality.version)) return true;
         frames_.insert_or_assign(frame.timestamp_ms, std::move(frame));
         while (frames_.size() > kMaxFrames) frames_.erase(frames_.begin());
+        ++revision_;
         return true;
     }
+    // Changes whenever a snapshot is added, replaced or evicted.
+    uint64_t revision() const { return revision_; }
     const Frame* at(int64_t asof) const {
         auto it = frames_.upper_bound(asof);
         return it == frames_.begin() ? nullptr : &std::prev(it)->second;
@@ -71,5 +74,6 @@ public:
     const auto& frames() const { return frames_; }
 private:
     std::map<int64_t, Frame> frames_;
+    uint64_t revision_ = 0;
 };
 }

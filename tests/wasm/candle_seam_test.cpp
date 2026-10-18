@@ -34,6 +34,13 @@ static size_t history_requests() {
     for (const auto& m : sent) n += m["method"] == "get_historical_candles";
     return n;
 }
+// Scroll-back is rate limited from the steady clock's epoch, which a fresh
+// node process sits within.
+static void past_load_cooldown() {
+    const auto until = std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(CandleManager::LOAD_COOLDOWN_MS + 50);
+    while (std::chrono::steady_clock::now() < until) {}
+}
 static Terminal::Candle candle(int64_t ts, double price, int64_t trades, bool final = true) {
     return {1, price, price, price, price, double(trades), double(trades), 0, trades, 0, ts, final};
 }
@@ -141,6 +148,39 @@ int main() {
               "rewind preserves fully observed closed OHLC");
         check(replay->tick_times().empty(), "rewind drops future line points");
     }
+
+    // Replay scroll-back with nothing older: the server and the pack engine
+    // send no frame for zero rows, so the request is never answered. A thin
+    // market's short 1s history (CYS pump pack: about 4 minutes before the
+    // window) puts the view at the oldest candle on load, and that request
+    // used to stop every replay trade from building a candle.
+    const Terminal::Pair thin_pair{"binancef", "cysusdt"};
+    CandleManager thin(thin_pair, 1, sm);
+    thin.subscribe();
+    thin.mark_ready_for_replay();
+    const int64_t open_ms = 1786052700000;  // 2026-08-06 21:45:00 UTC
+    thin.reset_for_seek(open_ms);
+    const StreamKey thin_candles{thin_pair, Terminal::Stream::Candles, 1};
+    const StreamKey thin_trades{thin_pair, Terminal::Stream::Trades, 0};
+    sm.dispatch_candles_impl(thin_candles, std::vector<Terminal::Candle>{
+        candle(open_ms - 239000, 0.8320, 2), candle(open_ms - 1000, 0.8335, 3)});
+    check(!thin.is_loading(), "the seek batch lands");
+    const size_t asked = history_requests();
+    past_load_cooldown();
+    thin.update(double(open_ms - 239000), double(open_ms + 5000));
+    check(history_requests() == asked + 1 && sent.back()["data"]["end_time"] == open_ms - 239001,
+          "a view at the oldest candle asks for older history");
+    sm.dispatch_trade_impl(thin_trades, {0.8350, 5, open_ms + 1500, true});
+    check(thin.has_building_candle() && thin.building_candle().timestamp_ms == open_ms + 1000 &&
+          thin.building_candle().close == 0.8350,
+          "a replay trade builds its candle while older history goes unanswered");
+    sm.dispatch_trade_impl(thin_trades, {0.8361, 2, open_ms + 2200, false});
+    check(thin.candles().back().timestamp_ms == open_ms + 1000 &&
+          thin.building_candle().timestamp_ms == open_ms + 2000 && thin.building_candle().close == 0.8361,
+          "the next second closes it and builds its own");
+    past_load_cooldown();
+    thin.update(double(open_ms - 239000), double(open_ms + 5000));
+    check(history_requests() == asked + 1, "the unanswered request is not repeated");
 
     std::puts("candle seam passed");
     return 0;

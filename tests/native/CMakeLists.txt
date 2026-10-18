@@ -110,13 +110,13 @@ add_terminal_native_test(liqmap2_store_test liqmap2_store_test.cpp)
 add_terminal_native_test(liqmap2_release_test liqmap2_release_test.cpp)
 add_terminal_native_test(liqmap2_scorecard_test liqmap2_scorecard_test.cpp)
 add_terminal_native_test(liqmap2_rails_test liqmap2_rails_test.cpp)
+add_terminal_native_test(liqmap2_rails_asof_test liqmap2_rails_asof_test.cpp)
+add_terminal_native_test(hl_rails_test hl_rails_test.cpp)
 target_link_libraries(liqmap2_scorecard_test PRIVATE nlohmann_json::nlohmann_json)
 target_link_libraries(touch_odds_test PRIVATE nlohmann_json::nlohmann_json)
 
 add_terminal_native_test(stats_snapshot_test stats_snapshot_test.cpp)
 target_link_libraries(stats_snapshot_test PRIVATE nlohmann_json::nlohmann_json)
-
-add_terminal_native_test(iceberg_snapshot_test iceberg_snapshot_test.cpp)
 
 add_terminal_native_test(stats_oi_history_test stats_oi_history_test.cpp)
 
@@ -140,3 +140,28 @@ target_link_libraries(research_readings_test PRIVATE nlohmann_json::nlohmann_jso
 
 add_terminal_native_test(market_data_overview_test market_data_overview_test.cpp)
 target_link_libraries(market_data_overview_test PRIVATE nlohmann_json::nlohmann_json)
+
+# Refill levels: parse/merge/reset/eviction, subscription counts and access (compiles the production unit).
+add_terminal_native_test(refill_levels_test refill_levels_test.cpp)
+target_sources(refill_levels_test PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../src/core/refill_levels.cpp)
+target_link_libraries(refill_levels_test PRIVATE nlohmann_json::nlohmann_json)
+# Recorded refill levels on candle charts: request planning, replies, coverage and selection.
+add_terminal_native_test(refill_absorption_test refill_absorption_test.cpp)
+target_link_libraries(refill_absorption_test PRIVATE nlohmann_json::nlohmann_json)
+
+add_terminal_native_test(refill_history_test refill_history_test.cpp)
+target_sources(refill_history_test PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../src/core/refill_history.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/../../src/core/refill_levels.cpp)
+target_link_libraries(refill_history_test PRIVATE nlohmann_json::nlohmann_json)
+
+# Real-time extras (src/core/rt_*.h).
+add_terminal_native_test(rt_walls_test rt_walls_test.cpp)
+target_link_libraries(rt_walls_test PRIVATE nlohmann_json::nlohmann_json)
+add_terminal_native_test(rt_cvd_test rt_cvd_test.cpp)
+target_link_libraries(rt_cvd_test PRIVATE nlohmann_json::nlohmann_json)
+add_terminal_native_test(rt_contrast_test rt_contrast_test.cpp)
+
+# One-message replay start (join_replay carrying the create body) and the
+# replies that send an older box back to POST then join.
+add_terminal_native_test(replay_create_test replay_create_test.cpp)
+target_link_libraries(replay_create_test PRIVATE nlohmann_json::nlohmann_json)

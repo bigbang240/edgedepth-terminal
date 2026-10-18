@@ -25,8 +25,8 @@ docker compose up
 Open **[localhost:8080](http://localhost:8080)**. This starts the terminal and the
 [community gateway](https://github.com/edgedepthhq/edgedepth-gateway) on Binance's public data. No account or API key required.
 
-- **Live:** select a market, then choose **Real-time** to see depth and trade bubbles.
-- **Replay:** choose **Replay → Open Replay Library** and pick a free recording. It plays locally, without a live feed.
+- **Live:** a fresh workspace opens in **Real-time depth**. Trade bubbles start off; enable them in **Layers** when wanted. Saved workspaces keep your choices.
+- **Replay:** choose **Replay → Replay Library** and pick a free recording. It plays locally, without a live feed.
 
 The gateway connects from your machine to Binance's public futures endpoints, and
 Binance may be unavailable in some regions. If the live view stays empty, use the Replay

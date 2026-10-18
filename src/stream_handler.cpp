@@ -72,6 +72,9 @@ void StreamManager::send_message(const std::string& message) const {
 
 // These payloads go directly to their managers in MessageHandler.
 // Keep owners here so reconnect and replay transitions retain the subscription.
+bool StreamManager::dispatch_backlogged() const { return dispatch_queue_ && dispatch_queue_->backlogged(); }
+uint64_t StreamManager::dispatch_dropped() const { return dispatch_queue_ ? dispatch_queue_->dropped_total() : 0; }
+
 void StreamManager::subscribe_direct(const StreamKey& key, void* owner) {
     auto& owners = direct_subs_[key];
     if (std::find(owners.begin(), owners.end(), owner) != owners.end()) return;
@@ -531,9 +534,9 @@ void StreamManager::send_subscribe(const StreamKey& key) const {
     );
     if (key.stream_type == Terminal::Stream::LiquidationLevels ||
         key.stream_type == Terminal::Stream::PatternAdmin ||
-        key.stream_type == Terminal::Stream::IcebergState ||
         key.stream_type == Terminal::Stream::LiqMapV2 ||
-        key.stream_type == Terminal::Stream::LiqMapV2Rails) {
+        key.stream_type == Terminal::Stream::LiqMapV2Rails ||
+        key.stream_type == Terminal::Stream::HLRails) {
         // The host seeds this before boot and refreshes it. Re-read on every
         // subscribe, including reconnect and return from replay.
         const char* token = emscripten_run_script_string("window.__EDGEDEPTH_REPLAY_TOKEN__ || ''");
@@ -659,6 +662,20 @@ bool StreamManager::request_historical_liqmap2_rails(const Terminal::Pair& pair,
     const char* token = emscripten_run_script_string("window.__EDGEDEPTH_REPLAY_TOKEN__ || ''");
     json request = {{"method", "get_historical_liqmap2_rails"}, {"data", {
         {"pair", {{"exchange", pair.exchange}, {"symbol", pair.symbol}}},
+        {"start_ms", start_ms}, {"end_ms", end_ms}, {"entitlement_token", token ? token : ""}
+    }}};
+    send_message(request.dump());
+    return true;
+}
+
+// One coin's stored Hyperliquid rails alive within [start, end] (get_historical_hl_rails, stream 43). Free on BTC,
+// so an anonymous viewer still asks; the server refuses another coin without a paid token.
+bool StreamManager::request_historical_hl_rails(const Terminal::Pair& coin, int64_t start_ms, int64_t end_ms) const {
+    unsigned short ready = 0;
+    if (ws_ <= 0 || emscripten_websocket_get_ready_state(ws_, &ready) != EMSCRIPTEN_RESULT_SUCCESS || ready != 1) return false;
+    const char* token = emscripten_run_script_string("window.__EDGEDEPTH_REPLAY_TOKEN__ || ''");
+    json request = {{"method", "get_historical_hl_rails"}, {"data", {
+        {"pair", {{"exchange", coin.exchange}, {"symbol", coin.symbol}}},
         {"start_ms", start_ms}, {"end_ms", end_ms}, {"entitlement_token", token ? token : ""}
     }}};
     send_message(request.dump());

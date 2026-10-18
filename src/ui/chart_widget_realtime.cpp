@@ -1,4 +1,5 @@
 #include "ui/chart_widget.h"
+#include "core/ui_test_marks.h"
 #include "ui/drawing/drawing_icons.h"
 #include "core/candle_bubble_display.h"
 #include "ui/realtime_navigation.h"
@@ -168,6 +169,7 @@ void ChartWidget::render_realtime_settings() {
             rt_query_from_ = 0; // A cancelled request is not loaded coverage.
         } else { rt_paused_trades_.clear(); rt_paused_liquidations_.clear(); }
     }
+    ui_test::mark("rt.pause");
     if (Theme::menu_toggle("Follow price", rt_auto_price_)) rt_auto_price_ = !rt_auto_price_;
     if (ImGui::IsItemHovered()) Theme::tooltip("Keep price in view. Drag the price axis to inspect manually.");
     if (Theme::menu_item(UiIcon::Play, "Return live")) {
@@ -177,12 +179,15 @@ void ChartWidget::render_realtime_settings() {
         rt_price_window_ = {}; rt_auto_fit_ = {};
         candles().set_follow_live(true);
     }
+    ui_test::mark("rt.live");
     if (rt_archive_ && Theme::menu_item(UiIcon::Range, "Whole session")) {
         rt_span_ms_ = double(RealtimeArchive::target_ms) / 0.88;
         candles().set_follow_live(true);
     }
+    ui_test::mark("rt.whole");
     Theme::menu_separator();
     if (Theme::menu_toggle("Depth ladder", rt_dom_shown_)) rt_dom_shown_ = !rt_dom_shown_;
+    ui_test::mark("rt.ladder");
     if (Theme::menu_toggle("Side panels", rt_show_standalone_)) rt_show_standalone_ = !rt_show_standalone_;
     if (ImGui::IsItemHovered()) Theme::tooltip("Show the separate DOM and trade panels beside this view.");
 
@@ -241,6 +246,7 @@ void ChartWidget::on_rewind(int64_t) {
     rt_paused_trades_.clear();
     rt_book_valid_ = false;
     rt_bubble_scale_ = {};
+    reset_realtime_extras();
     // Candle-mode large prints belong to the traversal being discarded too.
     candle_bubble_history_.reset();
     flow_history_.reset();
@@ -433,7 +439,7 @@ void ChartWidget::render_realtime() {
             if (rt_renderer_ && rt_renderer_->bridges_observation(after->timestamp_ms)) {
                 dl->AddLine(ImVec2(left, pos.y + size.y - 3), ImVec2(right, pos.y + size.y - 3),
                     Theme::u32(Theme::Tokens::WARN, 0.7f), 2.0f);
-                if (ImPlot::IsPlotHovered() && ImGui::IsMouseHoveringRect(
+                if (realtime_hover_ready() && ImGui::IsMouseHoveringRect(
                     ImVec2(left - 3, pos.y + size.y - 12), ImVec2(right + 3, pos.y + size.y)))
                     Theme::tooltip("Display bridge: %.1fs held from the last confirmed book. No depth was recorded in the gap.",
                         double(after->timestamp_ms - before->timestamp_ms) / 1000);
@@ -447,7 +453,7 @@ void ChartWidget::render_realtime() {
             if (right - left > text.x + 16)
                 dl->AddText(ImVec2((left + right - text.x) * 0.5f, pos.y + size.y - text.y - 10),
                     Theme::u32(Theme::Tokens::TX2), label);
-            if (ImPlot::IsPlotHovered() && ImGui::GetIO().MousePos.x >= left &&
+            if (ImGui::GetIO().KeyAlt && realtime_hover_ready() && ImGui::GetIO().MousePos.x >= left &&
                 ImGui::GetIO().MousePos.x < right) {
                 Theme::begin_tooltip();
                 ImGui::TextUnformatted("No continuous depth recorded in this interval");
@@ -538,25 +544,35 @@ void ChartWidget::render_realtime() {
         }
         flush();
     }
-    // Calibrate from original received records even while displaying an archive.
-    // Grouped archive markers are sums, not samples of individual trade sizes.
-    if (rt_auto_bubbles_) rt_bubble_scale_.update(
-        rt_paused_ ? rt_paused_trades_ : candles().realtime_trades().trades(), rt_clock_ms_);
+    // Size and filter the same exact-price 100ms groups that are drawn. The
+    // viewport and lossy archive display summaries never enter calibration.
+    if (rt_auto_bubbles_ && rt_archive_) rt_bubble_scale_.update(rt_archive_->bubbles(), rt_clock_ms_);
     const double minimum = rt_auto_bubbles_
         ? (rt_bubble_scale_.settled() ? rt_bubble_scale_.minimum() : 0) : rt_min_notional_;
+    // Refill levels' absorption bubbles swell behind the trades that hit them.
+    render_refill_lenses(dl, limits, minimum);
     if (rt_bubbles_ && minimum > 0 && rt_archive_) {
+        ProfileScope bubbles_profile("RT trade bubbles");
         // Immutable capture publications, not a ranking of the current viewport.
         // Neither archive refreshes nor camera movement can change a marker.
+        size_t test_marks = 0;
         rt_archive_->bubbles().for_each(int64_t(limits.X.Min), int64_t(limits.X.Max), rt_clock_ms_,
             [&](const RealtimeBubbleHistory::Bubble& m) {
                 if (m.value() < minimum) return;
                 const ImVec4& major = m.buy_led() ? Theme::Tokens::UP : Theme::Tokens::DOWN;
                 const ImVec4& minor = m.buy_led() ? Theme::Tokens::DOWN : Theme::Tokens::UP;
-                RealtimeBubble::draw(*dl, ImPlot::PlotToPixels(double(m.timestamp_ms), m.price),
-                    RealtimeBubble::radius(m.value(), minimum), major, Theme::u32(Theme::Tokens::BASE),
+                const ImVec2 center = ImPlot::PlotToPixels(double(m.timestamp_ms), m.price);
+                const float radius = RealtimeBubble::radius(m.value(), minimum, rt_bubble_cap_);
+                RealtimeBubble::draw(*dl, center, radius, major, Theme::u32(Theme::Tokens::BASE),
                     RealtimeBubble::Fill::Opaque, float(m.minor()), minor);
+                if (ui_test::enabled() && test_marks < 256)
+                    ui_test::mark_rect("rt.bubble." + std::to_string(test_marks++),
+                        ImVec2(center.x - radius, center.y - radius), ImVec2(center.x + radius, center.y + radius));
             });
     }
+    // The signals over the trades: wall marks and pulls, then refill marks on top of everything but the quotes.
+    render_realtime_walls(dl);
+    render_refill_levels(dl, limits);
     if (fresh && limits.X.Max > rt_clock_ms_) {
         const auto& book = *rt_latest_;
         // The dashed quotes stop where the current-depth projection stops.
@@ -618,6 +634,7 @@ void ChartWidget::render_realtime() {
         Theme::u32(depth_warn ? Theme::Tokens::WARN : Theme::Tokens::TX2), note);
     ImGui::PopFont();
     Theme::chart_chip(note_min, note_max);
+    render_refill_status(dl);
     if (ImGui::IsMouseHoveringRect(note_min, note_max) && ImPlot::IsPlotHovered()) {
         Theme::begin_tooltip();
         ImGui::TextUnformatted("Depth averages received samples; the right margin holds the current book.");
@@ -666,6 +683,7 @@ void ChartWidget::configure_depth_fidelity(ShaderHeatmapRenderer& renderer) {
         // The chart owns one display grid for both historical depth and DOM.
         // Archive queries retain the selected minimum grouping for later detail.
         renderer.set_bucket_multiplier(rt_effective_multiplier_);
+        renderer.set_realtime_auto_contrast(rt_auto_contrast_);
         return;
     }
     const double native_bucket = renderer.get_native_bucket_size();
@@ -710,6 +728,7 @@ bool ChartWidget::realtime_live_edge() const {
 }
 
 void ChartWidget::update_realtime_archive_view() {
+    ProfileScope profile("RT archive view");
     if (!rt_archive_ || !rt_renderer_ || rt_clock_ms_<=0) return;
     if (rt_archive_generation_ != rt_archive_->generation) {
         rt_archive_generation_ = rt_archive_->generation;

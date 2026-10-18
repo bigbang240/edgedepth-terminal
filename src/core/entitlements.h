@@ -64,8 +64,8 @@ inline constexpr int64_t PRO_REPLAY_LOOKBACK_MS   = 90LL * 24LL * 3600LL * 1000L
 inline int64_t& pro_lookback_ms()   { static int64_t v = PRO_REPLAY_LOOKBACK_MS; return v; }
 inline int      pro_lookback_days() { return static_cast<int>(pro_lookback_ms() / (24LL * 3600LL * 1000LL)); }
 
-// Free replay speed cap. The server CLAMPS silently to this (never errors, D7); the
-// client locks the >1× buttons and funnels a tap into the upsell modal.
+// Free replay runs at exactly 1x. The server silently normalizes requests;
+// the client sends both slow-motion and faster-speed requests to the upsell.
 inline constexpr double  FREE_MAX_SPEED = 1.0;
 
 // Free replay sessions per UTC day (server enforces via TIER_DAILY → 429; the client
@@ -334,8 +334,8 @@ inline bool range_replayable(int64_t start_ms, int64_t end_ms, int64_t now_ms) {
 }
 
 // ── Speed ────────────────────────────────────────────────────────────────────
-inline bool   speed_allowed(double s)        { return is_pro() || s <= FREE_MAX_SPEED + 1e-9; }
-inline double clamp_speed_for_tier(double s)  { return is_pro() ? s : (s > FREE_MAX_SPEED ? FREE_MAX_SPEED : s); }
+inline bool   speed_allowed(double s)        { return is_pro() || s == FREE_MAX_SPEED; }
+inline double clamp_speed_for_tier(double s)  { return is_pro() ? s : FREE_MAX_SPEED; }
 
 // Short human label for the advertised archive depth (scrubber caption).
 inline const char* archive_label() {

@@ -215,6 +215,11 @@ private:
         const void* data, size_t size,
         bool history,
         LiquidationHeatmapManager* liq_heatmap_mgr);
+    static void handle_hl_rails_message(
+        const Terminal::Pair& pair,
+        const void* data, size_t size,
+        bool history,
+        LiquidationHeatmapManager* liq_heatmap_mgr);
     static void handle_historical_liq_heatmap_batch(
         const Terminal::Pair& pair,
         const void* data, size_t size,

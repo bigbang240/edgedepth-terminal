@@ -65,17 +65,16 @@ void ChartWidget::prepare_liquidations() {
     if(!replay){
         history.connection(ctx_.stream_mgr().connected(),now,ctx_.stream_mgr().connection_generation());
         if(Entitlements::hosted() && Entitlements::is_pro() && !(rt_mode_ && rt_paused_) && !EducationBoot::instance().is_pack()){
-            const auto send=[&](int64_t from,int64_t to){
-                auto req=history.request(pair_.exchange,pair_.symbol,from,to,now,Entitlements::pro_lookback_ms(),emscripten_get_now());
-                if(req.empty())return false;
+            // The whole view and, on candles, the window the callouts' typical candle is measured over, planned
+            // together: one walk, newest first, so the callouts settle with the view instead of after it.
+            const int64_t typical_from=rt_mode_?0:liq_cutoff_-observed_liquidations::kTypicalCandles*candles().timeframe_seconds()*1000;
+            auto req=history.request(pair_.exchange,pair_.symbol,liq_view_from_,liq_view_to_,now,Entitlements::pro_lookback_ms(),
+                                     emscripten_get_now(),typical_from,rt_mode_?0:liq_cutoff_+1);
+            if(!req.empty()){
                 const char* token=emscripten_run_script_string("window.__EDGEDEPTH_REPLAY_TOKEN__ || ''");
                 req["data"]["entitlement_token"]=token?token:"";
                 ctx_.stream_mgr().send_message(req.dump());
-                return true;
-            };
-            // The whole view first, then on candles the window the callouts' typical candle is measured over.
-            if(!send(liq_view_from_,liq_view_to_) && !rt_mode_ && !history.loading())
-                send(liq_cutoff_-observed_liquidations::kTypicalCandles*candles().timeframe_seconds()*1000,liq_cutoff_+1);
+            }
         }
     }
     // One short status. It reaches the chart only when it changes what the viewer sees (loading, interrupted,
@@ -308,21 +307,44 @@ void ChartWidget::render_liq_callouts() {
     if(typ.data!=events.data() || typ.n!=events.size() || typ.tf!=tf || typ.cutoff_bucket!=liq_cutoff_/tf || typ.min_usd!=liq_obs_min_usd_)
         typ={events.data(),events.size(),tf,liq_cutoff_/tf,liq_obs_min_usd_,
              observed_liquidations::typical_candle(events,liq_cutoff_,tf,liq_obs_min_usd_)};
-    const auto marks=observed_liquidations::callouts(events,liq_view_from_,liq_view_to_,typ.usd,liq_callout_x_,liq_obs_min_usd_,open_of);
+    // The reports the view holds, as callouts() reads them: [from, to).
+    const auto by_time=[](const auto& e,int64_t t){return e.timestamp_ms<t;};
+    const size_t first=size_t(std::lower_bound(events.begin(),events.end(),liq_view_from_,by_time)-events.begin());
+    const size_t last=std::max(first,size_t(std::lower_bound(events.begin(),events.end(),liq_view_to_,by_time)-events.begin()));
+    const uint64_t revision=ctx_.liq_heatmap_mgr().reported_history(pair_).revision;
+    auto& co=liq_callouts_;
+    if(!co.valid || co.events!=&events || co.data!=events.data() || co.size!=events.size() || co.revision!=revision ||
+       co.first!=first || co.last!=last || co.typical!=typ.usd || co.multiple!=liq_callout_x_ || co.min_usd!=liq_obs_min_usd_ ||
+       co.tf!=tf || co.building!=b_open || co.candles!=&ts || co.candles_revision!=candles().history_revision()) {
+        co.marks=observed_liquidations::callouts(events,liq_view_from_,liq_view_to_,typ.usd,liq_callout_x_,liq_obs_min_usd_,open_of);
+        co.labels.resize(co.marks.size());
+        for(size_t i=0;i<co.marks.size();++i)observed_liquidations::compact_usd(co.marks[i].usd,co.labels[i].data(),co.labels[i].size());
+        co.font=nullptr;
+        co.valid=true;co.events=&events;co.data=events.data();co.size=events.size();co.revision=revision;
+        co.first=first;co.last=last;co.typical=typ.usd;co.multiple=liq_callout_x_;co.min_usd=liq_obs_min_usd_;
+        co.tf=tf;co.building=b_open;co.candles=&ts;co.candles_revision=candles().history_revision();
+    }
+    const auto& marks=co.marks;
     if(marks.empty())return;
     const auto pos=ImPlot::GetPlotPos(),size=ImPlot::GetPlotSize();
     auto* draw=ImPlot::GetPlotDrawList();const auto mouse=ImGui::GetIO().MousePos;
     ImPlot::PushPlotClipRect();
     ImGui::PushFont(Theme::Fonts::mono_sm());
+    if(co.font!=ImGui::GetFont() || co.font_size!=ImGui::GetFontSize()) {
+        co.font=ImGui::GetFont();co.font_size=ImGui::GetFontSize();
+        co.sizes.clear();
+        for(const auto& label:co.labels)co.sizes.push_back(ImGui::CalcTextSize(label.data()));
+    }
     const float th=ImGui::GetTextLineHeight();
     constexpr float kPadX=5.0f,kPadY=2.0f,kGap=7.0f,kPointer=5.0f;
     std::vector<ImVec4> placed;  // (x0,y0,x1,y1)
     const observed_liquidations::CandleSide* hovered=nullptr;
-    for(const auto& m:marks){
+    for(size_t i=0;i<marks.size();++i){
+        const auto& m=marks[i];
         double h=0,l=0;
         if(!extremes(m.open,h,l))continue;
-        char text[24];observed_liquidations::compact_usd(m.usd,text,sizeof(text));
-        const ImVec2 tsz=ImGui::CalcTextSize(text);
+        const char* text=co.labels[i].data();
+        const ImVec2 tsz=co.sizes[i];
         const float x=std::round(ImPlot::PlotToPixels(double(m.open),0).x);
         const float tip=ImPlot::PlotToPixels(0,m.shorts?h:l).y;
         const float w=tsz.x+2*kPadX,hgt=th+2*kPadY;
@@ -425,7 +447,7 @@ void ChartWidget::render_liq_observed() {
         const float d=std::abs(mouse.x-center.x)+std::abs(mouse.y-center.y);if(d<radius+4 && d<nearest){hovered=&c;nearest=d;}
     }
     ImPlot::PopPlotClipRect();
-    if(!hovered || !ImPlot::IsPlotHovered())return;
+    if(!hovered || ImGui::GetIO().KeyAlt || !realtime_hover_ready())return;
     const auto& c=*hovered;const auto& e=*c.largest;
     char total[32],when[64],last_time[64],price[40],at[40];
     observed_liquidations::hover_usd(c.total,total,sizeof(total));

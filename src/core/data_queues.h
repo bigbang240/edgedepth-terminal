@@ -99,6 +99,14 @@ public:
         return dropped > 0;
     }
 
+    // Dispatches parsed but not yet run on the main thread: queued here or
+    // carried to the next frame by the drain budget. Depth is written as it
+    // arrives, so while this holds, received trades lag the book.
+    bool backlogged() const {
+        const auto s = counters_.snapshot();
+        return s.pending_dispatch.current + s.carry.current > 0;
+    }
+
     std::uint64_t dropped_total() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return dropped_total_ + dropped_;

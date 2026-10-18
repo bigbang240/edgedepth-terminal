@@ -9,6 +9,7 @@
 #include "education/chart_projection.h"
 #include "education/transport_emit.h"
 #include "core/app_context.h"
+#include "core/entitlements.h"
 #include "core/candle_manager.h"
 #include "replayer/replay_manager.h"
 #include "rendering/theme.h"
@@ -256,7 +257,10 @@ void LessonRuntime::open_step(int idx, const AppContext& ctx, bool pause) {
 void LessonRuntime::start_track(const Step& s, const AppContext& ctx) {
     tracking_ = s.n - 1;
     showing_card_ = false;
-    if (s.slowTo > 0.0f && ctx.replay_mgr().info().speed > s.slowTo) {
+    // Scripted lesson slowdowns stay at 1x for Free without opening an
+    // unsolicited upsell. Explicit speed controls use ReplayManager's CTA.
+    if (s.slowTo > 0.0f && Entitlements::speed_allowed(s.slowTo) &&
+        ctx.replay_mgr().info().speed > s.slowTo) {
         prev_speed_ = ctx.replay_mgr().info().speed;
         ctx.replay_mgr().set_speed(s.slowTo);
     }

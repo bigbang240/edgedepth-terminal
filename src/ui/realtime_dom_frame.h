@@ -1,8 +1,17 @@
 #pragma once
 #include "core/realtime_history.h"
+#include <array>
 #include <cmath>
 
 class TradeAtPriceAccumulator;
+namespace refill { struct LadderMarks; }
+
+// The walls the chart shows this frame (rt_walls: the largest few per side away from the touch).
+struct RealtimeWallMarks {
+    struct Mark { double price = 0; bool bid = true; };
+    std::array<Mark, 6> marks{};
+    int count = 0;
+};
 
 // Chart-owned, main-thread frame. The DOM consumes the same immutable sampled
 // book and absolute screen transform after the chart renders, never a live read.
@@ -10,6 +19,8 @@ struct RealtimeDOMFrame {
     RealtimeDepthHistory::SamplePtr book;
     Terminal::BookTicker quote{};
     const TradeAtPriceAccumulator* flow = nullptr;
+    const refill::LadderMarks* refill = nullptr;  // holding refill levels drawn this frame
+    const RealtimeWallMarks* walls = nullptr;     // walls shown this frame
     int frame = -1;
     int64_t clock_ms = 0;
     double price_min = 0, price_max = 0;

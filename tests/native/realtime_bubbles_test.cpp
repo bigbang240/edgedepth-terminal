@@ -1,4 +1,6 @@
 #include "core/realtime_bubbles.h"
+#include "core/realtime_history.h"
+#include "core/realtime_bubble_size.h"
 #include <cstdio>
 #include <limits>
 
@@ -108,6 +110,85 @@ int main() {
     bounded.advance(1100);
     expect(bounded.size() == 1 && bounded.filtered_groups == 0 && bounded.overflow_records == 0,
         "explicit reset starts a clean traversal, including old timestamps");
-    if (!failures) std::puts("PASS: immutable fixed-window bubbles, burst selection, pause, zoom, late data and retention");
+    {   // BTC groups many small fills; an alt can have one fill per group.
+        History btc, alt;
+        std::deque<Terminal::Trade> btc_raw, alt_raw;
+        for (int bin = 0; bin < 100; ++bin) {
+            const int64_t at = 10000 + bin * 100;
+            for (int fill = 0; fill < 200; ++fill) {
+                auto t = trade(80000, 0.001 * (bin % 4 + 1), at + 1, fill % 2);
+                btc.append(t, at + 20); btc_raw.push_back(t);
+            }
+            auto t = trade(0.1, 1000 * (bin % 4 + 1), at + 1, true);
+            alt.append(t, at + 20); alt_raw.push_back(t);
+            btc.advance(at + 120); alt.advance(at + 120);
+        }
+        RealtimeBubbleScale btc_groups, alt_groups, old_btc, old_alt;
+        btc_groups.update(btc, 20100); alt_groups.update(alt, 20100);
+        old_btc.update(btc_raw, 20100); old_alt.update(alt_raw, 20100);
+        expect(btc_groups.settled() && std::abs(btc_groups.minimum() - 48000) < 0.01 &&
+               old_btc.minimum() == 240, "busy BTC calibrates grouped dollars, not individual fill dollars");
+        expect(alt_groups.settled() && alt_groups.minimum() == old_alt.minimum() && alt_groups.minimum() == 300,
+               "sparse altcoin retains its own smaller reference and existing visibility");
+        expect(bubble_size::radius(64000, old_btc.minimum()) == 24 &&
+               bubble_size::radius(64000, btc_groups.minimum()) < 4,
+               "ordinary busy-market groups no longer saturate the enlarged size cap");
+        expect(bubble_size::radius(48000 * 64, btc_groups.minimum()) == 18 &&
+               bubble_size::radius(300 * 64, alt_groups.minimum()) == 18,
+               "equally exceptional groups stand out equally on BTC and altcoins");
+        const auto btc_before = snapshot(btc, 0, 30000, 20100);
+        btc_groups.update(btc, 19000);
+        expect(btc_groups.minimum() == 48000, "rewind recalibrates using only already published groups");
+        expect(equal(btc_before, snapshot(btc, 0, 30000, 20100)), "calibration does not alter captured quantities or publications");
+        History late;
+        for (int bin = 0; bin < 40; ++bin) late.append(trade(100, 2, 1000 + bin * 100, true), 9000);
+        late.advance(9100);
+        RealtimeBubbleScale asof;
+        asof.update(late, 9000);
+        expect(!asof.settled() && asof.minimum() == 0, "future publications cannot calibrate a paused chart");
+        asof.update(late, 9100);
+        expect(asof.settled() && asof.minimum() == 200, "late groups calibrate once actually published");
+        late.append(trade(100, 20000, 9201, true), 9220); late.advance(9320);
+        asof.update(late, 9320);
+        expect(asof.minimum() == 200, "one new print cannot jump a settled reference");
+        RealtimeBubbleScale expired;
+        expired.update(late, 80000);
+        expect(expired.minimum() == 0, "expired groups do not calibrate a new reference");
+        History quiet;
+        quiet.append(trade(0.01, 1000, 1001, true), 1050); quiet.advance(1150);
+        RealtimeBubbleScale quiet_scale;
+        quiet_scale.update(quiet, 1150);
+        expect(!quiet_scale.settled(), "sparse market waits for a stable initial sample");
+        quiet_scale.update(quiet, 6150);
+        expect(quiet_scale.settled() && quiet_scale.minimum() == 10, "sparse market can settle without 32 groups");
+    }
+    {   // Option A (2026-10-17): a quiet start, a sustained 100x burst, then quiet again.
+        History tape;
+        RealtimeBubbleScale follow;
+        int64_t ms = 1000, clock = 0;
+        const auto step = [&](double qty) {   // one $100-price group per 100ms bin, then a chart frame
+            tape.append(trade(100, qty, ms + 1, true), ms + 20);
+            tape.advance(ms + 120);
+            clock = ms + 120;
+            follow.update(tape, clock);
+            ms += 100;
+        };
+        while (ms < 7000) step(2);                    // $200 groups
+        expect(follow.settled() && follow.minimum() == 200, "a quiet start settles on its own groups");
+        while (ms < 11000) step(200);                 // $20,000 groups
+        expect(follow.minimum() > 200 && follow.minimum() < 800, "a burst eases the reference instead of jumping it");
+        while (ms < 51000) step(200);
+        const double eased = follow.minimum();
+        expect(bubble_size::radius(20000, eased) < 9, "ordinary burst groups shrink back once the reference follows");
+        expect(bubble_size::radius(20000 * 64, eased) > 18, "a 64x outlier still stands out inside the burst");
+        follow.update(tape, clock);
+        follow.update(tape, clock);
+        expect(follow.minimum() == eased, "a paused chart neither measures nor eases");
+        while (ms < 120000) step(2);
+        expect(follow.minimum() < 2000, "the reference relaxes once the burst leaves the minute");
+        follow.update(tape, 60000);
+        expect(follow.minimum() > 0 && follow.minimum() <= 20000, "rewind recalibrates on published groups only");
+    }
+    if (!failures) std::puts("PASS: immutable fixed-window bubbles, an eased market reference, burst selection, pause, zoom, late data and retention");
     return failures ? 1 : 0;
 }

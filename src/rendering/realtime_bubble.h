@@ -1,14 +1,15 @@
 #pragma once
 #include "imgui.h"
 #include "imgui_internal.h"
+#include "core/realtime_bubble_size.h"
 #include <algorithm>
 #include <cmath>
 #include <array>
 
 namespace RealtimeBubble {
-inline float radius(double notional, double minimum) {
-    if (!(minimum > 0) || !std::isfinite(notional) || notional < minimum) return 0;
-    return float(std::min(12.0, 3.0 * std::sqrt(notional / minimum)));
+// The size curve lives in core/realtime_bubble_size.h (native-tested); `cap` is the Max size choice.
+inline float radius(double notional, double minimum, float cap = bubble_size::kStandard) {
+    return bubble_size::radius(notional, minimum, cap);
 }
 
 // Fill treatment. Candle charts draw large prints as translucent discs with a
@@ -33,12 +34,13 @@ inline void draw(ImDrawList& dl, ImVec2 center, float r, ImVec4 signed_color, Im
     if (center.x + extent < clip.x || center.x - extent > clip.z ||
         center.y + extent < clip.y || center.y - extent > clip.w) return;
     signed_color.w = 1.0f;
-    const int shape = r < 6 ? 0 : r < 10 ? 1 : 2;
-    const int segments = shape == 0 ? 12 : shape == 1 ? 16 : 24;
+    // Bubbles past 20 px (the larger size caps) get 32 segments so their edge stays round.
+    const int shape = r < 6 ? 0 : r < 10 ? 1 : r < 20 ? 2 : 3;
+    const int segments = shape == 0 ? 12 : shape == 1 ? 16 : shape == 2 ? 24 : 32;
     static const auto circles = [] {
-        std::array<std::array<ImVec2, 24>, 3> result{};
-        for (int shape = 0; shape < 3; ++shape) {
-            const int count = shape == 0 ? 12 : shape == 1 ? 16 : 24;
+        std::array<std::array<ImVec2, 32>, 4> result{};
+        for (int shape = 0; shape < 4; ++shape) {
+            const int count = shape == 0 ? 12 : shape == 1 ? 16 : shape == 2 ? 24 : 32;
             for (int i = 0; i < count; ++i) {
                 const float angle = float(i) * (2 * IM_PI / count);
                 result[shape][i] = ImVec2(std::cos(angle), std::sin(angle));

@@ -778,7 +778,7 @@ void ChartWidget::render_footprint_settings_popup() {
             ImGui::Separator();
             int cached = fp.candle_count(FootprintManager::market_key(pair_.exchange, pair_.symbol));
             ImGui::TextDisabled("Cached candles: %d", cached);
-            if (fp.is_loading()) {
+            if (fp.is_loading(FootprintManager::market_key(pair_.exchange, pair_.symbol))) {
                 ImGui::SameLine();
                 ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "(loading...)");
             }

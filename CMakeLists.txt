@@ -402,6 +402,7 @@ set(PROJECT_SRC
         src/ui/chart_reference_context.cpp
         src/ui/workspace_settings.cpp
         src/ui/chart_widget.cpp
+        src/ui/chart_widget_overlays.cpp
         src/ui/chart_widget_tpo.cpp
         src/ui/chart_widget_footprint.cpp
         src/ui/chart_widget_time_axis.cpp
@@ -411,8 +412,13 @@ set(PROJECT_SRC
         src/ui/chart_widget_realtime.cpp
         src/ui/chart_widget_flow.cpp
         src/ui/chart_widget_liquidity_response.cpp
+        src/ui/chart_widget_refill_levels.cpp
+        src/ui/chart_widget_refill_history.cpp
+        src/core/refill_levels.cpp
+        src/core/refill_history.cpp
         src/core/realtime_archive.cpp
         src/ui/chart_widget_scrub_preview.cpp
+        src/ui/chart_widget_rt_extras.cpp
         src/ui/price_profile_renderer.h
         src/ui/price_profile_renderer.cpp
         src/ui/trades_widget.h

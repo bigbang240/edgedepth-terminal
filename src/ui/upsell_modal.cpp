@@ -107,7 +107,7 @@ const char* preview_clip(UpsellModal::Trigger t, const std::string& layer) {
 // Gates where a free account can try the same thing on BTCUSDT right now.
 bool offers_btc(UpsellModal::Trigger t, const std::string& layer) {
     using T = UpsellModal::Trigger;
-    if (t == T::Layer) return layer == "realtime_depth";
+    if (t == T::Layer) return layer == "realtime_depth" || layer == "refill";
     return t == T::Range || t == T::Preset || t == T::Symbol || t == T::ServerTier;
 }
 
@@ -176,7 +176,7 @@ static const char* default_subline(UpsellModal::Trigger t, bool login) {
         case T::Range:
         case T::Preset:
         case T::ServerTier: return "Free replays BTC's last 3 days. Pro replays every market, 90 days back.";
-        case T::Speed:      return "Free replays at 1\xc3\x97. Pro plays up to 4\xc3\x97.";
+        case T::Speed:      return "Free replays at 1\xc3\x97. Pro unlocks slow motion and up to 4\xc3\x97.";
         case T::Symbol:     return "Free replays BTC. Pro replays every recorded market.";
         case T::Layer:      return "Pro adds Hyperliquid levels, reported liquidations and leverage filters.";
         case T::Events:     return "This event is older than the free window.";
@@ -195,7 +195,7 @@ static const char* modal_headline(UpsellModal::Trigger t, bool login) {
         case T::Range:
         case T::ServerTier: return "Replay this exact moment";
         case T::Preset:     return "Replay any moment";
-        case T::Speed:      return "Replay up to 4\xc3\x97";
+        case T::Speed:      return "Choose your replay speed";
         case T::Symbol:     return "Replay every market";
         case T::Daily:      return "Today's free replays are used";
         case T::Events:     return "Replay this event";
@@ -520,8 +520,9 @@ void UpsellModal::render_copy(float width, bool with_benefits) {
     const char* context = default_subline(trigger_, login_variant_);
     if (!login_variant_ && trigger_ == Trigger::Layer) {
         if (layer_ == "hl_liq_levels" || layer_ == "hl_history") {
-            headline = "See where positions are exposed";
-            context = "Hyperliquid liquidation levels and their recent history.";
+            headline = "See where Hyperliquid positions liquidate";
+            context = "The significant levels where observed Hyperliquid positions would be forced out, drawn as rails "
+                      "with a week of history. Free on BTC; Pro unlocks every coin.";
         } else if (layer_ == "liq_observed") {
             headline = "See the liquidations that printed";
             context = "Reported liquidations beside price and order flow.";
@@ -532,6 +533,10 @@ void UpsellModal::render_copy(float width, bool with_benefits) {
         } else if (layer_ == "realtime_depth") {
             headline = "See every trade meet the book";
             context = "Free on Binance BTC. Pro unlocks every market.";
+        } else if (layer_ == "refill") {
+            headline = "See where price keeps refilling";
+            context = "Refill levels mark prices that keep getting hit and keep refilling. Free on BTC, Pro on every "
+                      "other market.";
         } else {
             headline = "Read the market in more detail";
         }

@@ -207,6 +207,16 @@ void OrderbookManager::set_realtime_recording(bool on) {
     for (auto& [key, db] : orderbooks_) {
         std::lock_guard<std::mutex> lock(db.write_mutex);
         db.realtime.mark_segment();
+        // The book a replay primed while recording was held is itself a real
+        // observation, at the time of its last applied update. Record it now.
+        // Without it the first sample was the first delta AFTER the held clock,
+        // so realtime_ready stayed false until the next replay_status (they
+        // come every two seconds) moved the clock past it: that wait was most
+        // of a replay start once the box stopped sending the priming diffs one
+        // by one. observe() refuses an invalid or broken chain, so this can
+        // only record a book the sequence checks already accepted.
+        if (db.epoch == realtime_epoch_.load() && db.write_buf.snapshot)
+            db.realtime.observe(db.write_buf, db.write_buf.timestamp_ms);
     }
 }
 

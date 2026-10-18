@@ -1,6 +1,7 @@
 #pragma once
 
 #include "types/types.h"
+#include "core/realtime_bubbles.h"
 #include <algorithm>
 #include <cmath>
 #include <deque>
@@ -204,37 +205,97 @@ inline bool refresh_realtime_trade_tail(std::deque<Terminal::Trade>& displayed,
     return !retired;
 }
 
+namespace rt_bubble_scale {
+// After warm-up the real-time reference follows the market (James, 2026-10-17,
+// option A in hub task refill-levels): every kRemeasureMs of chart time the
+// trailing minute's 75th-percentile group value becomes the target, and the
+// reference eases toward it in log space with a kTimeConstantMs exponential,
+// the rt_contrast pattern. Every drawn bubble uses the current reference, so
+// bubbles on screen always compare fairly: in a sustained burst ordinary prints
+// shrink back and exceptional ones stand out. A quiet start no longer leaves a
+// later burst drawn near the size cap.
+inline constexpr int64_t kRemeasureMs = 2000;
+inline constexpr double kTimeConstantMs = 20000.0;
+}
+
 // A bounded, as-of market scale shared by live, paused and replay rendering.
-// The viewport never enters these statistics. Warm-up can settle once a useful
-// sample exists; thereafter explicit recalibration is required to resize history.
+// The viewport never enters these statistics. Warm-up settles once a useful
+// sample exists. Real-time groups then follow the market on the chart clock
+// (pause freezes it, rewind recalibrates); candle large prints stay fixed until
+// an explicit recalibration.
 class RealtimeBubbleScale {
 public:
     double minimum() const { return minimum_; }
     bool settled() const { return settled_; }
+    // Candle large-print filtering still calibrates individual received trades.
     void update(const std::deque<Terminal::Trade>& trades, int64_t clock_ms) {
+        calibrate(clock_ms, [&](std::vector<double>& values) {
+            values.reserve(trades.size());
+            for (const auto& trade : trades) {
+                if (trade.timestamp_ms > clock_ms) break;
+                if (trade.timestamp_ms <= clock_ms - 60000) continue;
+                const double value = trade.price * trade.qty;
+                if (value > 0 && std::isfinite(value)) values.push_back(value);
+            }
+        });
+    }
+    // RT draws exact-price 100ms totals, so measure that same unit. Comparing a
+    // busy market's grouped total with one small fill makes ordinary bubbles huge.
+    void update(const RealtimeBubbleHistory& history, int64_t clock_ms) {
+        const auto collect = [&](std::vector<double>& values) {
+            values.reserve(std::min(history.size(), size_t(600 * RealtimeBubbleHistory::groups_per_bin)));
+            history.for_each(clock_ms - 60000 + 1, clock_ms, clock_ms, [&](const auto& bubble) {
+                values.push_back(bubble.value());
+            });
+        };
+        if (!settled_ || clock_ms < clock_ms_) {
+            calibrate(clock_ms, collect);
+            target_ = minimum_; measured_ms_ = clock_ms;
+            return;
+        }
+        follow(clock_ms, collect);
+    }
+private:
+    static double percentile75(std::vector<double>& values) {
+        const size_t index = (values.size() - 1) * 3 / 4;
+        std::nth_element(values.begin(), values.begin() + index, values.end());
+        return values[index];
+    }
+    // A paused clock neither measures nor eases; time moves the reference, frames do not.
+    template<class Collect>
+    void follow(int64_t clock_ms, Collect&& collect) {
+        if (clock_ms <= clock_ms_) return;
+        if (clock_ms - measured_ms_ >= rt_bubble_scale::kRemeasureMs) {
+            std::vector<double> values;
+            collect(values);
+            if (!values.empty()) target_ = percentile75(values);  // an idle minute keeps the last target
+            measured_ms_ = clock_ms;
+        }
+        if (target_ > 0 && minimum_ > 0 && target_ != minimum_) {
+            const double a = 1.0 - std::exp(-double(clock_ms - clock_ms_) / rt_bubble_scale::kTimeConstantMs);
+            const double eased = std::exp(std::log(minimum_) + (std::log(target_) - std::log(minimum_)) * a);
+            if (std::isfinite(eased) && eased > 0) minimum_ = eased;
+        }
+        clock_ms_ = clock_ms;
+    }
+    template<class Collect>
+    void calibrate(int64_t clock_ms, Collect&& collect) {
         if (clock_ms < clock_ms_) { minimum_ = 0; settled_ = false; started_ms_ = 0; }
         if (settled_) { clock_ms_ = clock_ms; return; }
         if (minimum_ > 0 && clock_ms - clock_ms_ < 5000) return;
         std::vector<double> values;
-        values.reserve(trades.size());
-        for (const auto& trade : trades) {
-            if (trade.timestamp_ms > clock_ms) break;
-            if (trade.timestamp_ms <= clock_ms - 60000) continue;
-            const double value = trade.price * trade.qty;
-            if (value > 0 && std::isfinite(value)) values.push_back(value);
-        }
+        collect(values);
         if (!values.empty()) {
-            const size_t index = (values.size() - 1) * 3 / 4;
-            std::nth_element(values.begin(), values.begin() + index, values.end());
-            minimum_ = values[index];
+            minimum_ = percentile75(values);
             if (!started_ms_) started_ms_ = clock_ms;
             settled_ = values.size() >= 32 || clock_ms - started_ms_ >= 5000;
         }
         clock_ms_ = clock_ms;
     }
-private:
     double minimum_ = 0;
     int64_t clock_ms_ = 0;
     bool settled_ = false;
     int64_t started_ms_ = 0;
+    double target_ = 0;          // real-time groups: the latest trailing-minute measurement
+    int64_t measured_ms_ = 0;
 };

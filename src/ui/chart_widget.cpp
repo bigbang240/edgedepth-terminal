@@ -21,7 +21,8 @@
 #include "core/terminal_request.h"
 #include "rendering/observed_liquidations.h"
 #include <type_traits>
-#include "rendering/census_overlay.h"
+#include "core/census_profile.h"
+#include "rendering/hl_rails_overlay.h"
 #include "rendering/liqmap2_rails_overlay.h"
 #include "ui/open_url.h"
 #include "core/liqmap2_scorecard.h"
@@ -40,6 +41,7 @@
 #include "core/usage_emit.h"           // research_outcome_first_handoff
 #include "education/recorder_runtime.h"  // suppress the status chip in produced clips
 #include "rendering/theme.h"
+#include "core/ui_test_marks.h"
 #include "rendering/app_shell.h"
 #include "rendering/menu.h"            // "+ widget" toolbar menu → picker / add-request
 #include "core/education_boot.h"       // is_embedded()/is_pack() gate the add path
@@ -273,6 +275,8 @@ ChartWidget::ChartWidget(
     , liq_field_(ctx)
 {
     link_id_ = g_time_link.next_id++;
+    // Self-hosted charts start with depth only. Saved workspace choices win.
+    rt_bubbles_ = Entitlements::hosted();
     if (compare_) time_linked_ = true;
     // A secondary chart cannot share the app-level manager: that holds ONE
     // timeframe and ONE follow-live latch, which is exactly what the two
@@ -378,6 +382,8 @@ ChartWidget::~ChartWidget() {
     if (replay_candles_ctx_) std::erase(replay_candles_ctx_->chart_candles, owned_candles_.get());
     if (rt_stream_mgr_)
         rt_stream_mgr_->unsubscribe_direct({pair_, Terminal::Stream::Orderbook, 0}, this);
+    release_refill_levels();
+    release_refill_history();
     if (heatmap_stream_mgr_)
         heatmap_stream_mgr_->unsubscribe_direct({pair_, Terminal::Stream::Heatmap, 0}, this);
     if (footprint_stream_mgr_)
@@ -393,6 +399,7 @@ ChartWidget::~ChartWidget() {
         ctx_.stream_mgr().send_unsubscribe(key);
     }
     if (liqmap2_stream_mgr_) liqmap2_stream_mgr_->unsubscribe_direct({pair_, Terminal::Stream::LiqMapV2, 0}, this);
+    if (hl_rails_mgr_) hl_rails_mgr_->unsubscribe_direct({liq_census_pair_, Terminal::Stream::HLRails, 0}, this);
     if (liqmap2_rails_mgr_) {
         liqmap2_rails_mgr_->unsubscribe_direct({pair_, Terminal::Stream::LiqMapV2Rails, 0}, this);
         if (const auto sib = liqmap2_rails_sibling(); !sib.exchange.empty())
@@ -539,7 +546,10 @@ void ChartWidget::update() {
     update_flow_positioning();
     update_activity();
     update_liquidity_response();
+    update_refill_levels();
+    update_refill_history();
     update_liqmap2();
+    update_hl_rails();
 #ifdef EDGEDEPTH_EXPOSURE_V2_DEV
     update_exposure_v2();
 #endif
@@ -764,16 +774,16 @@ void ChartWidget::update() {
     }
     // Liq Levels (rails) retired 2026-09-05: no subscribe, no historical request.
     const bool is_replay = ctx_.candle_mgr().replay_start_time_ms() > 0;
-    // Live census subscribes on the underlying-keyed HL pair. Its latest report
-    // paints immediately; the separate bounded request adds recorded context.
-    if (liq_census_enabled_ && ct_allows_time_overlays(chart_type_) &&
+    // The raw census (stream 34) now feeds only the admins' observed touch-odds fuel on Hyperliquid charts; the
+    // Hyperliquid positions layer draws the server's rails (update_hl_rails).
+    if (observed_rails_allowed() && ct_allows_time_overlays(chart_type_) &&
         candles().is_initial_load_complete() &&
         !liq_census_subscribed_ && !is_replay) {
         const StreamKey key{liq_census_pair_, Terminal::Stream::LiquidationLevels, 0};
         ctx_.stream_mgr().send_subscribe(key);
         liq_census_subscribed_ = true;
     }
-    if (liq_census_enabled_ && Entitlements::is_pro() && liq_history_requested_ == 0 &&
+    if (observed_rails_allowed() && liq_history_requested_ == 0 &&
         ct_allows_time_overlays(chart_type_) && candles().is_initial_load_complete() &&
         !ctx_.replay_mgr().is_pack_mode()) {
         const int64_t end = is_replay ? ctx_.replay_mgr().interpolated_time_ms()
@@ -819,7 +829,7 @@ void ChartWidget::change_timeframe(const int new_tf_seconds)
         g_time_link.tf_owner = link_id_;
         link_tf_seen_frame_ = g_time_link.tf_frame;
     }
-    ctx_.heatmap_mgr().set_timeframe(pair_, heatmap_mode_, ShaderHeatmapRenderer::candle_depth_seconds(new_tf_seconds));
+    ctx_.heatmap_mgr().set_timeframe(pair_, heatmap_mode_, new_tf_seconds);
     heatmap_data_requested_ = false;
     heatmap_loaded_timeframe_ = 0;
     // Liq map is TIMEFRAME-INDEPENDENT. Snapshots are price-level bands keyed by
@@ -1027,7 +1037,7 @@ void ChartWidget::render() {
     const float indicator_total_height =
         (chart_type_ == ChartType::FlowPositioning) ? std::min(flow_history_.ready && flow_history_.assessment.raw_count > 0 ? 520.0f : 430.0f, total_height * 0.65f) :
         subplots_suppressed() ? 0.0f : indicator_mgr_.pane_height();
-    const float chart_height = std::max(100.0f, total_height - indicator_total_height - activity_height() - (liquidation_activity_visible() ? ((rt_mode_ ? rt_liq_collapsed_ : candle_liq_collapsed_) ? 28.0f : std::min(rt_mode_ ? rt_liq_height_ : candle_liq_height_, std::max(60.0f, total_height - indicator_total_height - 180.0f)) + (ImGui::GetContentRegionAvail().x >= 620 ? 38.0f : 58.0f)) : 0.0f));
+    const float chart_height = std::max(100.0f, total_height - indicator_total_height - activity_height() - realtime_cvd_lane_height() - (liquidation_activity_visible() ? ((rt_mode_ ? rt_liq_collapsed_ : candle_liq_collapsed_) ? 28.0f : std::min(rt_mode_ ? rt_liq_height_ : candle_liq_height_, std::max(60.0f, total_height - indicator_total_height - 180.0f)) + (ImGui::GetContentRegionAvail().x >= 620 ? 38.0f : 58.0f)) : 0.0f));
 
     chart_allocated_height_ = chart_height;
     indicator_allocated_height_ = indicator_total_height;
@@ -1047,6 +1057,7 @@ void ChartWidget::render() {
     // they must never see the drawing layer's overrides. Idempotent.
     drawing_layer_.end_frame();
     ImPlot::GetInputMap() = chart_input_map;
+    render_realtime_cvd_lane();
     render_activity_strip();
     if (liquidation_activity_visible()) render_realtime_liquidation_strip();
     {
@@ -1159,10 +1170,14 @@ void ChartWidget::render_chart() {
         x_max = std::max(x_max, static_cast<double>(candles().building_candle().timestamp_ms));
     }
     double x_padding = static_cast<double>(tf_sec) * 1000.0 * 3.0;
-    // The admin rails' profile sits at the right edge (about a tenth of the plot) with the largest rails' dollar
-    // labels beside it: keep the candles clear of both. The touch-odds forward columns step aside while the rails draw.
-    if (liqmap2_rails_drawn()) {
-        if (liqmap2_rails_profile_)
+    // The rails' profile sits at the right edge (about a tenth of the plot) with the largest rails' dollar labels
+    // beside it: keep the candles clear of both (the leading layer's profile when the V2 and Hyperliquid rails both
+    // draw). The touch-odds forward columns step aside while the V2 rails draw.
+    if (hl_rails_drawn() && hl_leads() && hl_profile_) {
+        x_padding = std::max(x_padding, 0.16 * static_cast<double>(candles().visible_candles_for_timeframe()) *
+                                            static_cast<double>(tf_sec) * 1000.0);
+    } else if (liqmap2_rails_drawn()) {
+        if (liqmap2_rails_profile_ && !hl_leads())
             x_padding = std::max(x_padding, 0.16 * static_cast<double>(candles().visible_candles_for_timeframe()) *
                                                 static_cast<double>(tf_sec) * 1000.0);
     } else if (touch_odds_enabled_ && !rt_mode_ && !ctx_.replay_mgr().is_active()) {
@@ -1279,7 +1294,8 @@ void ChartWidget::render_chart() {
         const bool has_subplots = chart_type_ == ChartType::FlowPositioning ||
             (!subplots_suppressed() && indicator_mgr_.pane_expanded()) ||
             (activity_visible() && !activity_collapsed_) ||
-            (liquidation_activity_visible() && !(rt_mode_ ? rt_liq_collapsed_ : candle_liq_collapsed_));
+            (liquidation_activity_visible() && !(rt_mode_ ? rt_liq_collapsed_ : candle_liq_collapsed_)) ||
+            realtime_cvd_lane_height() > 0;
         // TPO mode always shows date labels on main chart x-axis
         const bool hide_x_labels = has_subplots && chart_type_ != ChartType::TPO;
         // No tick marks either: the pane below is flush against this plot now
@@ -1714,18 +1730,22 @@ void ChartWidget::render_chart() {
             ProfileScope _ps("LiqProf");
             render_liq_profile();
         }
-        // 1.65 Liq Levels HL - REAL predictive liq levels (HL census, P2e). Drawn
-        //      over the modelled layers: ground truth outranks the model. Underlying-
-        //      keyed, so it also overlays non-HL charts of the same underlying.
-        if (!rt_mode_ && liq_census_enabled_ && ct_allows_time_overlays(chart_type_)) {
+        // 1.65 Hyperliquid positions (HL census, as rails) and the V2 rails (estimated $ from this venue's open
+        //      interest). Both are rails; when both draw, one leads (hl_leads, the V2 rails by default): the follower
+        //      draws first, fainter, and the leader on top with its profile, labels and hover. Underlying-keyed, the
+        //      census also overlays non-HL charts of the same coin.
+        const bool hl_lead = hl_leads();
+        if (hl_rails_drawn() && !hl_lead) {
             ProfileScope _ps("LiqCensus");
-            render_liq_census();
+            render_liq_census(true);
         }
-        // 1.66 V2 modelled map (estimated $ from this venue's open interest). After the census so its
-        //      panel stacks below the chart's top-left notes; never mixed with the census or scenario map.
-        if (!rt_mode_ && liqmap2_shown() && ct_allows_time_overlays(chart_type_)) {
+        if (liqmap2_rails_drawn()) {
             ProfileScope _ps("LiqMapV2");
-            render_liqmap2();
+            render_liqmap2(hl_lead);
+        }
+        if (hl_lead) {
+            ProfileScope _ps("LiqCensus");
+            render_liq_census(false);
         }
         // 1.7 VPVR profile overlay (sidebar histogram bars)
         if (!rt_mode_ && vpvr_enabled_) {
@@ -1804,12 +1824,20 @@ void ChartWidget::render_chart() {
             ProfileScope _ps("ScrubPreview");
             render_scrub_preview(visible_x_min, std::max(visible_x_max, x_max));
         }
+        // 1.99 The Hyperliquid positions' key, over the candles (render_liq_census filled it this frame).
+        if (hl_rails_drawn()) hl_rails_overlay::draw_key(hl_key_);
         // 2.0 Trade bubbles on candles (free): large prints over the candles, the
         //     same marker real-time mode uses for every trade. Below the observed
         //     liquidation diamonds so a report never hides behind a print.
         if (!rt_mode_ && candle_bubbles_ && ct_allows_time_overlays(chart_type_)) {
             ProfileScope _ps("CandleBubbles");
             render_candle_bubbles();
+        }
+        // 2.02 Recorded refill levels (candles): exact prices that kept refilling, over the candles and under the
+        //      liquidation diamonds and drawings. Its hover waits until every other overlay has had its say.
+        if (!rt_mode_ && ct_allows_time_overlays(chart_type_)) {
+            ProfileScope _ps("RefillHist");
+            render_refill_history();
         }
         // 2.1 Observed - real @forceOrder liquidation markers (WS4). Drawn OVER the
         //     candles: liquidations fire at traded prices, so an under-candle layer
@@ -1859,27 +1887,27 @@ void ChartWidget::render_chart() {
             compression::render(pair_, clock);
             if (touch_odds_enabled_) {
                 const bool replay = ctx_.replay_mgr().is_active();
-                touch_odds_overlay::render(pair_, clock, fmt_.price_fmt, replay);
-                if (touch_odds_overlay::available(pair_)) {
-                    // One fuel source per chart: observed HL positions when chosen and usable, else the
-                    // V2 map when chosen or when it is the chart's liquidation map (live, where the scenario
-                    // map no longer draws), else the scenario map, which then says why it is standing in.
-                    liq_rails::FuelSource fuel;
-                    const bool chose_observed = observed_rails_allowed() && touch_odds_overlay::observed_fuel_selected();
-                    const bool chose_modelled = liqmap2_shown() && Entitlements::is_admin() &&
-                        (touch_odds_overlay::modelled_fuel_selected() || !scenario_map_shown());
-                    if (chose_observed) fuel = observed_rails_fuel(clock);
-                    else if (chose_modelled) fuel = modelled_rails_fuel(clock);
-                    const bool scenario = scenario_map_shown();
-                    const bool have = fuel.kind != liq_rails::FuelKind::Scenario || scenario;
+                const bool hosted = touch_odds_overlay::available(pair_);
+                // One fuel source per chart: observed HL positions when chosen and usable, else the scenario map,
+                // which then says why it is standing in. The rails draw only where nothing else holds the forward
+                // area (touch_rails_off), and only then do the 20-minute bands give way to them.
+                liq_rails::FuelSource fuel;
+                const bool scenario = scenario_map_shown();
+                bool rails = false;
+                if (hosted) {
+                    if (observed_rails_allowed() && touch_odds_overlay::observed_fuel_selected()) fuel = observed_rails_fuel(clock);
                     if (fuel.kind == liq_rails::FuelKind::Scenario && scenario)
                         for (const auto& s : liq_field_.standing()) fuel.standing.push_back({s.price, s.fuel});
-                    // The admin V2 rails are then the chart's one liquidation picture: no forward columns.
-                    if (liqmap2_rails_drawn()) touch_odds_overlay::step_aside();
-                    else if (have && touch_odds_overlay::rails_active(pair_, clock, replay))
-                        touch_odds_overlay::rails(pair_, clock, fmt_.price_fmt, fuel, replay);
+                    rails = !touch_rails_off() && (fuel.kind != liq_rails::FuelKind::Scenario || scenario) &&
+                            touch_odds_overlay::rails_active(pair_, clock, replay);
+                }
+                touch_odds_overlay::render(pair_, clock, fmt_.price_fmt, replay, rails);
+                if (hosted) {
+                    if (rails) touch_odds_overlay::rails(pair_, clock, fmt_.price_fmt, fuel, replay);
+                    else if (liqmap2_rails_drawn() || (hl_leads() && hl_profile_)) touch_odds_overlay::step_aside();
                     else if (scenario && fuel.kind == liq_rails::FuelKind::Scenario)
                         touch_odds_overlay::zone_labels(pair_, clock, fmt_.price_fmt, std::move(fuel.standing), replay);
+                    else touch_odds_overlay::step_aside();
                 }
             }
         }
@@ -1922,11 +1950,14 @@ void ChartWidget::render_chart() {
         // handle_plot_interaction so captures_mouse() gates the chart's own
         // handlers the same frame. (The input-map override is applied in
         // begin_frame, before BeginPlot - too late to matter from here.)
+        if (!rt_mode_) render_refill_history_hover();
         render_liquidity_response();
         render_reference_context();
         drawing_layer_.render_in_plot(ctx_, fmt_,
                                       ct_allows_time_overlays(chart_type_),
                                       tf_sec);
+        // Real-time hover readout last: any other overlay's tooltip wins.
+        if (rt_mode_) render_realtime_hover();
         // 4. Interaction
         handle_plot_interaction();
         // Update viewport state for next frame
@@ -3117,9 +3148,10 @@ void ChartWidget::render_controls() {
     // Layer on-count drives the badge and the layers-menu header. Real-time
     // mode counts its own layer set (the menu lists the same set).
     const bool absorption_supported = liquidity_response::supported(pair_.exchange, pair_.symbol);
-    const int layers_on = (activity_visible() ? 1 : 0) + (Entitlements::is_admin() && pair_.exchange == "binancef" ? int(alert_lines_) + int(alert_markers_) : 0) + (absorption_supported && liquidity_response_enabled_ ? 1 : 0) + (rt_mode_
-        ? (rt_depth_enabled_ ? 1 : 0) + (rt_bubbles_ ? 1 : 0) + (rt_trade_line_ ? 1 : 0)
+    const int layers_on = (activity_visible() ? 1 : 0) + (Entitlements::is_admin() && pair_.exchange == "binancef" ? int(alert_lines_) + int(alert_markers_) : 0) + (!rt_mode_ && absorption_supported && liquidity_response_enabled_ && !absorption_locked() ? 1 : 0) + (refill_history_active() ? 1 : 0) + (rt_mode_
+        ? (rt_depth_enabled_ ? 1 : 0) + (rt_bubbles_ ? 1 : 0) + (rt_trade_line_ ? 1 : 0) + (refill_active() ? 1 : 0)
             + (rt_candles_ ? 1 : 0) + (reported_liquidations_enabled() ? 1 : 0)
+            + realtime_extra_layers_on()
         : (session_vwap_ ? 1 : 0) + (previous_day_ ? 1 : 0) +
         (previous_week_ ? 1 : 0) + (vwap_anchor_ms_ ? 1 : 0)
                         + (liqmap2_shown() || scenario_map_shown() ? 1 : 0)
@@ -3127,6 +3159,12 @@ void ChartWidget::render_controls() {
                         + (liq_census_enabled_ ? 1 : 0)
                         + (touch_odds_enabled_ && touch_odds_overlay::available(pair_) ? 1 : 0)
                         + (heatmap_enabled_ ? 1 : 0) + (vpvr_enabled_ ? 1 : 0));
+
+    const int liquidations_on = rt_mode_ ? int(reported_liquidations_enabled())
+        : int(liqmap2_shown() || scenario_map_shown()) + int(reported_liquidations_enabled() && Entitlements::is_pro())
+          + int(liq_census_enabled_ && hl_rails_allowed() && !hl_coin_missing());
+    const int chart_layers_on = std::max(0, layers_on - (rt_mode_ ? int(reported_liquidations_enabled())
+        : int(liqmap2_shown() || scenario_map_shown()) + int(reported_liquidations_enabled()) + int(liq_census_enabled_)));
 
     auto chart_type_label = [](ChartType type) -> const char* {
         switch (type) {
@@ -3151,7 +3189,7 @@ void ChartWidget::render_controls() {
     // Left group: chart-view button, layers button, divider ---------------------
     const float caret_w = 9.0f;
     float cx = bp.x + 12.0f;   // left gutter (bar padding 0 12)
-    ImVec2 ct_anchor, ly_anchor, widget_anchor;
+    ImVec2 ct_anchor, liq_anchor, ly_anchor, widget_anchor;
     const auto wrap_control = [&](float width) {
         if (cx + width <= bp.x + ww - 12.0f || cx == bp.x + 12.0f) return;
         cx = bp.x + 12.0f;
@@ -3210,38 +3248,54 @@ void ChartWidget::render_controls() {
         cx += w + 12.0f;
     }
 
+    // Keep the paired ladder discoverable after its close button hides it.
+    if (rt_mode_) {
+        ImGui::PushFont(Theme::Fonts::ui());
+        const float w = ImGui::CalcTextSize("DOM").x + 20.0f;
+        wrap_control(w);
+        ImGui::SetCursorScreenPos(ImVec2(cx, ctrl_y));
+        if (Theme::choice_button("DOM##rt_dom", rt_dom_shown_, ImVec2(w, 28.0f)))
+            rt_dom_shown_ = !rt_dom_shown_;
+        ui_test::mark("rt.dom.toolbar");
+        if (ImGui::IsItemHovered())
+            Theme::tooltip(rt_dom_shown_ ? "Hide the paired depth ladder" : "Show the paired depth ladder");
+        ImGui::PopFont();
+        cx += w + 12.0f;
+    }
+
     // Layers button (stack glyph + plain-language label + count + caret).
-    {
-        char cb[8]; snprintf(cb, sizeof(cb), "%d", layers_on);
+    const auto overlay_button = [&](const char* label, const char* popup, const char* test_id, int count, ImVec2& anchor, std::string& detail) {
+        char cb[8]; snprintf(cb, sizeof(cb), "%d", count);
         ImGui::PushFont(Theme::Fonts::mono_sm());
         const float num_w = ImGui::CalcTextSize(cb).x;
         ImGui::PopFont();
         ImGui::PushFont(Theme::Fonts::ui());
-        const float layers_label_w = show_control_labels ? ImGui::CalcTextSize("Layers").x : 0.0f;
+        const float layers_label_w = ImGui::CalcTextSize(label).x;
         ImGui::PopFont();
-        const float layers_label_span = show_control_labels ? (8.0f + layers_label_w) : 0.0f;
+        const float layers_label_span = 8.0f + layers_label_w;
         const float chip_w = num_w + 10.0f;                          // badge chip (padding ~1 5)
-        const float badge_span = (layers_on > 0) ? (chip_w + 6.0f) : 0.0f;
+        const float badge_span = (count > 0) ? (chip_w + 6.0f) : 0.0f;
         const float w = 9.0f + 15.0f + layers_label_span + 6.0f + badge_span + caret_w + 9.0f;
         wrap_control(w);
         ImGui::SetCursorScreenPos(ImVec2(cx, ctrl_y));
-        const bool clicked = ImGui::InvisibleButton("##ly_btn", ImVec2(w, 28.0f));
-        const bool open = ImGui::IsPopupOpen("layers_popup");
+        const bool clicked = ImGui::InvisibleButton(test_id, ImVec2(w, 28.0f));
+        ui_test::mark(test_id);
+        const bool open = ImGui::IsPopupOpen(popup);
         const bool hot  = ImGui::IsItemHovered() || open;
         if (hot) dl->AddRectFilled(ImVec2(cx, ctrl_y), ImVec2(cx + w, ctrl_y + 28.0f),
                     Theme::u32(open ? Theme::Tokens::CONTROL_HOVER : Theme::Tokens::CONTROL), Theme::Radius::R2);
         draw_layers_glyph(dl, cx + 9.0f, ctrl_y + 6.5f,
                           Theme::u32(hot ? Theme::Tokens::BRAND_TX : Theme::Tokens::TX2));
         float bx = cx + 9.0f + 15.0f + 6.0f;
-        if (show_control_labels) {
+        {
             ImGui::PushFont(Theme::Fonts::ui());
             dl->AddText(ImVec2(bx, ctrl_y + (28.0f - ImGui::GetFontSize()) * 0.5f),
                         Theme::u32(hot ? Theme::Tokens::BRAND_TX : Theme::Tokens::TX2),
-                        "Layers");
+                        label);
             ImGui::PopFont();
             bx += layers_label_w + 8.0f;
         }
-        if (layers_on > 0) {
+        if (count > 0) {
             // The count as a soft chip, as on Indicators.
             const float chip_h = 15.0f, chip_y = ctrl_y + (28.0f - chip_h) * 0.5f;
             dl->AddRectFilled(ImVec2(bx, chip_y), ImVec2(bx + chip_w, chip_y + chip_h),
@@ -3254,11 +3308,13 @@ void ChartWidget::render_controls() {
         }
         draw_caret(dl, bx + caret_w * 0.5f, ctrl_y + 14.0f, Theme::u32(Theme::Tokens::TX3));
         if (ImGui::IsItemHovered()) Theme::tooltip("%d chart layer%s active",
-                                                       layers_on, layers_on == 1 ? "" : "s");
-        if (clicked && !open) ImGui::OpenPopup("layers_popup");
-        ly_anchor = ImVec2(cx, ctrl_y + 28.0f);
+                                                       count, count == 1 ? "" : "s");
+        if (clicked && !open) { detail.clear(); ImGui::OpenPopup(popup); }
+        anchor = ImVec2(cx, ctrl_y + 28.0f);
         cx += w + 12.0f;
-    }
+    };
+    overlay_button("Liquidations", "liquidations_popup", "chart.liquidations", liquidations_on, liq_anchor, liquidation_menu_detail_);
+    overlay_button("Layers", "layers_popup", "chart.layers", chart_layers_on, ly_anchor, layers_menu_detail_);
 
     // "+ widget" button (beside the layers control). This is the ONLY widget-
     // creation entry now (the old topbar "+" was removed): living in the chart
@@ -3272,6 +3328,7 @@ void ChartWidget::render_controls() {
         ImGui::SetCursorScreenPos(ImVec2(cx, ctrl_y));
         widget_anchor = ImVec2(cx, ctrl_y + 28.0f);
         const bool clicked = ImGui::InvisibleButton("##add_widget_btn", ImVec2(w, 28.0f));
+        ui_test::mark("chart.add_widget");
         const bool open = ImGui::IsPopupOpen(compact_tools ? "##chart_tools" : "add_widget_popup");
         const bool hot  = ImGui::IsItemHovered() || open;
         if (hot) dl->AddRectFilled(ImVec2(cx, ctrl_y), ImVec2(cx + w, ctrl_y + 28.0f),
@@ -3467,10 +3524,14 @@ void ChartWidget::render_controls() {
         }
         Theme::menu_separator();
         if (rt_mode_) {
+            Theme::menu_note("Hold Alt over depth to inspect a price row.");
             if (recon) {
                 const bool warm = recon->realtime_warm();
                 if (Theme::menu_toggle("Cool-to-warm palette", warm)) recon->set_realtime_warm(!warm);
             }
+            if (Theme::menu_toggle("Auto contrast", rt_auto_contrast_)) rt_auto_contrast_ = !rt_auto_contrast_;
+            if (ImGui::IsItemHovered())
+                Theme::tooltip("Colours ease toward the visible book every few seconds.\nOff keeps them fixed until Recalibrate colors.");
         } else {
             if (Theme::menu_toggle("Adapt to zoom", heatmap_adapt_to_zoom_)) {
                 heatmap_adapt_to_zoom_ = !heatmap_adapt_to_zoom_;
@@ -3489,9 +3550,9 @@ void ChartWidget::render_controls() {
             Theme::menu_note(rt_auto_fit_history_ ? "Auto-fit uses this grouping as its minimum. Changing it recalibrates the colours."
                                                   : "Real-time keeps the selected grouping fixed. Changing it recalibrates the colours.");
         } else if (recon) {
-            char sampling[200];
+            char sampling[320];
             snprintf(sampling, sizeof(sampling),
-                     "Colours stay fixed until regrouping or recalibration. Depth is sampled every %lld seconds here; zoom in for finer sampling where recorded. Blank areas may be outside the loaded depth range.",
+                     "Colours stay fixed until regrouping or recalibration. Each %lld-second candle slot shows the latest recorded book snapshot in that interval, not summed liquidity. Choose a shorter timeframe for finer sampling. Blank areas may be outside the loaded depth range.",
                      (long long)recon->get_column_interval_ms() / 1000);
             Theme::menu_note(sampling);
         }
@@ -3581,431 +3642,8 @@ void ChartWidget::render_controls() {
     if (open_renko_settings_) { ImGui::OpenPopup("renko_settings"); open_renko_settings_ = false; }
     render_renko_settings_popup();
 
-    // Layers menu (multi-select). Rows are Theme::menu_toggle: they keep the menu open, and a Pro-gated
-    // row shows a lock and PRO tag and routes its click to the upsell. Sections run from the product's
-    // core (liquidations) to general chart aids; admin tools and the replay bookmark come last. A layer's
-    // everyday controls sit under its row while it is on (Theme::begin_menu_detail), longer settings in a
-    // collapsed "Options" group there. Names say what is drawn, a right-hand tag says who a row is for or
-    // why it is idle ("admin", "pilot", "not on HL"), and what a layer means stays in its tooltip.
-    ImGui::SetNextWindowPos(ImVec2(ly_anchor.x, ly_anchor.y + 4.0f));
-    if (Theme::begin_menu("layers_popup", 320.0f, ImGui::GetMainViewport()->WorkSize.y - 32.0f)) {
-        // No header: the toolbar button already carries the on-count.
-        const bool pro = Entitlements::is_pro();
-        bool first_section = true;
-        auto layer_section = [&first_section](const char* label) {
-            if (!first_section) Theme::menu_separator();
-            first_section = false;
-            Theme::menu_section(label);
-        };
-        auto layer_row = [](const char* label, bool on, bool locked, const char* tag = nullptr) {
-            return Theme::menu_layer(label, on, locked, tag);
-        };
-        // A collapsed "Options" group under a layer's row (id keeps each group's open state apart).
-        auto options = [](const char* id, auto&& body) {
-            Theme::begin_menu_detail();
-            if (Theme::begin_menu_group(id)) { body(); Theme::end_menu_group(); }
-            Theme::end_menu_detail();
-        };
-        using drawing::UiIcon;
-        auto absorption_row = [&] {
-            if (!absorption_supported) return;
-            if (layer_row("Absorption bands", liquidity_response_enabled_, false, "pilot")) {
-                liquidity_response_enabled_ = !liquidity_response_enabled_;
-                liquidity_response_history_.reset();
-            }
-            if (ImGui::IsItemHovered())
-                Theme::tooltip("Bids and asks that keep refilling; hidden size and identity unknown.\n"
-                               "Binance BTC and SOL, up to 24h.\nRule thresholds, not probabilities.");
-            if (liquidity_response_enabled_) options("Options##absorption", [&] { render_liquidity_response_settings(); });
-        };
-
-        if (rt_mode_) {
-            // Real-time mode has its own layer set: the candle-chart rows below
-            // draw nothing here, and "Order book depth" must mean the sampled
-            // depth cells, not the candle heatmap. Overlay switches live here;
-            // the Real-time menu owns navigation and panel visibility.
-            layer_section("REAL-TIME VIEW");
-            {
-                const bool c = layer_row("Order book depth", rt_depth_enabled_, false);
-                if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
-                    open_heatmap_settings_ = true;
-                    ImGui::CloseCurrentPopup();
-                }
-                if (ImGui::IsItemHovered())
-                    Theme::tooltip("Sampled book behind the trades. Off leaves trades, quotes and liquidations on a clear background.");
-                if (c) rt_depth_enabled_ = !rt_depth_enabled_;
-            }
-            if (rt_depth_enabled_) {
-                Theme::begin_menu_detail();
-                if (Theme::menu_item(UiIcon::Gear, "Depth settings\xe2\x80\xa6")) {
-                    open_heatmap_settings_ = true;
-                    ImGui::CloseCurrentPopup();
-                }
-                Theme::end_menu_detail();
-            }
-            if (layer_row("Trade bubbles", rt_bubbles_, false)) rt_bubbles_ = !rt_bubbles_;
-            if (layer_row("Trade-price line", rt_trade_line_, false)) rt_trade_line_ = !rt_trade_line_;
-            if (layer_row("1s candles", rt_candles_, false)) {
-                rt_candles_ = !rt_candles_;
-                chart_type_ = rt_candles_ ? ChartType::Candles : ChartType::Line;
-            }
-            absorption_row();
-            layer_section("LIQUIDATIONS");
-            if (layer_row("Reported liquidations", reported_liquidations_enabled(), false)) {
-                reported_liquidations_enabled() = !reported_liquidations_enabled();
-                if (reported_liquidations_enabled()) { rt_liq_strip_=true; rt_liq_markers_=true; }
-            }
-            if (ImGui::IsItemHovered())
-                Theme::tooltip("Liquidations the exchange published, as they happen.\n%s.",
-                               observed_liquidations::feed_line(pair_.exchange));
-            if (reported_liquidations_enabled()) {
-                Theme::begin_menu_detail();
-                if (Theme::menu_toggle("Diamonds on the tape", rt_liq_markers_)) rt_liq_markers_ = !rt_liq_markers_;
-                if (ImGui::IsItemHovered())
-                    Theme::tooltip(observed_liquidations::bankruptcy_prices(pair_.exchange)
-                        ? "Each report at its time, on the print the forced order made (Bybit reports\nbankruptcy prices). Sized against this market's last hour."
-                        : "Each report at its time and fill price, sized against this market's last hour.");
-                if (Theme::menu_toggle("Activity subplot", rt_liq_strip_)) rt_liq_strip_ = !rt_liq_strip_;
-                Theme::end_menu_detail();
-            }
-            Theme::menu_separator();
-            Theme::menu_note("Candle layers return after real-time.");
-        } else {
-        layer_section("LIQUIDATIONS");
-
-        // One liquidation map row, one switch (liq_dense_field_; a saved V1 "on" reads as map on). Live, the
-        // map is V2's milestone rails wherever the viewer has V2 (admin preview, free BTC, Pro) and a locked
-        // PRO row into the upsell where V2 is Pro; the scenario map (V1) no longer draws on live charts.
-        // Replay, packs and lessons carry no V2 frames (stream 38 is live only; lesson grants refuse its
-        // history), so there the row is the scenario map with its settings, as before. The daily record
-        // (public for every Binance and Bybit market) is one click away, locked or not.
-        // The rails are here: live, or a box replay the viewer has them for (a locked replay keeps the scenario row).
-        const bool live = live_chart() || (rails_replay() && liqmap2_allowed());
-        const auto v2_access = liqmap2_access();
-        const bool v2_on = liqmap2_shown(), scenario_on = scenario_map_shown();
-        char record_url[160];
-        const bool has_record = live && liqmap2::scorecard_url(pair_.exchange, pair_.symbol, record_url, sizeof(record_url));
-        const auto record_item = [&] {
-            if (!has_record) return;
-            if (Theme::menu_item(UiIcon::Bars, "Daily record", "edgedepth.com")) ui::open_url(record_url);
-            if (ImGui::IsItemHovered()) Theme::tooltip("The map's public scorecard for this market, day by day.");
-        };
-        if (live && v2_access == liqmap2::Access::locked) {
-            if (layer_row("Liquidation map", false, true))
-                ui::UpsellModal::instance().open(ui::UpsellModal::Trigger::Layer, nullptr, "liqmap2");
-            if (ImGui::IsItemHovered())
-                Theme::tooltip("Liquidation rails: where positions would be forced out, in $.\nFree on BTC, Pro on every market.\n%s.",
-                               liqmap2::kForwardTest);
-            record_item();
-        } else if (live && v2_access != liqmap2::Access::hidden) {
-            const char* tag = v2_access == liqmap2::Access::preview ? "admin"
-                            : v2_access == liqmap2::Access::free_taste ? "free here" : nullptr;
-            if (Theme::menu_layer("Liquidation map", v2_on, false, tag)) liq_dense_field_ = !liq_dense_field_;
-            if (ImGui::IsItemHovered())
-                Theme::tooltip("Liquidation rails: where positions would be forced out, in $, ended by the candle that\n"
-                               "reaches them. %s%s.", v2_access == liqmap2::Access::free_taste ? "Free on BTC, Pro on every market.\n" : "",
-                               liqmap2::kForwardTest);
-        } else if (!live) {
-            if (Theme::menu_layer("Liquidation map", scenario_on, false, "scenario")) {
-                liq_dense_field_ = !liq_dense_field_;
-                liq_shelf_cache_ts_ = -1;
-            }
-            if (ImGui::IsItemHovered()) Theme::tooltip("Scenario map with assumed leverage.\nThe dollar map (V2) is live only.");
-            // Right-click still opens the scenario map's style panel.
-            if (scenario_on && ImGui::IsItemClicked(ImGuiMouseButton_Right)) open_liq_settings_ = true;
-        }
-        if (v2_on) {
-            // The rails' colour and profile sit under the row while it is on: this coin's Bybit and Binance rails
-            // together (render_liqmap2), coloured by the liquidations expected within a horizon (the visual rule's
-            // horizons; 4 h by default, as 1 h understates in development) or by the dollars.
-            Theme::begin_menu_detail();
-            if (v2_access == liqmap2::Access::preview) {
-                static const char* const kColour[] = {"1h", "4h", "24h", "Dollars"};
-                liqmap2_rails_colour_ = Theme::menu_choice("liqmap2_colour", kColour, 4, std::clamp(liqmap2_rails_colour_, 0, 3));
-                if (ImGui::IsItemHovered())
-                    Theme::tooltip("Rail colour: liquidations expected within 1 h, 4 h or 24 h, or the dollars forced out\n"
-                                   "if price reaches the rail. A horizon falls back to dollars while any rail in view has\n"
-                                   "no figure for it yet. Bybit and Binance rails are both drawn.\n"
-                                   "1 h and 4 h are admin only until their forward look passes.");
-            } else {
-                // Customers: 24 h or dollars. The 1 h / 4 h figures stay unvalidated until their forward look.
-                static const char* const kColour[] = {"24h", "Dollars"};
-                const int sel = Theme::menu_choice("liqmap2_colour", kColour, 2, rails_colour() == 3 ? 1 : 0);
-                liqmap2_rails_colour_ = 2 + sel;
-                if (ImGui::IsItemHovered())
-                    Theme::tooltip("Rail colour: liquidations expected within 24 h, or the dollars forced out if price\n"
-                                   "reaches the rail. Bybit and Binance rails are both drawn.");
-            }
-            if (Theme::menu_toggle("Profile at right edge", liqmap2_rails_profile_)) liqmap2_rails_profile_ = !liqmap2_rails_profile_;
-            if (ImGui::IsItemHovered()) Theme::tooltip("The live rails' value by price at the right edge, both venues summed.");
-            Theme::menu_note(liqmap2::kForwardTest);
-            record_item();
-            Theme::end_menu_detail();
-        } else if (scenario_on) {
-            options("Options##scenario", [&] {
-                // Scenario profile = price-marginal of the scenario map (free), not observed liquidations.
-                if (layer_row("Scenario profile", liq_profile_enabled_, false))
-                    liq_profile_enabled_ = !liq_profile_enabled_;
-                // Assumed leverage tiers (Pro): the leverage mask the scenario map is built from.
-                {
-                    const ImVec2 hp = ImGui::GetCursorScreenPos();
-                    Theme::menu_section("ASSUMED LEVERAGE");
-                    if (!pro) {
-                        ImGui::PushFont(Theme::Fonts::label());
-                        const float lw = ImGui::CalcTextSize("ASSUMED LEVERAGE").x;
-                        ImGui::PopFont();
-                        Theme::draw_pro_tag(ImGui::GetWindowDrawList(), ImVec2(hp.x + 10.0f + lw + 8.0f, hp.y + 5.0f));
-                    }
-                }
-                const double cap = liq_field::max_leverage(pair_.exchange, pair_.symbol);
-                {
-                    struct Lev { const char* label; bool* flag; };
-                    Lev levs[4] = { {"25\xc3\x97", &liq_lev_25x_}, {"50\xc3\x97", &liq_lev_50x_},
-                                    {"75\xc3\x97", &liq_lev_75x_}, {"100\xc3\x97", &liq_lev_100x_} };
-                    const float gap = 6.0f;
-                    const float band_w = ImGui::GetContentRegionAvail().x - 10.0f;
-                    const float chip_w = std::max(52.0f, (band_w - gap * 3.0f) / 4.0f);
-                    const float chip_h = 24.0f;
-                    const ImVec2 base = ImGui::GetCursorScreenPos();
-                    ImGui::Dummy(ImVec2(band_w, chip_h));   // reserve the chip band so the popup auto-grows its bounds
-                    bool changed = false, lock_hit = false;
-                    for (int i = 0; i < 4; ++i) {
-                        const float x = base.x + i * (chip_w + gap);
-                        ImGui::PushID(600 + i);
-                        ImGui::SetCursorScreenPos(ImVec2(x, base.y));
-                        const bool clicked = Theme::choice_button(levs[i].label,
-                            pro && *levs[i].flag, ImVec2(chip_w, chip_h));
-                        if (ImGui::IsItemHovered()) {
-                            if (!pro) Theme::tooltip("Pro leverage filter");
-                            else if (cap > 0) Theme::tooltip("Assumed leverage, not account leverage.\nVenue cap here: %gx.", cap);
-                            else Theme::tooltip("Assumed leverage, not account leverage.");
-                        }
-                        ImGui::PopID();
-                        if (clicked) { if (pro) { *levs[i].flag = !*levs[i].flag; changed = true; } else lock_hit = true; }
-                    }
-                    if (lock_hit) ui::UpsellModal::instance().open(ui::UpsellModal::Trigger::Layer,
-                                                                  nullptr, "liq_tier_chips");
-                    if (changed) {
-                        uint8_t mask = 0;
-                        if (liq_lev_5x_)   mask |= 0x01;
-                        if (liq_lev_10x_)  mask |= 0x02;
-                        if (liq_lev_25x_)  mask |= 0x04;
-                        if (liq_lev_50x_)  mask |= 0x08;
-                        if (liq_lev_75x_)  mask |= 0x10;
-                        if (liq_lev_100x_) mask |= 0x20;
-                        ctx_.liq_heatmap_mgr().set_leverage_mask(mask);
-                    }
-                }
-                if (cap > 0) {
-                    const uint8_t lmask = ctx_.liq_heatmap_mgr().get_leverage_mask();
-                    if (liq_field::select_tiers(lmask, cap).enabled == 0 && liq_field::display_tiers(lmask, cap).enabled != 0)
-                        ImGui::TextDisabled("Showing every tier up to the %gx cap.", cap);
-                    else if (liq_field::display_tiers(lmask, cap).enabled == 0 && lmask != 0)
-                        ImGui::TextDisabled("No tier fits this market's %gx cap.", cap);
-                }
-                if (Theme::menu_item(UiIcon::Gear, "Map style\xe2\x80\xa6")) {
-                    open_liq_settings_ = true;
-                    ImGui::CloseCurrentPopup();
-                }
-            });
-        }
-        // Observed = real @forceOrder prints via the liquidations stream (Pro).
-        if (layer_row("Reported liquidations", pro && reported_liquidations_enabled(), !pro)) {
-            if (pro) { reported_liquidations_enabled() = !reported_liquidations_enabled();
-                if (reported_liquidations_enabled()) { candle_liq_strip_=true; liq_markers_=true; }
-            }
-            else ui::UpsellModal::instance().open(ui::UpsellModal::Trigger::Layer,
-                                                 nullptr, "liq_observed");
-        }
-        if (pro && ImGui::IsItemHovered())
-            Theme::tooltip("Liquidations the exchange published, totalled per candle.\n%s.", observed_liquidations::feed_line(pair_.exchange));
-        if (pro && reported_liquidations_enabled()) {
-            Theme::begin_menu_detail();
-            render_liquidation_settings();
-            Theme::end_menu_detail();
-        }
-        // Hyperliquid positions = REAL predictive levels from the HL census (Pro, P2e) - ground truth,
-        // never folded into the modelled map above. Keyed by underlying, so it's offered on any venue's
-        // chart, tagged "not on HL" (inert) when the underlying has no HL market. The ticker24h hl feed is
-        // the market registry - before it loads, "unknown" stays offered and data arrival decides (the
-        // layer's own NO DATA badge covers the miss).
-        {
-            const bool hl_known = TickerManager::instance().get("hl", liq_census_pair_.symbol) != nullptr;
-            const bool hl_missing = !hl_known && TickerManager::instance().has_data();
-            const bool census_on = pro && liq_census_enabled_ && !hl_missing;
-            if (layer_row("Hyperliquid positions", census_on, !pro, hl_missing ? "not on HL" : nullptr)) {
-                if (!pro) ui::UpsellModal::instance().open(ui::UpsellModal::Trigger::Layer,
-                                                          nullptr, "hl_liq_levels");
-                else if (!hl_missing) toggle_liq_census();
-            }
-            if (pro && !hl_missing && ImGui::IsItemHovered())
-                Theme::tooltip("Sampled Hyperliquid positions, at HL prices.\nA crossed level is not a confirmed liquidation.");
-            if (census_on) options("Options##census", [&] {
-                if (Theme::menu_toggle("History", liq_census_show_history_)) liq_census_show_history_ = !liq_census_show_history_;
-                if (Theme::menu_field("Minimum $", &liq_census_min_usd_)) {
-                    if (!std::isfinite(liq_census_min_usd_)) liq_census_min_usd_ = 1000;
-                    liq_census_min_usd_ = std::clamp(liq_census_min_usd_, 0.0f, 1e12f);
-                }
-                const bool pack = ctx_.replay_mgr().is_pack_mode();
-                if (Theme::menu_item(UiIcon::Refresh, "Load previous 6 h", nullptr, !pack, true)) {
-                    const int64_t end = ctx_.candle_mgr().replay_start_time_ms() > 0
-                        ? ctx_.replay_mgr().interpolated_time_ms() : static_cast<int64_t>(emscripten_date_now());
-                    liq_history_requested_ = ctx_.stream_mgr().request_historical_liq_levels(liq_census_pair_, end - 6*3600000LL, end) ? 1 : -1;
-                }
-                if (pack) Theme::menu_note("Pack replay: recorded snapshots only.");
-                else if (liq_history_requested_ < 0) Theme::menu_note("History unavailable. Reconnect to retry.");
-                else if (liq_history_requested_ > 0) Theme::menu_note("Loading snapshots; gaps stay unknown.");
-            });
-        }
-#ifdef EDGEDEPTH_EXPOSURE_V2_DEV
-        // Exposure V2 = the server's recorded per-minute scenario bands (pilot,
-        // Pro): where positions opened since capture began would sit under a
-        // fixed buffer. Not the candle field above and never summed with it.
-        if (layer_row("Exposure V2 bands (pilot)", pro && exposure_enabled_, !pro)) {
-            if (!pro) ui::UpsellModal::instance().open(ui::UpsellModal::Trigger::Layer,
-                                                     nullptr, "exposure_v2");
-            else { exposure_enabled_ = !exposure_enabled_; exposure_history_.reset(); exposure_summary_.reset(); }
-        }
-        if (Theme::begin_menu_group("Exposure V2 settings")) {
-            render_exposure_v2_settings();
-            Theme::end_menu_group();
-        }
-#endif
-        // Touch odds: an admin preview (tagged "admin") or, for the release's viewers, the released layer.
-        if (touch_odds_overlay::available(pair_))
-            touch_odds_overlay::menu(pair_, touch_odds_enabled_, observed_rails_allowed(),
-                                     liqmap2_shown() && Entitlements::is_admin());
-
-        layer_section("PRICE LEVELS");
-        if (layer_row("Daily VWAP (UTC)", session_vwap_, false)) {
-            session_vwap_ = !session_vwap_; reference_update_time_ = -1;
-        }
-        if (ImGui::IsItemHovered())
-            Theme::tooltip("Volume-weighted average from midnight UTC.\nRight-click a candle to anchor a VWAP there.");
-        if (layer_row("Previous day high / low / close", previous_day_, false)) {
-            previous_day_ = !previous_day_; reference_update_time_ = -1;
-        }
-        if (ImGui::IsItemHovered()) Theme::tooltip("Days start at midnight UTC.");
-        if (layer_row("Previous week high / low / close", previous_week_, false)) {
-            previous_week_ = !previous_week_; reference_update_time_ = -1;
-        }
-        if (ImGui::IsItemHovered()) Theme::tooltip("Weeks start Monday, midnight UTC.");
-        {
-            const bool missing = (session_vwap_ && !session_vwap_data_.complete) ||
-                                 (vwap_anchor_ms_ && !anchored_vwap_data_.complete) ||
-                                 (previous_day_ && !previous_day_data_.complete) ||
-                                 (previous_week_ && !previous_week_data_.complete);
-            const bool time_views = ct_allows_time_overlays(chart_type_);
-            if (vwap_anchor_ms_ || missing || !time_views) {
-                Theme::begin_menu_detail();
-                if (vwap_anchor_ms_ && Theme::menu_item(UiIcon::Close, "Clear anchored VWAP", nullptr, true, true)) {
-                    vwap_anchor_ms_ = 0; anchored_vwap_data_.clear();
-                }
-                if (missing && candles().is_loading()) {
-                    Theme::menu_note("Loading earlier candles\xe2\x80\xa6");
-                } else if (missing) {
-                    // Bounded, explicit read, ending at the observed replay clock.
-                    if (Theme::menu_item(UiIcon::Refresh, "Load earlier candles", "history missing", !candles().is_loading(), true))
-                        candles().request_historical(20160, reference_asof_);
-                    if (ImGui::IsItemHovered())
-                        Theme::tooltip("Levels stop where bars are missing.\nCoarse candles may not align to the period.");
-                }
-                if (!time_views) Theme::menu_note("Time-based chart views only.");
-                Theme::end_menu_detail();
-            }
-        }
-        layer_section("MARKET STRUCTURE");
-
-        // OB Depth = orderbook depth heatmap (free). Right-click opens its settings.
-        {
-            const bool c = layer_row("Order book depth", heatmap_enabled_, false);
-            if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
-                open_heatmap_settings_ = true;
-                ImGui::CloseCurrentPopup();
-            }
-            if (c) heatmap_enabled_ = !heatmap_enabled_;
-        }
-        if (heatmap_enabled_) {
-            Theme::begin_menu_detail();
-            if (Theme::menu_item(UiIcon::Gear, "Depth settings\xe2\x80\xa6")) {
-                open_heatmap_settings_ = true;
-                ImGui::CloseCurrentPopup();
-            }
-            Theme::end_menu_detail();
-        }
-        // Trade bubbles on candles (free): large prints as bubbles. Real-time mode
-        // (the pill beside the timeframes) draws EVERY trade; this is the subset
-        // that clears the market-size floor, on every plan.
-        if (layer_row("Trade bubbles (large prints)", candle_bubbles_, false))
-            candle_bubbles_ = !candle_bubbles_;
-        if (ImGui::IsItemHovered())
-            Theme::tooltip("Large trades drawn as bubbles on the candles: colored by taker buy/sell using your selected palette, sized on a compressed value scale.\n"
-                           "Real-time mode (beside the timeframes) shows every trade with the order book behind it.");
-        if (candle_bubbles_) options("Options##bubbles", [&] {
-                if (Theme::menu_field(candle_bubble_min_ > 0 ? "Minimum value" : "Minimum value (0 = auto)", &candle_bubble_min_))
-                    if (!std::isfinite(candle_bubble_min_) || candle_bubble_min_ < 0) candle_bubble_min_ = 0;
-                if (ImGui::IsItemHovered()) {
-                    const double floor = candle_bubble_floor();
-                    if (floor > 0) Theme::tooltip("Quote value a trade needs to draw. 0 = auto: a fixed reference at 8x typical recorded trade value (currently %.4g).", floor);
-                    else           Theme::tooltip("Quote value a trade needs to draw. 0 = auto: 8x the market's typical trade size over the last minute (still calibrating).");
-                }
-                if (Theme::menu_item(UiIcon::Refresh, "Recalibrate bubble sizes", nullptr, true, true)) {
-                    candle_bubble_size_reference_ = 0; candle_bubble_auto_floor_ = 0; candle_bubble_scale_ = {}; candle_bubble_scale_since_ms_ = 0;
-                    candle_bubble_history_.reset();
-                }
-                if (ctx_.replay_mgr().is_active() || EducationBoot::instance().is_pack())
-                    Theme::menu_note("Replay bubbles show traversed trades.");
-                else if (pair_.exchange != "binancef")
-                    Theme::menu_note("Recent history: Binance futures only.");
-                else if (!Entitlements::is_pro())
-                    Theme::menu_note("Recent trade history requires Pro.");
-                else {
-                    if (Theme::menu_toggle("Recent trade history (6 h)", candle_bubble_history_enabled_)) {
-                        candle_bubble_history_enabled_ = !candle_bubble_history_enabled_;
-                        if (!candle_bubble_history_enabled_) candle_bubble_history_.reset();
-                    }
-                    if (ImGui::IsItemHovered())
-                        Theme::tooltip("Strongest non-overlapping prints; zoom in for more.\nMinimum value filters records without resizing them.");
-                    if (!candle_bubble_history_.error.empty() && Theme::menu_item(UiIcon::Refresh, "Retry history", nullptr, true, true))
-                        candle_bubble_history_.reset();
-                }
-        });
-        // VPVR = volume profile visible range (free). Right-click opens its settings.
-        {
-            const bool c = layer_row("Volume profile (VPVR)", vpvr_enabled_, false);
-            if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) open_vpvr_settings_ = true;
-            if (c) {
-                vpvr_enabled_ = !vpvr_enabled_;
-                ctx_.vpvr_mgr().set_enabled(vpvr_enabled_);
-                if (vpvr_enabled_) { vpvr_last_request_start_ = 0; vpvr_last_request_end_ = 0; }
-            }
-        }
-        if (vpvr_enabled_) {
-            Theme::begin_menu_detail();
-            if (Theme::menu_item(UiIcon::Gear, "Profile settings\xe2\x80\xa6")) {
-                open_vpvr_settings_ = true;
-                ImGui::CloseCurrentPopup();
-            }
-            Theme::end_menu_detail();
-        }
-        absorption_row();
-        }   // !rt_mode_: candle-chart layer rows
-
-        // Tools: admin readings for this market and Binance's compression inspector (candles), then the
-        // replay bookmark, which opens a saved reference rather than drawing a layer.
-        const bool admin_rows = Entitlements::is_admin() && pair_.exchange == "binancef";
-        const bool compression_rows = !rt_mode_ && pair_.exchange == "binancef";
-        if (admin_rows || compression_rows) {
-            layer_section(admin_rows ? "ADMIN TOOLS" : "TOOLS");
-            render_activity_settings();
-            if (compression_rows) compression::menu(pair_, ctx_.replay_mgr().is_active());
-        }
-        if (Entitlements::hosted()) {
-            Theme::menu_separator();
-            render_bookmark_action();
-        }
-        ImGui::EndPopup();
-    }
+    render_overlay_menu(true, liq_anchor);
+    render_overlay_menu(false, ly_anchor);
 
     // ═══════════════════════════════════════════════════════════════════════
     // Indicators popup: subplots only. Anything drawn on the main chart belongs
@@ -4139,7 +3777,10 @@ void ChartWidget::render_controls() {
                 subplot(std::type_identity<Indicators::VPINIndicator>{}, "VPIN toxicity", [&] { add_vpin_indicator(); },
                         "Flow toxicity (VPIN, volume clock) with HMM regime colouring.\nQuiet markets hold their last reading.");
                 // A restored indicator on an unsupported market remains removable.
-                if (absorption_supported || indicator_mgr_.has_indicator_of_type<Indicators::AbsorptionIndicator>())
+                if (absorption_supported && absorption_locked() &&
+                    !indicator_mgr_.has_indicator_of_type<Indicators::AbsorptionIndicator>()) {
+                    if (Theme::menu_layer("Absorption activity", false, true)) open_absorption_upsell();
+                } else if (absorption_supported || indicator_mgr_.has_indicator_of_type<Indicators::AbsorptionIndicator>())
                     subplot(std::type_identity<Indicators::AbsorptionIndicator>{}, "Absorption activity",
                             [&] { add_absorption_indicator(); }, "Binance BTC and SOL only. Candles: 1m or longer.",
                             absorption_supported ? "pilot" : "unavailable");
@@ -4164,6 +3805,7 @@ void ChartWidget::render_controls() {
         if (!compact_tools) {
         ImGui::SetCursorScreenPos(ImVec2(rg_set_x, ctrl_y));
         const bool clicked = ImGui::InvisibleButton("##settings_btn", ImVec2(rg_set_w, 28.0f));
+        ui_test::mark("chart.settings");
         const bool hot = ImGui::IsItemHovered();
         ImGui::PushFont(Theme::Fonts::ui());
         dl->AddText(ImVec2(rg_set_x + 6.0f, ctrl_y + (28.0f - ImGui::GetFontSize()) * 0.5f),
@@ -4431,6 +4073,7 @@ void ChartWidget::handle_plot_interaction() {
         crosshair_state_.first_plot_min.y + plot_size.y
     );
     crosshair_state_.last_plot_max = crosshair_state_.first_plot_max;
+    ui_test::mark_rect("chart.plot", crosshair_state_.first_plot_min, crosshair_state_.first_plot_max);
 
     // Acquire at the click's origin within this visible window, independently
     // of ImPlot's hover bookkeeping. The cursor may already have moved since
@@ -4864,8 +4507,9 @@ void ChartWidget::render_crosshair(const ImPlotPoint& mouse_pos) const {
 
 
 int64_t ChartWidget::depth_timeframe_seconds() const {
-    return ShaderHeatmapRenderer::candle_depth_seconds(
-        candles().timeframe_seconds(), last_visible_range_.X.Size());
+    // One sampled book column per candle slot. Zoom must not clear/reload depth
+    // by switching sampling cadence under a fixed candle timeframe.
+    return candles().timeframe_seconds();
 }
 
 void ChartWidget::request_heatmap_data() {
@@ -4893,7 +4537,7 @@ void ChartWidget::request_heatmap_data() {
 
     if (last_visible_range_.X.Size() > 0)
         anchor_ms = std::min(anchor_ms, static_cast<int64_t>(last_visible_range_.X.Max));
-    // Bound decoded observations, while broad views select a coarser cadence.
+    // Bound decoded observations at the selected candle cadence.
     const int64_t lookback_ms = std::min({
         candles().timeframe_seconds() * 1000LL * 500,
         tf_sec * 1000LL * 2000,
@@ -5548,17 +5192,12 @@ void ChartWidget::render_liq_timeline() {
 }
 
 
-// "Liq Levels HL" (P2e): the census layer's subscribe follows the pill, on the
-// UNDERLYING-keyed HL pair (not pair_ - cross-venue overlay). Same live-only
-// semantics as toggle_liquidation_heatmap: during replay the StreamManager is
-// subscribe-inert and reset_overlay_subscriptions re-arms the flag on exit.
+// The Hyperliquid positions layer, on the UNDERLYING-keyed HL pair (not pair_: a cross-venue overlay). The rails'
+// subscription follows it in update_hl_rails; the raw census the admins' fuel reads subscribes in
+// subscribe_chart_streams and is dropped here when the layer goes off.
 void ChartWidget::toggle_liq_census() {
     liq_census_enabled_ = !liq_census_enabled_;
-    if (liq_census_enabled_ && !liq_census_subscribed_) {
-        const StreamKey key{liq_census_pair_, Terminal::Stream::LiquidationLevels, 0};
-        ctx_.stream_mgr().send_subscribe(key);
-        liq_census_subscribed_ = true;
-    } else if (!liq_census_enabled_ && liq_census_subscribed_) {
+    if (!liq_census_enabled_ && liq_census_subscribed_) {
         const StreamKey key{liq_census_pair_, Terminal::Stream::LiquidationLevels, 0};
         ctx_.stream_mgr().send_unsubscribe(key);
         liq_census_subscribed_ = false;
@@ -5576,6 +5215,8 @@ void ChartWidget::reset_overlay_subscriptions() {
         rt_stream_mgr_->unsubscribe_direct({pair_, Terminal::Stream::Orderbook, 0}, this);
     rt_stream_mgr_ = nullptr;
     rt_subscribed_ = false;
+    release_refill_levels();  // re-subscribed on the new context by update_refill_levels
+    release_refill_history();  // read again on the new context by update_refill_history
     rt_flow_.reset();
     rt_archive_.reset();
     on_rewind(0);
@@ -5662,17 +5303,54 @@ static std::vector<LiqDrawLine> select_liq_lines(
 // liquidation_events DB seed - always time-sorted, so the visible window binary-searches.
 // Replay correctness needs no special casing here: events are delivered in playback order
 // and trimmed on rewind, so nothing past the playback head can exist in the store.
-// Timestamped Hyperliquid wallet samples. All leverage tiers; source gaps remain
-// empty. This is a partial census, and reported levels can move with collateral.
-void ChartWidget::render_liq_census() {
-    const int64_t asof = ctx_.candle_mgr().replay_start_time_ms() > 0
-        ? ctx_.replay_mgr().interpolated_time_ms() : static_cast<int64_t>(emscripten_date_now());
-    census_overlay::render(ctx_.liq_heatmap_mgr().get_census_history(liq_census_pair_), asof,
-        liq_census_show_history_, liq_census_min_usd_, liq_census_pair_.symbol.c_str(),
-        pair_.exchange != "hl", fmt_.price_fmt,
-        [](int64_t ts, char* buffer, size_t size) {
-            DisplayTimeZone::instance().format(ts, TimeZoneFormat::DateTimeSeconds, buffer, size);
-        });
+// Hyperliquid positions as rails (core/hl_rails.h): the coin's rails from the server, through the chosen real leverage
+// and the minimum dollars. On another venue's chart Hyperliquid prices map onto the chart by today's basis: the chart's
+// candle at the latest message over that message's mark (1 in a replay, which has no live mark: BTC's basis between
+// the two venues is a few hundredths of a percent). This is a sampled census, and a level can move with collateral.
+void ChartWidget::render_liq_census(bool follow) {
+    const bool replay = ctx_.candle_mgr().replay_start_time_ms() > 0;
+    const int64_t asof = replay ? ctx_.replay_mgr().interpolated_time_ms() : static_cast<int64_t>(emscripten_date_now());
+    static const hl_rails::Store kEmpty;
+    const auto* store = ctx_.liq_heatmap_mgr().get_hl_rails(liq_census_pair_);
+    const auto& book = hl_rails_view_.sync(store ? *store : kEmpty, {hl_groups_, static_cast<double>(liq_census_min_usd_)});
+    const hl_rails::Latest* latest = store && store->latest().timestamp_ms > 0 ? &store->latest() : nullptr;
+    // On another venue's chart the rails sit at Hyperliquid's prices times the basis: this chart's price as each
+    // message arrives over the message's mark, averaged (hl_rails::Basis), so the rails hold still between messages.
+    double ratio = 1;
+    if (pair_.exchange != "hl" && !replay && latest && latest->mark > 0) {
+        char key[96];  // a frame allocates nothing
+        std::snprintf(key, sizeof(key), "%s/%s/%s", pair_.exchange.c_str(), pair_.symbol.c_str(), liq_census_pair_.symbol.c_str());
+        if (hl_basis_key_ != key) {
+            hl_basis_.reset();
+            hl_basis_key_ = key;
+        }
+        const double price = candles().has_building_candle() ? candles().building_candle().close
+                           : candles().closes().empty() ? 0.0 : candles().closes().back();
+        if (price > 0) hl_basis_.update(latest->timestamp_ms, price/latest->mark);
+        ratio = hl_basis_.ratio();
+    }
+    hl_rails_overlay::Candles cv{&candles().timestamps(), &candles().lows(), &candles().highs(),
+                                 double(candles().timeframe_seconds())*500.0};
+    liqmap2_rails::ChartCandles::Forming forming;
+    if (candles().has_building_candle()) {
+        const auto& b = candles().building_candle();
+        cv.forming = true;
+        cv.forming_t = static_cast<double>(b.timestamp_ms);
+        cv.forming_lo = b.low;
+        cv.forming_hi = b.high;
+        forming = {true, b.timestamp_ms, b.low, b.high};
+    }
+    // The candles' revision, the forming candle included (as the V2 rails read them), keys the kept picture.
+    auto& cc = liqmap2_rails_candles_;
+    cc.update(candles().timestamps(), candles().lows(), candles().highs(), candles().history_revision(), forming);
+    // The key stacks under the V2 rails' key when both draw.
+    const bool stack_keys = ImPlot::GetPlotSize().x < 380.0f;
+    const float top = (touch_odds_enabled_ ? 86.0f : 58.0f) + (liqmap2_rails_drawn() && stack_keys ? 24.0f : 0.0f);
+    hl_rails_view_lo_ = static_cast<int64_t>(ImPlot::GetPlotLimits().X.Min + cv.shift_ms);
+    hl_rails_overlay::render(hl_rails_cache_, book, latest, cv, cc.revision(), asof, ratio, liq_census_pair_.symbol.c_str(), fmt_.price_fmt,
+        top, follow ? hl_rails_overlay::Role::follow : liqmap2_rails_drawn() ? hl_rails_overlay::Role::lead : hl_rails_overlay::Role::alone,
+        hl_profile_, hl_groups_, replay, hl_key_, hl_major_levels_, rail_value_labels_);
+    if (liqmap2_rails_drawn() && !stack_keys) hl_key_.at.x += 150.0f;
 }
 
 // Observed rails fuel is an admin choice on Hyperliquid charts with the census subscribed. The touch odds
@@ -5801,7 +5479,8 @@ void ChartWidget::update_liqmap2() {
     // Replay: the stored rails alive within the window, a day per request from its start (at most 14 days; the
     // server bounds each read to seven days and refuses one ending after now). Rails born before the window and
     // still standing come with it; nothing after the clock is drawn (the overlay reads steps, ends and candles up
-    // to it), so a seek simply redraws at the new clock.
+    // to it, a rail from its first step and an end only once known: liqmap2_rails::start_ms, end_at), so a seek
+    // simply redraws at the new clock.
     if (want && replay && liqmap2_rails_history_requested_ < 14) {
         const auto& info = ctx_.replay_mgr().info();
         const int64_t now = static_cast<int64_t>(emscripten_date_now()) - 1000;
@@ -5823,7 +5502,56 @@ void ChartWidget::update_liqmap2() {
         liqmap2_scorecard_ms_ = wall;
 }
 
-void ChartWidget::render_liqmap2() {
+bool ChartWidget::hl_coin_missing() const {
+    return TickerManager::instance().has_data() && TickerManager::instance().get("hl", liq_census_pair_.symbol) == nullptr;
+}
+
+// Hyperliquid rails (stream 42 live, 43 stored), keyed by the coin, whatever chart asks. Live: the subscription (its
+// last message paints at once: it carries every standing rail) and the last day of the record, then a day further back
+// at a time while the view reaches before what is loaded, up to the server's seven days. Replay: no subscription (a
+// replay socket serves no live streams), the record for the window a day per request; nothing after the clock is drawn.
+void ChartWidget::update_hl_rails() {
+    const StreamKey key{liq_census_pair_, Terminal::Stream::HLRails, 0};
+    const bool want = hl_rails_drawn() && !hl_coin_missing() && candles().is_initial_load_complete();
+    const bool replay = rails_replay();
+    const bool want_live = want && live_chart();
+    const int64_t window_key = replay ? ctx_.replay_mgr().info().start_time_ms : 0;
+    if (window_key != hl_rails_window_) {
+        hl_rails_window_ = window_key;
+        hl_rails_history_requested_ = 0;
+    }
+    if (hl_rails_mgr_ && (!want_live || hl_rails_mgr_ != &ctx_.stream_mgr())) {
+        hl_rails_mgr_->unsubscribe_direct(key, this);
+        hl_rails_mgr_ = nullptr;
+        hl_rails_history_requested_ = 0;
+    }
+    if (want_live && !hl_rails_mgr_) {
+        hl_rails_mgr_ = &ctx_.stream_mgr();
+        hl_rails_mgr_->subscribe_direct(key, this);
+    }
+    if (want_live && hl_rails_history_requested_ < hl_rails::kHistoryDays) {
+        const int64_t now = static_cast<int64_t>(emscripten_date_now());
+        const int k = hl_rails_history_requested_;
+        const int need = k == 0 || hl_rails_view_lo_ <= 0 ? 1
+            : std::clamp(static_cast<int>(std::ceil(double(now - hl_rails_view_lo_)/double(hl_rails::kHistoryMs))), 1,
+                         hl_rails::kHistoryDays);
+        const int64_t end = now - k*hl_rails::kHistoryMs, start = end - hl_rails::kHistoryMs;
+        if (k < need && ctx_.stream_mgr().request_historical_hl_rails(liq_census_pair_, start, end))
+            hl_rails_history_requested_ = k + 1;
+    }
+    if (want && replay && hl_rails_history_requested_ < 14) {
+        const auto& info = ctx_.replay_mgr().info();
+        const int64_t now = static_cast<int64_t>(emscripten_date_now()) - 1000;
+        const int64_t w0 = info.start_time_ms, w1 = std::min(info.end_time_ms > 0 ? info.end_time_ms : now, now);
+        const int k = hl_rails_history_requested_;
+        const int64_t start = w0 + k*hl_rails::kHistoryMs;
+        if (w0 > 0 && start < w1 &&
+            ctx_.stream_mgr().request_historical_hl_rails(liq_census_pair_, start, std::min(w1, start + hl_rails::kHistoryMs)))
+            hl_rails_history_requested_ = k + 1;
+    }
+}
+
+void ChartWidget::render_liqmap2(bool follow) {
     const int64_t asof = ctx_.candle_mgr().replay_start_time_ms() > 0
         ? ctx_.replay_mgr().interpolated_time_ms() : static_cast<int64_t>(emscripten_date_now());
     // Every viewer with V2 sees the rails (released 2026-10-11): backend docs/LIQMAP_VISUAL_RULE.md bans the
@@ -5831,7 +5559,11 @@ void ChartWidget::render_liqmap2() {
     {
         // This chart's venue and the coin's other rails venue; the other's prices map onto this chart by the ratio of
         // the two venues' latest marks (1 until both are in hand).
-        std::vector<liqmap2_rails_overlay::Source> sources{{ctx_.liq_heatmap_mgr().get_liqmap2_rails(pair_), pair_.exchange, 1.0}};
+        auto& sources = liqmap2_rails_sources_;  // kept, so a frame allocates nothing
+        sources.resize(1);
+        sources[0].store = ctx_.liq_heatmap_mgr().get_liqmap2_rails(pair_);
+        sources[0].exchange = pair_.exchange;
+        sources[0].ratio = 1.0;
         if (const auto sib = liqmap2_rails_sibling(); !sib.exchange.empty()) {
             const auto* other = ctx_.liq_heatmap_mgr().get_liqmap2_rails(sib);
             const double own_mark = sources[0].store ? sources[0].store->latest().mark : 0;
@@ -5840,30 +5572,39 @@ void ChartWidget::render_liqmap2() {
         }
         static constexpr liqmap2_rails::Colour kColours[] = {liqmap2_rails::Colour::expected_1h, liqmap2_rails::Colour::expected_4h,
                                                              liqmap2_rails::Colour::expected, liqmap2_rails::Colour::dollars};
-        const liqmap2_rails_overlay::Candles cv{&candles().timestamps(), &candles().lows(), &candles().highs(),
+        // The candles the rails meet: the closed ones and the one still forming, which the chart draws too.
+        liqmap2_rails::ChartCandles::Forming forming;
+        if (candles().has_building_candle()) {
+            const auto& b = candles().building_candle();
+            forming = {true, b.timestamp_ms, b.low, b.high};
+        }
+        auto& cc = liqmap2_rails_candles_;
+        cc.update(candles().timestamps(), candles().lows(), candles().highs(), candles().history_revision(), forming);
+        const liqmap2_rails_overlay::Candles cv{&cc.t(), &cc.lo(), &cc.hi(),
                                                 rt_mode_ ? 0.0 : double(candles().timeframe_seconds())*500.0};
         liqmap2_rails_view_lo_ = static_cast<int64_t>(ImPlot::GetPlotLimits().X.Min + cv.shift_ms);
-        liqmap2_rails_overlay::render(sources, cv, asof, pair_.symbol.c_str(), fmt_.price_fmt, 86.0f,
-            kColours[rails_colour()], liqmap2_rails_profile_, [](int64_t ts, char* buffer, size_t size) {
-                DisplayTimeZone::instance().format(ts, TimeZoneFormat::MonthDayTime, buffer, size);
-            }, liqmap2_access() == liqmap2::Access::preview, rails_replay());
+        // Behind the Hyperliquid positions, from where their record starts: where both have data.
+        int64_t follow_from = 0;
+        if (follow)
+            if (const auto* h = ctx_.liq_heatmap_mgr().get_hl_rails(liq_census_pair_)) follow_from = h->from_ms();
+        const auto role = follow ? liqmap2_rails_overlay::Role::follow
+                        : hl_rails_drawn() ? liqmap2_rails_overlay::Role::lead : liqmap2_rails_overlay::Role::alone;
+        liqmap2_rails_overlay::render(liqmap2_rails_cache_, sources, cv, cc.revision(), asof,
+            pair_.symbol.c_str(), fmt_.price_fmt, touch_odds_enabled_ ? 86.0f : 58.0f, kColours[rails_colour()], liqmap2_rails_profile_,
+            liqmap2_access() == liqmap2::Access::preview, rails_replay(), role, follow_from, rail_value_labels_);
     }
 }
 
-// The V2 frame at the clock as rails fuel, only while ready: a warming inventory understates the dollars
-// and a stale one predates the move, so the scenario map stands in and the caption says why. The touch
-// odds are this chart's venue's own, as is the frame.
-liq_rails::FuelSource ChartWidget::modelled_rails_fuel(int64_t clock) const {
-    liq_rails::FuelSource out;
-    const auto* history = ctx_.liq_heatmap_mgr().get_liqmap2_history(pair_);
-    const auto* frame = history ? history->at(clock) : nullptr;
-    switch (liqmap2::state(frame, clock)) {
-        case liqmap2::State::ready: break;
-        case liqmap2::State::warming: out.fallback = "V2 map warming"; return out;
-        case liqmap2::State::stale: out.fallback = "V2 map stale"; return out;
-        case liqmap2::State::missing: out.fallback = "no V2 frame yet"; return out;
-    }
-    return liq_rails::modelled(frame->levels, frame->timestamp_ms, liqmap2::claim_short(pair_.exchange, *frame));
+// Why the touch-odds rails cannot draw on this chart, or null. The V2 rails, or Hyperliquid rails leading with their
+// profile, are then the chart's one liquidation picture; elsewhere the rails need fuel under them: the scenario map
+// (replays, packs, lessons) or observed positions on a Hyperliquid chart. The V2 map was a third fuel, but it only
+// existed where the V2 rails draw and hold the forward area, so its switch never changed the chart (removed
+// 2026-10-15).
+const char* ChartWidget::touch_rails_off() const {
+    if (liqmap2_rails_drawn()) return "Touch-odds rails step aside while the V2 rails draw.";
+    if (hl_leads() && hl_profile_) return "Touch-odds rails step aside while the Hyperliquid rails draw.";
+    if (!scenario_map_shown() && !observed_rails_allowed()) return "Touch-odds rails draw over the scenario map, in replays.";
+    return nullptr;
 }
 
 // Liquidation Profile - the price-marginal of STANDING fuel (WS1 Option A, 2026-07-03; replaces the

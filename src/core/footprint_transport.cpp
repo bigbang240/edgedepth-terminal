@@ -4,7 +4,16 @@
 #include <pb/messages.pb.h>
 #include <zstd.h>
 #include <algorithm>
+#include <chrono>
 #include <nlohmann/json.hpp>
+
+namespace {
+// Reply timeouts and retry backoff run on a monotonic clock.
+int64_t monotonic_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+}
 
 void FootprintManager::request_history(
     const Terminal::Pair& pair, int64_t start_ms, int64_t end_ms,
@@ -12,25 +21,10 @@ void FootprintManager::request_history(
 {
     if (!sm) return;
 
-    // Don't fire new requests while one is already in flight
-    if (loading_) return;
-
-    // Skip if requested range is already covered by what we have
-    if (market_key(pair.exchange, pair.symbol) == last_symbol_ &&
-        start_ms >= last_start_ && end_ms <= last_end_) {
+    // One request in flight per market; skips covered ranges and backs off after failures.
+    if (!begin_history_request(market_key(pair.exchange, pair.symbol), start_ms, end_ms, monotonic_ms())) {
         return;
     }
-
-    // Extend the covered range (union of old + new)
-    if (market_key(pair.exchange, pair.symbol) == last_symbol_ && last_start_ > 0) {
-        start_ms = std::min(start_ms, last_start_);
-        end_ms   = std::max(end_ms, last_end_);
-    }
-
-    last_symbol_ = market_key(pair.exchange, pair.symbol);
-    last_start_ = start_ms;
-    last_end_ = end_ms;
-    loading_ = true;
 
     nlohmann::json req;
     req["method"] = "get_footprint_history";
@@ -45,9 +39,10 @@ void FootprintManager::request_history(
 void FootprintManager::on_tick_volume_update(
     const std::string& symbol, const pb::TickVolumeUpdate& update)
 {
-    // Sentinel: timestamp_ms=0 signals end of historical batch
+    // Sentinel: timestamp_ms=0 ends a history request; history_error marks a failure or refusal.
     if (update.timestamp_ms() == 0) {
-        loading_ = false;
+        finish_history_request(symbol, update.start_time(), update.end_time(),
+                               !update.history_error().empty(), monotonic_ms());
         return;
     }
 

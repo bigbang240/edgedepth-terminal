@@ -40,8 +40,9 @@ private:
         std::string captured_at;
         std::string pack_url;
         std::string exchange_id, event_id, fingerprint;
-        std::string metadata_line;
-        std::string tags_line;
+        std::string base_asset;      // "TUT" from "TUT/USDT", for the coin mark
+        std::string metadata_line;   // "9 Aug 2026 · 06:50 UTC · 27m · 74.8 MB"
+        std::vector<std::string> tags;  // shown as chips, words not hyphens
         int64_t duration_seconds = 0;
         int64_t size_bytes = 0;
         bool featured = false;
@@ -61,12 +62,15 @@ private:
     bool loading_ = false;
     bool catalog_ready_ = false;
     bool replace_popup_requested_ = false;
+    int hovered_pack_ = -1;  // the card under the pointer last frame (its hairline brightens)
 
     void begin_fetch(bool force);
     bool parse_manifest(const std::string& payload, std::string& parse_error);
     void play_pack(const Pack& pack);
     void render_pack(Pack& pack, int index);
-    void render_preview(Pack& pack, ImVec2 size);
+    // Draws the candle preview; returns true when it was clicked (it doubles as a play button).
+    bool render_preview(Pack& pack, ImVec2 size);
+    void request_play(int index);
     void update_preview();
     void render_replace_confirmation();
 

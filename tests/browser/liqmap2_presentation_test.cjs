@@ -68,7 +68,7 @@ sockets.on('connection',ws=>{const subs=new Map();let sequence=100,seeded=false;
  await page.waitForFunction(()=>typeof Module?._workspace_flush==='function',null,{timeout:60000});await page.waitForTimeout(3000);
  const state=await page.evaluate(()=>{Module._workspace_flush();return JSON.parse(sessionStorage.getItem('edgedepth.workspace.tab.v1'));});
  const s=state.widgets.find(w=>w.type==='chart').settings;
- const saved=name.startsWith('saved');if(!process.env.EXPECT_LEGACY)assert.equal(s.chart_layer_defaults,2);
+ const saved=name.startsWith('saved');if(!process.env.EXPECT_LEGACY)assert.equal(s.chart_layer_defaults,3);
  // The rejected heatmap's own keys (liqmap2_rails/profile/history) are gone with its draw path (2026-10-11).
  assert.equal(s.liqmap2_rails,undefined);assert.equal(s.liqmap2_history,undefined);
  const rtBubbles=!(name==='saved-off'||name==='legacy-rt-on'||name.startsWith('saved-split'));
@@ -81,7 +81,7 @@ sockets.on('connection',ws=>{const subs=new Map();let sequence=100,seeded=false;
  // Reload the migrated document: the version and resulting choices must persist.
  await page.reload();await page.waitForFunction(()=>typeof Module?._workspace_flush==='function',null,{timeout:60000});await page.waitForTimeout(1000);
  const again=await page.evaluate(()=>{Module._workspace_flush();return JSON.parse(sessionStorage.getItem('edgedepth.workspace.tab.v1')).widgets.find(w=>w.type==='chart').settings});
- assert.equal(again.chart_layer_defaults,2);assert.equal(again.rt_bubbles,rtBubbles);assert.equal(again.rt_liq_observed_enabled,rtReports);assert.equal(again.rt_liq_strip,rtReports);assert.equal(again.candle_bubbles,false);assert.equal(again.liq_observed_enabled,!name.endsWith('free'));
+ assert.equal(again.chart_layer_defaults,3);assert.equal(again.rt_bubbles,rtBubbles);assert.equal(again.rt_liq_observed_enabled,rtReports);assert.equal(again.rt_liq_strip,rtReports);assert.equal(again.candle_bubbles,false);assert.equal(again.liq_observed_enabled,!name.endsWith('free'));
  }
  if(name==='defaults'||name==='saved-split'){
  // The same widget must retain different report switches when changing modes.
@@ -102,7 +102,7 @@ sockets.on('connection',ws=>{const subs=new Map();let sequence=100,seeded=false;
  assert.ok(pal.violet>50&&pal.orange>50&&pal.yellow>20,`Rails with unknown chances not multi-coloured: ${JSON.stringify(pal)}`);
  await page.mouse.move(850,550);await page.waitForTimeout(300);await page.screenshot({path:path.join(evidence,'rails-hover.png')});
  results.push({name,palette:pal,settings:s,errors});
- }else if(name==='defaults'){assert.equal(s.rt_liq_strip,false);assert.equal(s.candle_liq_strip,true);assert.equal(s.liq_markers,true);
+ }else if(name==='defaults'){assert.equal(s.rt_liq_strip,false);assert.equal(s.candle_liq_strip,true);assert.equal(s.liq_markers,false);
  await page.mouse.move(5,5);await page.waitForTimeout(800);const png=PNG.sync.read(await page.screenshot({path:path.join(evidence,'rails-preview.png')}));
  const pal=palette(png);assert.ok(railsVenues.has('binancef')&&railsVenues.has('bybit')&&railsHistory>=2,`one map per coin: rails of both venues not requested (${[...railsVenues]}, ${railsHistory})`);
  assert.ok(pal.violet>50&&pal.orange>50&&pal.yellow>20,`Missing rails palette colours: ${JSON.stringify(pal)}`);

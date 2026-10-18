@@ -20,6 +20,9 @@
 
 static GLuint bound = 0, next_id = 0;
 static std::unordered_map<GLuint, std::vector<float>> metadata;
+static std::unordered_map<GLuint, int> uploads;
+static GLuint tracked_depth = 0;
+static std::vector<float> depth_pixels;
 extern "C" {
 void glGenTextures(GLsizei n, GLuint* ids) { while(n--) *ids++ = ++next_id; }
 void glBindTexture(GLenum, GLuint id) { bound = id; }
@@ -28,13 +31,52 @@ void glDeleteTextures(GLsizei, const GLuint*) {}
 void glTexImage2D(GLenum, GLint, GLint, GLsizei w, GLsizei h, GLint, GLenum format, GLenum, const void* data) {
     if (format == GL_RGBA && h == 1) metadata[bound] = std::vector<float>((const float*)data, (const float*)data + w*4);
 }
-void glTexSubImage2D(GLenum, GLint, GLint x, GLint, GLsizei w, GLsizei h, GLenum format, GLenum, const void* data) {
+void glTexSubImage2D(GLenum, GLint, GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLenum, const void* data) {
+    ++uploads[bound];
+    if (bound == tracked_depth && format == GL_RED)
+        for (int row = 0; row < h; ++row)
+            std::copy_n((const float*)data + row*w, w, depth_pixels.begin() + (y+row)*8192 + x);
     if (format == GL_RGBA && h == 1) std::copy_n((const float*)data,w*4,metadata[bound].begin()+x*4);
 }
 }
 int main() {
     auto renderer = std::make_unique<ShaderHeatmapRenderer>();
     auto& r = *renderer;
+    {
+        auto depth = std::make_unique<ShaderHeatmapRenderer>();
+        auto& d = *depth;
+        d.configure_realtime(0.00001);
+        // 130 columns cross two tile boundaries and leave a partial final tile.
+        // Column 2 is a real gap; column 64 holds the previous confirmed book.
+        for (int i = 0; i < 130; ++i) {
+            if (i == 2 || i == 64) continue;
+            d.finalize_column(1000 + i*100,
+                {{0.06340, float(i+1)}, {0.06341, float(i+2)}, {0.06350, float(i+3)}}, i == 3, 0.06345);
+        }
+        tracked_depth = d.data_texture_;
+        depth_pixels.resize(8192*1024, -777);
+        const auto verify = [&] {
+            uploads.clear();
+            d.sync_gpu_from_timeline();
+            assert(uploads[d.data_texture_] == (d.ring_count_ + 63)/64);
+            assert(uploads[d.meta_texture_] == 1);
+            assert(uploads[d.reach_texture_] == 0);
+            assert(metadata[d.meta_texture_][2*4+3] == 0); // A source gap stays empty.
+            assert(d.column_meta_[64].values == d.column_meta_[63].values);
+            for (int c = 0; c < d.ring_count_; ++c) {
+                const auto& m = d.column_meta_[c];
+                if (!metadata[d.meta_texture_][c*4+3]) continue;
+                for (int row = 0; row < m.num_rows; ++row)
+                    assert(depth_pixels[row*8192+c] == m.values[row]);
+            }
+        };
+        verify();
+        d.set_bucket_multiplier(5); verify(); // Regrouping preserves exact sums.
+        d.set_replay_cutoff_ms(13700); verify();
+        assert(metadata[d.meta_texture_][128*4+3] == 0); // No future columns after backseek.
+        tracked_depth = 0; depth_pixels.clear();
+        std::puts("PASS: depth rebuild uses 64-column tiles, exact values, no reach uploads; gaps/holds/backseek survive");
+    }
     {
         auto fixture = std::make_unique<ShaderHeatmapRenderer>();
         auto& r = *fixture;
@@ -80,14 +122,7 @@ int main() {
         auto candle = std::make_unique<ShaderHeatmapRenderer>();
         auto& c = *candle;
         c.native_bucket_size_ = 0.00001;
-        c.set_column_interval_ms(ShaderHeatmapRenderer::candle_depth_seconds(3600) * 1000);
-        assert(c.get_column_interval_ms() == 60000);
-        assert(ShaderHeatmapRenderer::candle_depth_seconds(300) == 60);
-        assert(ShaderHeatmapRenderer::candle_depth_seconds(5) == 5);
-        assert(ShaderHeatmapRenderer::candle_depth_seconds(3600, 20.0 * 3600000) == 60);
-        assert(ShaderHeatmapRenderer::candle_depth_seconds(3600, 100.0 * 3600000) == 300);
-        assert(ShaderHeatmapRenderer::candle_depth_seconds(86400, 500.0 * 3600000) == 3600);
-        assert(ShaderHeatmapRenderer::candle_depth_seconds(300, 500.0 * 3600000) == 300);
+        c.set_column_interval_ms(60000);
         c.set_bucket_multiplier(200); // UHD auto-grouped on a wide volatile chart.
         c.set_candle_price_window(0.65, 1.4);
         const std::unordered_map<double, float> wide{{0.75, 10}, {0.75001, 20}, {0.95, 30}, {1.30, 40}};
@@ -135,6 +170,25 @@ int main() {
         assert(c.realtime_peak_ == 123);
         assert(c.column_price_min(100, 0.1) == std::floor((100 - 512 * 0.1) / 0.1) * 0.1);
         assert(!c.candle_coverage(60000).timestamp_ms);
+    }
+    for (const int64_t step : {300000LL, 900000LL, 14400000LL}) {
+        auto fixture = std::make_unique<ShaderHeatmapRenderer>();
+        auto& c = *fixture;
+        c.set_column_interval_ms(step);
+        c.native_bucket_size_ = 1;
+        c.finalize_column(step + 60000, {{100, 2}});
+        c.finalize_column(2 * step - 60000, {{100, 7}});
+        c.finalize_column(3 * step + 60000, {{100, 11}});
+        c.sync_gpu_from_timeline();
+        assert(c.time_step_ms_ == step);
+        assert(c.display_time_to_bucket(double(step)) == step);
+        assert(c.display_time_to_bucket(step * 1.49) == step);
+        assert(c.display_time_to_bucket(step * 1.51) == 2 * step);
+        assert(c.get_value_at_price_and_time(100, step) == 7); // Latest snapshot, not 2 + 7.
+        assert(c.candle_coverage(step).timestamp_ms == 2 * step - 60000);
+        assert(c.get_value_at_price_and_time(100, 2 * step) == 0); // No invented gap fill.
+        c.gpu_dirty_ = true; c.sync_gpu_from_timeline();
+        assert(c.get_value_at_price_and_time(100, step) == 7); // Rebuild agrees with upload.
     }
     r.native_bucket_size_ = 1;
     const std::unordered_map<double,float> history{{100,2},{101,3}};
@@ -436,27 +490,29 @@ int main() {
     r.clear();
     assert(r.observation_centers_.empty());
     r.configure_realtime(1);
+    // These cases pin the set-once colour rule; automatic contrast (core/rt_contrast.h) has its own native test.
+    r.set_realtime_auto_contrast(false);
     r.set_observation_clock_ms(epoch + 1000);
     r.finalize_column(epoch + 17, {{99, 20}, {100, 30}, {101, 40}, {450, 1000000}}, true, 100);
     r.sync_gpu_from_timeline();
-    assert(r.realtime_normalization(98, 102) == 40); // Remote wall cannot dim active rows.
+    assert(r.realtime_normalization(98, 102, 0, 0) == 40); // Remote wall cannot dim active rows.
     const auto unchanged = r.timeline_.at(epoch + 17);
     r.set_bucket_multiplier(2);
     // Re-entry/auto-fit can regroup again within the render debounce period.
     // Calibration must rebuild before looking at the previous grid's values.
     assert(r.gpu_dirty_);
-    assert(r.realtime_normalization(98, 102) == 80);
+    assert(r.realtime_normalization(98, 102, 0, 0) == 80);
     assert(!r.gpu_dirty_);
-    assert(r.realtime_normalization(98, 102) == 80); // Native reference 40 times two ticks per row.
+    assert(r.realtime_normalization(98, 102, 0, 0) == 80); // Native reference 40 times two ticks per row.
     assert(r.timeline_.at(epoch + 17) == unchanged); // Brightness never mutates source volume.
     // New liquidity and a changing price viewport cannot recolor past cells.
-    const float peak = r.realtime_normalization(98, 102);
+    const float peak = r.realtime_normalization(98, 102, 0, 0);
     r.set_observation_clock_ms(epoch + 5000);
     r.finalize_column(epoch + 4017, {{100, 900000}}, false, 104);
     r.sync_gpu_from_timeline();
-    assert(r.realtime_normalization(0, 1000) == peak);
+    assert(r.realtime_normalization(0, 1000, 0, 0) == peak);
     r.recalibrate_realtime_colors();
-    assert(r.realtime_normalization(100, 102) == 80); // Brief wall does not dominate recalibration.
+    assert(r.realtime_normalization(100, 102, 0, 0) == 80); // Brief wall does not dominate recalibration.
     // Uniform native liquidity must retain the same shader ratio at every price
     // grouping, including when the FIRST calibration happens while zoomed out.
     for (int initial_group : {1, 5, 20, 100}) {
@@ -465,10 +521,10 @@ int main() {
         for (int price = 100; price < 300; ++price) uniform[price] = 20;
         r.finalize_column(epoch, uniform, true, 200);
         r.set_observation_clock_ms(epoch + 100);
-        assert(r.realtime_normalization(100, 300) == 20 * initial_group);
+        assert(r.realtime_normalization(100, 300, 0, 0) == 20 * initial_group);
         for (int group : {1, 2, 5, 20, 100}) {
             r.set_bucket_multiplier(group);
-            const float reference = r.realtime_normalization(100, 300);
+            const float reference = r.realtime_normalization(100, 300, 0, 0);
             const float total = r.get_value_at_price_and_time(200.5, epoch + 50);
             assert(total == 20 * group); // DOM/tooltip still receives the row sum.
             assert(total / reference == 1); // Same density, same color.
@@ -478,7 +534,7 @@ int main() {
         r.clear_realtime_view(1000);
         r.finalize_column(epoch, uniform, true, 200);
         r.set_observation_clock_ms(epoch + 1000);
-        assert(r.realtime_normalization(100, 300) == 2000);
+        assert(r.realtime_normalization(100, 300, 0, 0) == 2000);
         assert(r.get_value_at_price_and_time(200.5, epoch + 50) == 2000);
     }
     // First calibration and explicit recalibration in an archive view must
@@ -486,11 +542,11 @@ int main() {
     r.clear(); r.configure_realtime(1); r.set_bucket_multiplier(5);
     r.finalize_column(epoch, {{100,100},{105,100}}, true, 105, 5);
     r.set_observation_clock_ms(epoch + 100);
-    assert(r.realtime_normalization(100,110) == 100);
+    assert(r.realtime_normalization(100,110,0,0) == 100);
     r.finalize_column(epoch + 100, {{100,20},{101,20},{102,20},{103,20},{104,20}}, false, 102);
     r.set_observation_clock_ms(epoch + 200);
     r.recalibrate_realtime_colors();
-    assert(r.realtime_normalization(100,110) == 100);
+    assert(r.realtime_normalization(100,110,0,0) == 100);
     assert(r.get_value_at_price_and_time(100.5,epoch+50) == 100);
     assert(r.get_value_at_price_and_time(100.5,epoch+150) == 100);
     r.invalidate_observation(epoch);
@@ -508,14 +564,14 @@ int main() {
         r.finalize_column(epoch + i * 100, wall_book, i == 0, 120);
     r.set_observation_clock_ms(epoch + 6500);
     r.sync_gpu_from_timeline();
-    const auto wall_peak = r.realtime_normalization(100, 140);
+    const auto wall_peak = r.realtime_normalization(100, 140, 0, 0);
     assert(wall_peak >= 20000000 && wall_peak <= 25000000);
     assert(r.get_value_at_price_and_time(120.5, epoch + 3000) == 205300000);
     r.set_observation_clock_ms(epoch + 7000);
     wall_book[120] = 500000000;
     r.finalize_column(epoch + 6900, wall_book, false, 120);
     r.sync_gpu_from_timeline();
-    assert(r.realtime_normalization(100, 140) == wall_peak);
+    assert(r.realtime_normalization(100, 140, 0, 0) == wall_peak);
     // Surviving columns must preserve both metadata and uploaded values across
     // direct arrivals, rebuilds and retirement of their original predecessor.
     for (int mult : {1, 2, 5, 10, 20}) {
@@ -549,12 +605,12 @@ int main() {
     r.configure_realtime(1);r.set_bucket_multiplier(5);
     r.set_observation_clock_ms(epoch+1800000);
     r.finalize_column(epoch+17,{{100,10}},true,100);r.sync_gpu_from_timeline();
-    const float history_peak=r.realtime_normalization(95,105);
+    const float history_peak=r.realtime_normalization(95,105,0,0);
     r.set_realtime_warm(true);r.clear_realtime_view(1000);
     for(int i=0;i<1800;++i)r.finalize_column(epoch+i*1000+917,{{100,10}},i==0,100);
     r.sync_gpu_from_timeline();
     assert(r.timeline_.size()==1800 && r.ring_count_==1800);
-    assert(r.realtime_normalization(95,105)==history_peak && r.realtime_warm());
+    assert(r.realtime_normalization(95,105,0,0)==history_peak && r.realtime_warm());
     assert(r.get_value_at_price_and_time(100.5,epoch+950)==10);
     r.finalize_column(epoch+1799950,{{100,25}},true,100);
     r.sync_gpu_from_timeline();
@@ -563,7 +619,7 @@ int main() {
     assert(r.column_flags(epoch+1799950)>=5); // Reseed cannot bridge the earlier part of its bin.
     r.clear_realtime_view(100);r.finalize_column(epoch+17,{{100,10}},true,100);
     r.sync_gpu_from_timeline();
-    assert(r.realtime_normalization(95,105)==history_peak && r.realtime_warm());
+    assert(r.realtime_normalization(95,105,0,0)==history_peak && r.realtime_warm());
     assert(r.get_value_at_price_and_time(100.5,epoch+50)==10);
     std::puts("PASS: live depth survives rebuilds, finalization and origin changes; rewind/clear discard it");
 }

@@ -44,6 +44,17 @@ public:
 
     EMSCRIPTEN_WEBSOCKET_T get_handle() const { return socket_; }
 
+    // How the last socket ended: the browser's close event (code, wasClean,
+    // reason) and how long it had been open. Cleared when a socket opens, so a
+    // loss with no close event (an error alone, a connect timeout) reads code 0.
+    struct CloseInfo {
+        int code = 0;
+        bool clean = false;
+        std::string reason;
+        double open_ms = -1;
+    };
+    const CloseInfo& last_close() const { return last_close_; }
+
 private:
     bool open_socket();
     void release_socket();
@@ -60,6 +71,7 @@ private:
     double reconnected_at_ms_ = 0;
     double last_outage_ms_ = 0;
     bool reconnected_after_restart_ = false;
+    CloseInfo last_close_;
     EMSCRIPTEN_WEBSOCKET_T socket_;
     bool is_connected_;
     MessageCallback message_callback_;

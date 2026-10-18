@@ -17,30 +17,12 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 namespace {
 
-// Ocean ramp lerp - t∈[0,1] across Theme::Tokens::OCEAN stops
-ImVec4 ocean_vec4(float t) {
-    t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
-    const float f = t * 5.0f;
-    int i = static_cast<int>(f);
-    if (i > 4) i = 4;
-    const float fr = f - static_cast<float>(i);
-    const ImVec4& a = Theme::Tokens::OCEAN[i];
-    const ImVec4& b = Theme::Tokens::OCEAN[i + 1];
-    return ImVec4(a.x + (b.x - a.x) * fr,
-                  a.y + (b.y - a.y) * fr,
-                  a.z + (b.z - a.z) * fr, 1.0f);
-}
-
 // Right-aligned text within the current table cell
 void cell_text_right(const char* txt) {
     const float w = ImGui::GetContentRegionAvail().x;
     const float tw = ImGui::CalcTextSize(txt).x;
     ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (w > tw ? w - tw : 0.0f));
     ImGui::TextUnformatted(txt);
-}
-
-ImU32 with_alpha(const ImVec4& c, float a) {
-    return ImGui::GetColorU32(ImVec4(c.x, c.y, c.z, a));
 }
 
 } // namespace
@@ -605,16 +587,8 @@ namespace {
 void depth_cell(ImDrawList* dl, const char* txt, float frac, bool bid_side, float row_h, float pad_y) {
     const ImVec2 cur = ImGui::GetCursorScreenPos();
     const float cell_w = ImGui::GetContentRegionAvail().x;
-    const float tw = ImGui::CalcTextSize(txt).x;
-    const float inset = 5.0f;
-    const float bar_w = std::min(cell_w, std::max(tw + inset * 2.0f, std::round(std::pow(frac, 0.6f) * cell_w)));
-    const ImVec4 c = ocean_vec4(0.34f + 0.52f * frac);
     const float y0 = std::round(cur.y - pad_y + 2.0f), y1 = std::round(cur.y - pad_y + row_h - 2.0f);
-    const ImVec2 a = bid_side ? ImVec2(cur.x + cell_w - bar_w, y0) : ImVec2(cur.x, y0);
-    const ImVec2 b = bid_side ? ImVec2(cur.x + cell_w, y1) : ImVec2(cur.x + bar_w, y1);
-    dl->AddRectFilled(a, b, with_alpha(c, 0.34f + 0.36f * frac), 3.0f);
-    const float x = bid_side ? cur.x + cell_w - inset - tw : cur.x + inset;
-    dl->AddText(ImVec2(std::round(x), cur.y), ImGui::GetColorU32(frac >= 0.3f ? Theme::Tokens::TX1 : Theme::Tokens::TX2), txt);
+    Theme::depth_bar(dl, ImVec2(cur.x, y0), ImVec2(cur.x + cell_w, y1), txt, frac, bid_side, cur.y);
 }
 }  // namespace
 

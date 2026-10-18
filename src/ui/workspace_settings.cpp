@@ -113,8 +113,14 @@ Json ChartWidget::save_settings() const {
     j["rt_mode"] = rt_mode_;
     j["rt_show_standalone"] = rt_show_standalone_;
     j["rt_candles"] = rt_candles_;
-    j["chart_layer_defaults"] = 2;
+    j["chart_layer_defaults"] = 3;
+    j["hl_major_levels"] = hl_major_levels_;
+    j["rail_value_labels"] = rail_value_labels_;
+    j["hl_rails_profile"] = hl_profile_;
+    j["model_rails_profile"] = liqmap2_rails_profile_;
+    j["touch_odds_enabled"] = touch_odds_enabled_;
     j["rt_bubbles"] = rt_bubbles_;
+    j["rt_bubble_cap"] = rt_bubble_cap_;
     j["candle_bubbles"] = candle_bubbles_;
     j["candle_bubble_history"] = candle_bubble_history_enabled_;
     j["candle_bubble_min"] = candle_bubble_min_;
@@ -124,6 +130,8 @@ Json ChartWidget::save_settings() const {
     j["rt_bridge_gaps"] = rt_bridge_gaps_;
     j["rt_depth"] = rt_depth_enabled_;
     j["liquidity_response"] = liquidity_response_enabled_;
+    j["rt_refill"] = rt_refill_enabled_;
+    j["candle_refill"] = candle_refill_enabled_;
     j["rt_auto_fit_history"] = rt_auto_fit_history_;
     j["rt_auto_price"] = rt_auto_price_;
     j["rt_auto_bubbles"] = rt_auto_bubbles_;
@@ -164,8 +172,12 @@ Json ChartWidget::save_settings() const {
     j["alert_lines"] = alert_lines_; j["alert_markers"] = alert_markers_;
     j["rt_liq_collapsed"] = rt_liq_collapsed_;
     j["candle_liq_collapsed"] = candle_liq_collapsed_;
+    j["rt_walls"] = rt_walls_enabled_; j["rt_pulls"] = rt_pulls_enabled_; j["rt_cvd"] = rt_cvd_enabled_;
+    j["rt_auto_contrast"] = rt_auto_contrast_;
     j["liq_census_enabled"] = liq_census_enabled_;
-    j["liq_census_history"] = liq_census_show_history_;
+    j["hl_groups"] = hl_groups_;
+    j["hl_profile"] = hl_profile_;
+    j["hl_over_v2"] = hl_over_v2_;
     j["liq_census_min_usd"] = liq_census_min_usd_;
     j["liq_obs_min_usd"] = liq_obs_min_usd_;
     j["liq_obs_ref_usd"] = liq_obs_ref_usd_;
@@ -255,6 +267,11 @@ void ChartWidget::load_settings(const Json& j) {
     workspace::read(j, "rt_candles", rt_candles_);
     if (rt_mode_) chart_type_ = rt_candles_ ? ChartType::Candles : ChartType::Line;
     workspace::read(j, "rt_bubbles", rt_bubbles_);
+    {
+        double cap = rt_bubble_cap_;
+        workspace::read(j, "rt_bubble_cap", cap, 0.0, 1000.0);
+        rt_bubble_cap_ = bubble_size::valid_cap(cap);   // absent in older saves: Standard
+    }
     workspace::read(j, "candle_bubbles", candle_bubbles_);
     workspace::read(j, "candle_bubble_history", candle_bubble_history_enabled_);
     workspace::read(j, "candle_bubble_min", candle_bubble_min_, 0, 1000000000000.0);
@@ -264,6 +281,8 @@ void ChartWidget::load_settings(const Json& j) {
     workspace::read(j, "rt_bridge_gaps", rt_bridge_gaps_);
     workspace::read(j, "rt_depth", rt_depth_enabled_);
     workspace::read(j, "liquidity_response", liquidity_response_enabled_);
+    workspace::read(j, "rt_refill", rt_refill_enabled_);  // absent in older saves: keeps the default (on)
+    workspace::read(j, "candle_refill", candle_refill_enabled_);  // the same for the candle layer
     liquidity_response_history_.reset();
     // A manual inspection is transient. Restored sessions start following price.
     workspace::read(j, "rt_show_standalone", rt_show_standalone_);
@@ -307,6 +326,9 @@ void ChartWidget::load_settings(const Json& j) {
     workspace::read(j,"alert_lines",alert_lines_); workspace::read(j,"alert_markers",alert_markers_);
     workspace::read(j, "rt_liq_collapsed", rt_liq_collapsed_);
     workspace::read(j, "candle_liq_collapsed", candle_liq_collapsed_);
+    workspace::read(j, "rt_walls", rt_walls_enabled_); workspace::read(j, "rt_pulls", rt_pulls_enabled_);
+    workspace::read(j, "rt_cvd", rt_cvd_enabled_);
+    workspace::read(j, "rt_auto_contrast", rt_auto_contrast_);
     if (!j.contains("candle_liq_strip") && j.contains("rt_liq_strip") && rt_liq_strip_) liq_observed_enabled_ = true;
     if (!j.contains("candle_liq_strip") && j.contains("liq_observed_enabled") && liq_observed_enabled_) {
         candle_liq_strip_=true; rt_liq_strip_=true;
@@ -329,8 +351,27 @@ void ChartWidget::load_settings(const Json& j) {
         candle_liq_strip_ = true;
     }
     workspace::read(j, "liq_census_enabled", liq_census_enabled_);
-    workspace::read(j, "liq_census_history", liq_census_show_history_);
     workspace::read(j, "liq_census_min_usd", liq_census_min_usd_, 0, 1e12);
+    workspace::read(j, "hl_groups", hl_groups_, 1, hl_rails::kAllGroups);
+    workspace::read(j, "hl_profile", hl_profile_);
+    workspace::read(j, "hl_over_v2", hl_over_v2_);  // the older "hl_lead" saved Hyperliquid's default lead: not read
+    if (layer_defaults < 3) {
+        liq_markers_ = false;
+        candle_refill_enabled_ = false;
+        activity_enabled_ = false;
+        liq_profile_enabled_ = false;
+        liq_report_profile_ = false;
+        hl_profile_ = false;
+        liqmap2_rails_profile_ = false;
+        touch_odds_enabled_ = false;
+    } else {
+        workspace::read(j, "hl_rails_profile", hl_profile_);
+        workspace::read(j, "model_rails_profile", liqmap2_rails_profile_);
+        workspace::read(j, "touch_odds_enabled", touch_odds_enabled_);
+    }
+    workspace::read(j, "hl_major_levels", hl_major_levels_);
+    workspace::read(j, "rail_value_labels", rail_value_labels_);
+
     workspace::read(j, "liq_obs_min_usd", liq_obs_min_usd_, 0, 1000000000000000.0);
     workspace::read(j, "liq_obs_ref_usd", liq_obs_ref_usd_, 1, 1000000000000000.0);
     workspace::read(j, "liq_obs_auto_size", liq_obs_auto_size_);

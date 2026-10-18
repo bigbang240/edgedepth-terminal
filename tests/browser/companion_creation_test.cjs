@@ -29,7 +29,7 @@ server.on('connection',ws=>{let subs=new Map,sequence=100; ws.on('message',m=>{l
     try {
         const page = await browser.newPage({viewport:{width:2200,height:1100}});
         const errors = []; page.on('pageerror', e => errors.push(e.message));
-        await page.addInitScript(() => { window.__EDGEDEPTH_TIER__='admin'; });
+        await page.addInitScript(() => { window.__EDGEDEPTH_TIER__='admin'; window.__EDGEDEPTH_TEST_UI__=true; });
         await page.route('**/*', r => {
             const u = new URL(r.request().url());
             if (u.origin === new URL(base).origin) return r.continue();
@@ -48,11 +48,15 @@ server.on('connection',ws=>{let subs=new Map,sequence=100; ws.on('message',m=>{l
             await page.mouse.move(200,30); await settle();
             await page.screenshot({path:path.join(evidence,name+'.png')});
         }};
+        // The chart toolbar's controls by name (core/ui_test_marks.h): the Real-time chip's width changes with its label.
+        const center = async name => { const r = await page.evaluate(n => (window.__EDGEDEPTH_UI_RECTS__||{})[n], name);
+            assert.ok(r, `${name} is on screen`); return [(r[0]+r[2])/2, (r[1]+r[3])/2]; };
         const add = async y => {
-            await page.mouse.click(1025,124); await settle();
-            await page.mouse.click(1060,y); await settle();
+            const [x, cy] = await center('chart.add_widget');
+            await page.mouse.click(x, cy); await settle();
+            await page.mouse.click(x + 35, y); await settle();
         };
-        const toggle = async () => { await page.mouse.click(648,124); await settle(); };
+        const toggle = async () => { const [x, y] = await center('chart.realtime'); await page.mouse.click(x - 30, y); await settle(); };
         // Close the right column's selected tab. The dock node's own close at the tab bar's far right is gone
         // (2026-10-11: one close per panel, the tab's x on hover); a middle click on the tab is its stable hit.
         const closeRightTab = async () => { await page.mouse.click(1800,93,{button:'middle'}); await settle(); };

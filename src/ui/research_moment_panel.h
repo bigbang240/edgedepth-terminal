@@ -70,8 +70,9 @@ private:
         std::string value;   // display-formatted by the bridge
         std::string detail;  // worded direction for signed readings ("" = none)
         std::string tag;     // "NEW"/"STANDING" vs -1h ("" = no honest baseline)
-        bool is_new = false; // styling hint that pairs with tag
+        bool is_new = false; // groups the row under "new since" vs "already standing out"
         bool provisional = false;
+        bool marked = false; // in the bridge's checked set: the search starts from it
     };
 
     void send_request(bool live);
@@ -104,6 +105,8 @@ private:
     bool             any_provisional_ = false;
     std::string      tags_note_;          // explains the -1h comparison ("" = untagged)
     std::string      mfields_;            // pre-checked ids for the handoff URL
+    int              marked_count_ = 0;   // how many ids mfields_ carries
+    float            footer_h_ = 140.0f;  // last frame's footer height, sizes the list
 };
 
 }  // namespace ui

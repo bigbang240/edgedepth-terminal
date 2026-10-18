@@ -176,6 +176,7 @@ EM_BOOL WebSocketClient::on_open(int eventType, const EmscriptenWebSocketOpenEve
     client->is_connected_ = true;
     client->opened_at_ms_ = emscripten_get_now();
     client->last_frame_ms_ = -1;
+    client->last_close_ = CloseInfo{};
     if (client->planned_restart_since_ms_ > 0) {
         client->last_outage_ms_ = client->opened_at_ms_ - client->planned_restart_since_ms_;
         client->reconnected_at_ms_ = client->opened_at_ms_;
@@ -209,6 +210,12 @@ EM_BOOL WebSocketClient::on_error(int eventType, const EmscriptenWebSocketErrorE
 EM_BOOL WebSocketClient::on_close(int, const EmscriptenWebSocketCloseEvent* event, void* userData) {
     auto* client = static_cast<WebSocketClient*>(userData);
     if (event->socket != client->socket_) return EM_TRUE;
+    // Kept for the replay's loss telemetry: 1006 with wasClean false means no
+    // close frame arrived (the path dropped), anything else was a real close.
+    client->last_close_.code = event->code;
+    client->last_close_.clean = event->wasClean != 0;
+    client->last_close_.reason.assign(event->reason, strnlen(event->reason, sizeof(event->reason)));
+    client->last_close_.open_ms = client->is_connected_ ? emscripten_get_now() - client->opened_at_ms_ : -1;
     // 1001 Going Away with "restart <eta>" is the hub announcing a redeploy
     // (server_session.AnnounceRestart). Anything else is an unplanned drop.
     if (event->code == 1001 && std::strncmp(event->reason, "restart", 7) == 0) {

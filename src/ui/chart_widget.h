@@ -1,7 +1,14 @@
 #pragma once
 #include "rendering/observed_liquidations.h"
 #include "core/liquidity_response.h"
+#include "core/refill_levels.h"
+#include "core/refill_history.h"
+#include "core/refill_absorption.h"
+#include "core/realtime_bubble_size.h"
 #include "core/liq_rails.h"
+#include "core/entitlements.h"
+#include "core/hl_rails.h"
+#include "rendering/hl_rails_overlay.h"
 #include "core/liqmap2_release.h"
 #ifdef EDGEDEPTH_EXPOSURE_V2_DEV
 #include "core/exposure_history.h"
@@ -9,10 +16,13 @@
 #include "rendering/exposure_summary_overlay.h"
 #include "rendering/exposure_overlay.h"
 #endif
+#include "rendering/liqmap2_rails_overlay.h"
 #include "core/candle_bubble_history.h"
 #include "core/flow_positioning.h"
 #include "core/activity_strip.h"
 #include "core/reference_context.h"
+#include "core/rt_walls.h"
+#include "core/rt_cvd.h"
 #include "ui/realtime_dom_frame.h"
 #include "ui/realtime_dom_ladder.h"
 #include "ui/realtime_navigation.h"
@@ -470,6 +480,8 @@ private:
     bool rt_auto_bubbles_ = true;
     RealtimeBubbleScale rt_bubble_scale_;
     float rt_min_notional_ = 10000.0f;
+    // Layers > Trade bubbles > Max size (12 / 24 / 32 px), saved as rt_bubble_cap.
+    float rt_bubble_cap_ = bubble_size::kStandard;
     double rt_span_ms_ = realtime_default_span_ms;
     double rt_usage_emit_s_ = -1;
     int64_t rt_clock_ms_ = 0;
@@ -506,6 +518,37 @@ private:
     std::chrono::steady_clock::time_point last_heatmap_rebuild_;
     ImPlotRect last_rebuilt_range_{0, 0, 0, 0};
     bool viewport_initialized_ = false;
+
+    // ─── Real-time extras (chart_widget_rt_extras.cpp) ──────────────────
+    // Hover readout, walls and pulled walls, the CVD lane; the auto contrast
+    // switch is passed to the RT renderer (core/rt_contrast.h).
+    bool rt_walls_enabled_ = true, rt_pulls_enabled_ = true, rt_cvd_enabled_ = false, rt_auto_contrast_ = true;
+    rt_walls::Tracker rt_walls_;
+    uint64_t rt_walls_serial_ = 0, rt_walls_archive_generation_ = 0, rt_walls_dropped_ = 0;
+    const RealtimeArchive* rt_walls_archive_ = nullptr;
+    struct RtWallMark {   // a wall or pull drawn this frame, kept for its hover
+        double price = 0, low = 0, high = 0, size = 0, multiple = 0, traded = 0;
+        int64_t start_ms = 0, end_ms = 0;
+        ImVec2 at{};          // a pull's glyph
+        float half_px = 0;    // actual pull extent, shared by drawing and hover
+        bool bid = true, pulled = false;
+    };
+    std::vector<RtWallMark> rt_wall_marks_;
+    RealtimeWallMarks rt_wall_ladder_;
+    RealtimeCvdSeries rt_cvd_;
+    std::vector<ImVec2> rt_cvd_points_;
+    char rt_base_asset_[24] = {};
+    const char* realtime_base_asset();
+    void update_realtime_walls();
+    void render_realtime_walls(ImDrawList* dl);
+    bool realtime_hover_ready() const;
+    void render_realtime_hover();
+    void render_realtime_cvd_lane();
+    float realtime_cvd_lane_height() const;
+    void render_realtime_wall_layer();
+    void render_realtime_cvd_layer();
+    int realtime_extra_layers_on() const;
+    void reset_realtime_extras();
 
     // ─── Admin Pattern Overlay ───────────────────────────────────────────
     // Fixed slots avoid allocations in the render loop. The backend currently
@@ -616,12 +659,12 @@ private:
 
     // ─── Liquidation Profile Overlay (right-edge sidebar histogram, mirrors VPVR) ────────
     // Reuses the shared Profile:: renderer (price_profile_renderer.h) - same one VPVR uses -
-    // fed from the current liq heatmap snapshot instead of volume levels. Default ON: it ships
-    // as an active headline layer ("Liq Profile" pill) on the bare terminal.
-    bool liq_profile_enabled_ = true;
+    // fed from the current liq heatmap snapshot instead of volume levels. Opt in from the
+    // scenario map settings; the default chart keeps the right edge clear.
+    bool liq_profile_enabled_ = false;
     // Touch odds + P9 cascade chip (Heatmap V2, admin preview, live Binance only).
     // Data comes from the web host bridge; see ui/touch_odds_overlay.h.
-    bool touch_odds_enabled_ = true;
+    bool touch_odds_enabled_ = false;
 
     // ─── Observed layer (WS4 §7) - REAL @forceOrder liquidation markers ──────────────────
     // Discrete dots at (time, price), area ∝ USD, side-tinted (forced BUY = short liquidated
@@ -640,7 +683,7 @@ private:
     // Candle callouts and real-time diamonds switch separately (they were one flag, which Bybit's default turned off
     // in real-time with no control left to turn it back on). Diamonds sit on the tape (tape_price) where a venue
     // reports bankruptcy prices, so no venue starts with them off.
-    bool liq_markers_ = true;
+    bool liq_markers_ = false;
     bool rt_liq_markers_ = true;
     bool liq_report_profile_ = false;
     float rt_liq_height_ = 100.0f, candle_liq_height_ = 100.0f;
@@ -715,14 +758,16 @@ private:
         const int c = std::clamp(liqmap2_rails_colour_, 0, 3);
         return liqmap2_access() == liqmap2::Access::preview || c >= 2 ? c : 2;
     }
-    bool liqmap2_rails_profile_ = true;  // rails: the live rails' profile at the right edge (ref-6)
+    bool liqmap2_rails_profile_ = false;  // rails: the live rails' profile at the right edge (ref-6)
     Terminal::Pair liqmap2_rails_sibling() const;  // the coin on the other rails venue (Bybit, Binance)
     int liqmap2_rails_history_requested_ = 0;   // days of rails history asked for (each request one day)
     int64_t liqmap2_rails_view_lo_ = 0;
     int64_t liqmap2_rails_window_ = 0;   // the replay window start the history counter belongs to (0: live)         // the plot's left edge in real time, last frame (0 before one)
     StreamManager* liqmap2_rails_mgr_ = nullptr;
+    liqmap2_rails_overlay::Cache liqmap2_rails_cache_;  // the rails picture, kept while its inputs hold
+    std::vector<liqmap2_rails_overlay::Source> liqmap2_rails_sources_;  // this frame's venues, kept for their capacity
+    liqmap2_rails::ChartCandles liqmap2_rails_candles_;  // closed candles and the forming one, as the rails meet them
 
-    bool liq_census_show_history_ = false;
     float liq_census_min_usd_ = 1000.0f;
     int liq_history_requested_ = 0;
     bool liq_census_enabled_ = false;      // ctor: defaults ON for HL-native pairs
@@ -735,6 +780,21 @@ private:
     int64_t liq_census_cache_ts_      = -1;
     uint8_t liq_census_cache_mask_    = 0xFF;
     double  liq_census_cache_max_usd_ = 0.0;
+    // Hyperliquid positions as rails, built on the server (stream 42, history 43; core/hl_rails.h).
+    hl_rails::View hl_rails_view_;             // the coin's rails through the viewer's leverage and Minimum $
+    hl_rails_overlay::Cache hl_rails_cache_;   // the rails picture, kept while its inputs hold
+    StreamManager* hl_rails_mgr_ = nullptr;    // the manager holding the live subscription
+    int hl_rails_history_requested_ = 0;       // days of history asked for (one request a day)
+    int64_t hl_rails_window_ = 0;              // the replay window start the history counter belongs to (0: live)
+    int64_t hl_rails_view_lo_ = 0;             // the plot's left edge in real time, last frame (0 before one)
+    uint8_t hl_groups_ = hl_rails::kAllGroups; // the real leverage shown (workspace "hl_groups")
+    bool hl_profile_ = false;                   // the standing rails' profile at the right edge ("hl_profile")
+    // With the V2 rails on too: Hyperliquid leads them ("hl_over_v2"). The V2 rails lead by default (James 2026-10-14:
+    // following Hyperliquid they drew thin and dim and lost the map); the older "hl_lead" is not read.
+    bool hl_over_v2_ = false;
+    hl_rails_overlay::Key hl_key_;             // this frame's key, drawn over the candles
+    hl_rails::Basis hl_basis_;                 // this chart's price over Hyperliquid's, one sample a census message
+    std::string hl_basis_key_;                 // the chart market and coin the basis belongs to
 
     // ─── Indicators ──────────────────────────────────────────────────────
     Indicators::IndicatorManager indicator_mgr_;
@@ -763,6 +823,10 @@ private:
 
     // ─── Rendering ───────────────────────────────────────────────────────
     void render_controls();
+    void render_overlay_menu(bool liquidations, ImVec2 anchor);
+    std::string liquidation_menu_detail_, layers_menu_detail_;
+    bool hl_major_levels_ = true;
+    bool rail_value_labels_ = false;
     void render_chart();
     void render_indicators();
 #ifdef EDGEDEPTH_EXPOSURE_V2_DEV
@@ -788,8 +852,52 @@ private:
     void update_liquidity_response();
     // V2 liquidation map: the rails for every viewer with V2, the frames for admins' touch-odds fuel.
     void update_liqmap2();
+    bool hl_coin_missing() const;  // the chart's coin has no Hyperliquid market (once the HL ticker feed is in)
     void render_liquidity_response();
     void render_liquidity_response_settings();
+    // Candle-mode absorption history is a Pro read live (the server refuses Free); replay is open.
+    bool absorption_locked() const;
+    void open_absorption_upsell();
+    // Refill levels (Real-time): chart_widget_refill_levels.cpp, core/refill_levels.h.
+    bool rt_refill_enabled_ = true;
+    StreamManager* refill_stream_mgr_ = nullptr;
+    refill::LadderMarks refill_ladder_;
+    std::array<uint16_t, refill::kMaxLevels> refill_order_{};
+    std::vector<refill::Message> refill_outbox_;
+    // One swelling absorption bubble per drawn level, behind the trades: what each has absorbed so far, and where
+    // this frame's markers sit (for the hover in render_refill_levels).
+    refill::Absorption refill_absorption_;
+    struct RefillLens { uint16_t index = 0; ImVec2 center; float r = 0; };
+    std::array<RefillLens, refill::kMaxDrawn> refill_lenses_{};
+    int refill_lens_count_ = 0;
+    bool refill_pack() const;
+    refill::Access refill_access() const;
+    bool refill_server_locked() const;
+    bool refill_active() const;
+    void open_refill_upsell(const char* cause);
+    void update_refill_levels();
+    void release_refill_levels();
+    void render_refill_lenses(ImDrawList* dl, const ImPlotRect& limits, double minimum);
+    void render_refill_levels(ImDrawList* dl, const ImPlotRect& limits);
+    void render_refill_status(ImDrawList* dl);
+    void render_refill_layer_row();
+    // The entitlement token the host seeds and refreshes (window.__EDGEDEPTH_REPLAY_TOKEN__), read per request.
+    static const char* refill_token();
+    // Refill levels on candle charts (recorded history): chart_widget_refill_history.cpp, core/refill_history.h.
+    bool candle_refill_enabled_ = false;
+    bool refill_history_seeking_ = false;
+    refill::history::Requester refill_history_req_;
+    std::array<uint16_t, refill::history::kMaxLevels> refill_history_order_{};
+    int refill_history_hover_ = -1;
+    uint64_t refill_history_hover_rev_ = 0;
+    bool refill_history_locked() const;
+    bool refill_history_active() const;
+    void update_refill_history();
+    void release_refill_history();
+    void render_refill_history();
+    void render_refill_history_hover();
+    void render_refill_history_note(const char* note);
+    void render_refill_history_layer_row();
     void update_flow_positioning();
     void render_flow_positioning();
     flow_positioning::History flow_history_;
@@ -801,7 +909,7 @@ private:
     void render_activity_bookmark();
     bool activity_visible() const;
     float activity_height() const;
-    bool activity_enabled_=true, activity_collapsed_=true;
+    bool activity_enabled_=false, activity_collapsed_=true;
     bool activity_trades_=true,activity_volume_=true,activity_oi_=true,activity_buy_=true,activity_shading_=true,activity_book_enabled_=false;
     bool alert_lines_=false,alert_markers_=false,activity_replay_=false,activity_pending_=false;
     int activity_request_id_=0;
@@ -907,9 +1015,40 @@ private:
     void render_liq_callouts();
     struct LiqTypical { const void* data = nullptr; size_t n = 0; int64_t tf = 0, cutoff_bucket = 0; float min_usd = 0; double usd = 0; };
     LiqTypical liq_typical_;  // the typical candle, recomputed when reports, timeframe, clock candle or filter change
+    // The callouts in view and their labels, recomputed only when what they read changes: the reports and which of
+    // them the view holds, the typical candle, the threshold and filter, and the candles they group into (the pass
+    // reads every report in view: thousands a day on a busy market, every frame otherwise).
+    struct LiqCallouts {
+        bool valid = false;
+        const void* events = nullptr; const void* data = nullptr; size_t size = 0; uint64_t revision = 0;
+        size_t first = 0, last = 0;
+        double typical = 0; float multiple = 0, min_usd = 0;
+        int64_t tf = 0, building = 0; const void* candles = nullptr; uint64_t candles_revision = 0;
+        std::vector<observed_liquidations::CandleSide> marks;
+        std::vector<std::array<char, 24>> labels;
+        const ImFont* font = nullptr; float font_size = 0;  // the label widths' font
+        std::vector<ImVec2> sizes;
+    };
+    LiqCallouts liq_callouts_;
     float liq_callout_x_ = static_cast<float>(observed_liquidations::kCalloutDefault);  // callout at this x typical
-    void toggle_liq_census();    // "Liq Levels HL" - subscribe/unsubscribe stream 34 (census)
-    void render_liq_census();    // HL census shelves (REAL liq levels) + coverage badge
+    void toggle_liq_census();    // the Hyperliquid positions layer on or off
+    // Hyperliquid positions as rails in the V2 grammar (core/hl_rails.h, rendering/hl_rails_overlay.h). follow: the V2
+    // rails lead, so these draw fainter beneath them.
+    void render_liq_census(bool follow);
+    // The live subscription (stream 42) and the stored days (stream 43), or the replay window's record.
+    void update_hl_rails();
+    // Free on BTC on Binance and Hyperliquid charts (James 2026-10-15), Pro elsewhere: the server serves HL BTC to anyone
+    // and other coins to Pro tokens.
+    bool hl_rails_free() const {
+        return (pair_.exchange == "binancef" && pair_.symbol == "btcusdt") || (pair_.exchange == "hl" && pair_.symbol == "BTC");
+    }
+    bool hl_rails_allowed() const { return Entitlements::is_pro() || hl_rails_free(); }
+    bool hl_rails_drawn() const {
+        return !rt_mode_ && liq_census_enabled_ && hl_rails_allowed() && ct_allows_time_overlays(chart_type_);
+    }
+    // Hyperliquid's rails lead: alone, or over the V2 rails by choice (hl_over_v2_). The leader keeps its profile, labels
+    // and hover; the other follows.
+    bool hl_leads() const { return hl_rails_drawn() && (!liqmap2_rails_drawn() || hl_over_v2_); }
     // Liquidation rails fuel from observed HL positions (admin choice on HL charts, census subscribed).
     bool observed_rails_allowed() const;
     liq_rails::FuelSource observed_rails_fuel(int64_t clock) const;
@@ -935,8 +1074,8 @@ private:
         return liqmap2_shown() && !rt_mode_ && ct_allows_time_overlays(chart_type_);
     }
     bool scenario_map_shown() const { return liq_dense_field_ && !live_chart() && !(rails_replay() && liqmap2_allowed()); }
-    void render_liqmap2();
-    liq_rails::FuelSource modelled_rails_fuel(int64_t clock) const;
+    void render_liqmap2(bool follow);
+    const char* touch_rails_off() const;
 
     // VPVR overlay
     void render_vpvr_profile();

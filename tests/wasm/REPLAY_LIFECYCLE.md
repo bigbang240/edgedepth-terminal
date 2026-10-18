@@ -7,7 +7,7 @@ this browser sequence additionally exercises actual ChartWidget destruction.
 
 1. Open the normal live terminal with chart, DOM and trade tape. Wait for real
    stats and trades. Note the symbol and current wall-clock timestamps.
-2. Use Replay > Open Replay Library > TUT > Replay. Do not substitute a `?pack=`
+2. Use Replay > Replay Library > TUT > Replay. Do not substitute a `?pack=`
    URL: that mode intentionally has no live socket and cannot test this bug.
 3. Verify the replay chart, DOM and tape identify TUT and use recorded prices
    and dates. Pause; wait at least 30 seconds; verify those prices and timestamps

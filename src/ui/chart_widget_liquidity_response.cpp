@@ -6,6 +6,7 @@
 #include "replayer/replay_manager.h"
 #include "rendering/theme.h"
 #include "stream_handler.h"
+#include "ui/upsell_modal.h"
 #include <emscripten.h>
 
 EM_JS(void,response_export,(const char* value),{
@@ -19,14 +20,34 @@ void ChartWidget::add_absorption_indicator(){
     indicator_mgr_.add_indicator(std::make_unique<Indicators::AbsorptionIndicator>(liquidity_response_history_,[this](){liquidity_response_evidence_open_=true;}));
 }
 
+// Live absorption history is a Pro read on the server; a Free viewer would only ever see it refused. Replay
+// reads are scoped by the replay session instead.
+bool ChartWidget::absorption_locked() const {
+    return Entitlements::hosted() && !Entitlements::is_pro() && !ctx_.replay_mgr().is_active();
+}
+
+void ChartWidget::open_absorption_upsell(){
+    ui::UpsellModal::instance().open(ui::UpsellModal::Trigger::Layer,
+        "Absorption history by candle is a Pro layer on Binance BTC and SOL.","absorption","click");
+}
+
+// Candle charts only. Real-time draws Refill levels from their own stream (chart_widget_refill_levels.cpp).
 void ChartWidget::update_liquidity_response(){
     if(!liquidity_response::supported(pair_.exchange,pair_.symbol)){
         if(liquidity_response_history_.status!="Pilot: Binance BTC and SOL only")liquidity_response_history_.reset("Pilot: Binance BTC and SOL only");
         liquidity_response_evidence_open_=false;return;
     }
     if(!liquidity_response_enabled_&&!indicator_mgr_.has_indicator_of_type<Indicators::AbsorptionIndicator>()){liquidity_response_history_.reset("Layer off");return;}
+    if(absorption_locked()){
+        if(liquidity_response_history_.status!="Absorption history requires Pro")liquidity_response_history_.reset("Absorption history requires Pro");
+        liquidity_response_evidence_open_=false;return;
+    }
+    if(rt_mode_){
+        if(liquidity_response_history_.status!="Candle charts only")liquidity_response_history_.reset("Candle charts only");
+        liquidity_response_evidence_open_=false;return;
+    }
     if(ctx_.replay_mgr().is_pack_mode()||ctx_.replay_mgr().is_loading()||replay_selection_.active){liquidity_response_history_.reset("Unavailable in packs or while seeking");return;}
-    if(!rt_mode_&&chart_type_!=ChartType::Candles){liquidity_response_history_.reset("Use candlesticks or real-time view");return;}
+    if(chart_type_!=ChartType::Candles){liquidity_response_history_.reset("Use candlesticks");return;}
     const bool replay=ctx_.replay_mgr().is_active();
     int64_t clock=replay?std::min(ctx_.replay_mgr().interpolated_time_ms(),ctx_.replay_mgr().info().confirmed_time_ms):int64_t(emscripten_date_now());
     if(clock<=0){liquidity_response_history_.reset("Waiting for replay clock");return;}
@@ -37,7 +58,7 @@ void ChartWidget::update_liquidity_response(){
     const int64_t right=last_visible_range_.X.Max>0?int64_t(last_visible_range_.X.Max):clock;
     const int64_t to=std::min(clock,right)/5000*5000;
     const int64_t replay_start=replay?ctx_.replay_mgr().info().start_time_ms:1;
-    const int64_t timeframe=rt_mode_?60000:timeframe_seconds()*1000;
+    const int64_t timeframe=timeframe_seconds()*1000;
     if(timeframe<60000){liquidity_response_history_.reset("Absorption activity requires one-minute candles or above");return;}
     const int64_t left=last_visible_range_.X.Min>0?int64_t(last_visible_range_.X.Min):to-3600000;
     const int64_t from=std::max({replay_start,to-86400000,left/timeframe*timeframe});
@@ -64,14 +85,14 @@ void ChartWidget::render_liquidity_response_settings(){
 }
 
 void ChartWidget::render_liquidity_response(){
-    if(!liquidity_response::supported(pair_.exchange,pair_.symbol))return;
-    if((!liquidity_response_enabled_&&!liquidity_response_evidence_open_)||(!rt_mode_&&chart_type_!=ChartType::Candles))return;
+    if(!liquidity_response::supported(pair_.exchange,pair_.symbol)||rt_mode_)return;
+    if((!liquidity_response_enabled_&&!liquidity_response_evidence_open_)||chart_type_!=ChartType::Candles)return;
     auto& history=liquidity_response_history_;
     const int64_t clock=ctx_.replay_mgr().is_active()?std::min(ctx_.replay_mgr().interpolated_time_ms(),ctx_.replay_mgr().info().confirmed_time_ms):int64_t(emscripten_date_now());
     const auto limits=ImPlot::GetPlotLimits();auto* draw=ImPlot::GetPlotDrawList();
     ImPlot::PushPlotClipRect();
     auto band=[&](const liquidity_response::Episode& p){
-        const double shift=rt_mode_?0.:timeframe_seconds()*500.;
+        const double shift=timeframe_seconds()*500.;
         const double left=std::max(double(p.known)-shift,limits.X.Min),right=std::min(double(p.updated)-shift,limits.X.Max);
         if(right<left)return;
         const auto a=ImPlot::PlotToPixels(left,p.high),b=ImPlot::PlotToPixels(right,p.low);
@@ -80,55 +101,12 @@ void ChartWidget::render_liquidity_response(){
         draw->AddRectFilled(a,b,Theme::u32(tone,.12f*opacity));
         draw->AddLine(ImVec2(a.x,(a.y+b.y)*.5f),ImVec2(b.x,(a.y+b.y)*.5f),Theme::u32(tone,opacity),2);
     };
-    auto mark=[&](const liquidity_response::Episode& p,size_t count){
-        const auto point=ImPlot::PlotToPixels(double(p.known),(p.high+p.low)*.5);
-        const auto tone=p.side=="bid"?Theme::Tokens::UP:Theme::Tokens::DOWN;
-        const auto color=Theme::u32(tone,p.status=="observed"?1.f:.55f);
-        if(p.side=="bid")draw->AddCircleFilled(point,4,color);
-        else draw->AddRect(ImVec2(point.x-4,point.y-4),ImVec2(point.x+4,point.y+4),color,0,0,2);
-        if(count>1){char label[24];std::snprintf(label,sizeof(label),"%zu",count);const float width=ImGui::CalcTextSize(label).x;const float right=ImPlot::GetPlotPos().x+ImPlot::GetPlotSize().x;const float x=point.x+7+width<right?point.x+7:point.x-7-width;draw->AddText(ImVec2(x,point.y-8),Theme::u32(Theme::Tokens::TX2),label);}
-    };
     auto visible=[&](const liquidity_response::Episode& p){return liquidity_response::visible(p,clock)&&p.updated>=limits.X.Min&&p.known<=limits.X.Max&&p.high>=limits.Y.Min&&p.low<=limits.Y.Max;};
-    size_t hovered=history.episodes.size();const liquidity_response::MarkerGroup* hovered_group=nullptr;
-    const auto mouse=ImGui::GetMousePos();
-    if(history.ready){
-        if(rt_mode_){
-            std::vector<size_t> recent;
-            for(size_t i=0;i<history.episodes.size();i++)if(visible(history.episodes[i]))recent.push_back(i);
-            std::sort(recent.begin(),recent.end(),[&](size_t a,size_t b){return history.episodes[a].updated>history.episodes[b].updated;});
-            if(recent.size()>32)recent.resize(32);
-            for(size_t i:recent){
-                const auto& p=history.episodes[i];band(p);mark(p,1);
-                const auto a=ImPlot::PlotToPixels(double(p.known),p.high),b=ImPlot::PlotToPixels(double(p.updated),p.low);
-                if(ImPlot::IsPlotHovered()&&mouse.x>=a.x-6&&mouse.x<=b.x+6&&mouse.y>=std::min(a.y,b.y)-6&&mouse.y<=std::max(a.y,b.y)+6)hovered=i;
-            }
-        }else{
-            // Candle activity belongs in the aligned indicator pane. Only an
-            // explicitly selected episode draws its supporting price segment.
-            if(!history.selected.empty()&&history.selected_index<history.selected.size()){
-                const auto& p=history.selected[history.selected_index];if(visible(p))band(p);
-            }
-        }
+    // Candle activity belongs in the aligned indicator pane. Only an
+    // explicitly selected episode draws its supporting price segment.
+    if(history.ready&&!history.selected.empty()&&history.selected_index<history.selected.size()){
+        const auto& p=history.selected[history.selected_index];if(visible(p))band(p);
     }
-    if(hovered<history.episodes.size()){
-        const auto& p=history.episodes[hovered];Theme::begin_tooltip();
-        ImGui::TextWrapped("%s",p.side=="bid"?"Bid absorption: sellers meet replenishing bids":"Ask absorption: buyers meet replenishing asks");
-        ImGui::Text("At detection: $%.0f executed | %d refill cycles | %.1fs",p.detection_executed,p.detection_cycles,double(p.known-p.start)/1000);
-        if(hovered_group&&hovered_group->members.size()>1)ImGui::Text("%zu observations, not orders or hidden size. Click to inspect each.",hovered_group->members.size());
-        else ImGui::TextUnformatted("Click to pin the evidence. Hidden size is unknown.");
-        Theme::end_tooltip();
-        if(ImGui::IsMouseClicked(ImGuiMouseButton_Left)&&!drawing_layer_.captures_mouse()&&!ImGui::GetIO().KeyShift&&!ImGui::GetIO().KeyCtrl){
-            if(hovered_group)history.select(hovered_group->members);else history.select({hovered});
-            liquidity_response_evidence_open_=true;
-        }
-    }
-    const auto pos=ImPlot::GetPlotPos();char stamp[64]="";
-    if(history.through>0)DisplayTimeZone::instance().format(history.through,TimeZoneFormat::TimeSeconds,stamp,sizeof(stamp));
-    const char* state=history.ready?"stored observations":history.status.c_str();
-    char label[192];
-    if(history.ready)std::snprintf(label,sizeof(label),"Absorption: %s%s%s",state,stamp[0]?" through ":"",stamp);
-    else std::snprintf(label,sizeof(label),"Absorption: %s",state);
-    if(rt_mode_)draw->AddText(ImVec2(pos.x+12,pos.y+(ctx_.replay_mgr().is_active()?88:38)),Theme::u32(Theme::Tokens::TX2),label);
     ImPlot::PopPlotClipRect();
     if(!history.ready||history.selected.empty()||history.selected_index>=history.selected.size()||!liquidity_response::visible(history.selected[history.selected_index],clock))liquidity_response_evidence_open_=false;
     if(!liquidity_response_evidence_open_)return;
