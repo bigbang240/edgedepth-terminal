@@ -9,7 +9,7 @@
 std::function<bool(const std::string&)> StreamManager::pack_request_hook_;
 // The production block decoder and seek state run here without HTTP or UI.
 // The route is unused (the test feeds decoded records to the real book owner).
-bool RealtimeArchive::prepare_replay(CandleManager*, int64_t) { return true; }
+bool RealtimeArchive::prepare_replay(CandleManager*, int64_t, int64_t) { return true; }
 MessageContext ReplayManager::replay_message_context() const { return {}; }
 void MessageHandler::route_parsed(const pb::WSPayload&, const MessageContext&) {}
 
@@ -24,6 +24,7 @@ struct PackReplayEngineTest {
         engine.header_.set_end_ts_ms(200000);
         engine.header_.add_blocks()->set_last_ts_ms(50000);
         engine.header_.add_blocks()->set_last_ts_ms(100000);
+        engine.header_.add_blocks()->set_last_ts_ms(150000);
         engine.header_ready_ = true;
         engine.control_seek(61000);
         check(engine.next_block_ == 0, "seek reads all depth blocks after opening seed");
@@ -65,9 +66,28 @@ struct PackReplayEngineTest {
         delta.set_previous_update_id(104); delta.set_timestamp_ms(60100);
         append(60100, pb::STREAM_ORDERBOOK, delta.SerializeAsString());
         check(engine.decode_block_into_queue(block), "production block decoder accepts fixture");
+        engine.next_block_ = 1;  // the fixture is block 0, as a fetch would have delivered it
+        const size_t first_block_frames = engine.frame_queue_.size();
+        // Blocks 1 and 2 sit in a whole-file buffer so the next-block path runs
+        // without HTTP. Each holds one trade after the target.
+        auto raw_block = [&](int64_t ts) {
+            block.clear(); append(ts, pb::STREAM_TRADES, "later trade"); return block;
+        };
+        const std::string later = raw_block(70000), last = raw_block(120000);
+        engine.full_file_ = later + last;
         engine.have_full_file_ = true;
+        engine.data_start_ = 0;
+        engine.header_.mutable_blocks(1)->set_offset(0);
+        engine.header_.mutable_blocks(1)->set_length(static_cast<int64_t>(later.size()));
+        engine.header_.mutable_blocks(2)->set_offset(static_cast<int64_t>(later.size()));
+        engine.header_.mutable_blocks(2)->set_length(static_cast<int64_t>(last.size()));
         engine.maybe_fetch_next_block();
-        check(engine.next_block_ == 0, "catch-up drains one block before fetching another");
+        check(engine.next_block_ == 2 && engine.frame_queue_.size() == first_block_frames + 1,
+              "catch-up reads the next block while the current one drains");
+        check(engine.older_block_frames_ == first_block_frames,
+              "the draining block's frames are counted as older");
+        engine.maybe_fetch_next_block();
+        check(engine.next_block_ == 2, "catch-up never reads a second block ahead of delivery");
         int trades=0;
         for (const auto& frame : engine.frame_queue_) {
             if (frame.ts > engine.market_now_ms()) break;

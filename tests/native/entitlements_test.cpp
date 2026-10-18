@@ -157,13 +157,14 @@ void test_pro_reach_follows_the_backend_injected_lookback() {
     reset_state();
     Entitlements::current() = Entitlements::Tier::Pro;
 
-    // Default Pro reach is 90 days back, up to the live edge.
-    expect_i64(Entitlements::replay_start_floor_ms(kNow), kNow - 90 * kDay, "the default Pro floor is 90d");
+    // Default Pro reach is 30 days back, up to the live edge (Research's 90 is a
+    // signed claim, below).
+    expect_i64(Entitlements::replay_start_floor_ms(kNow), kNow - 30 * kDay, "the default Pro floor is 30d");
     expect_i64(Entitlements::replay_end_ceil_ms(kNow), kNow, "pro reaches the live edge");
-    expect_true(Entitlements::range_replayable(kNow - 71 * kDay, kNow - 70 * kDay, kNow),
-                "a range inside the 90d Pro reach is replayable");
-    expect_true(!Entitlements::range_replayable(kNow - 100 * kDay, kNow - 99 * kDay, kNow),
-                "a range beyond the 90d Pro reach is refused");
+    expect_true(Entitlements::range_replayable(kNow - 21 * kDay, kNow - 20 * kDay, kNow),
+                "a range inside the 30d Pro reach is replayable");
+    expect_true(!Entitlements::range_replayable(kNow - 40 * kDay, kNow - 39 * kDay, kNow),
+                "a range beyond the 30d Pro reach is refused");
     // Nobody replays the future, whatever their tier.
     expect_true(!Entitlements::range_replayable(kNow - kHour, kNow + kHour, kNow),
                 "a range ending in the future is refused");
@@ -174,7 +175,7 @@ void test_pro_reach_follows_the_backend_injected_lookback() {
     // the default Pro offer.
     const int64_t deep = kNow - 300 * kDay;
     expect_true(!Entitlements::time_replayable(deep, kNow),
-                "a 300-day-old point is out of reach at the 90d Pro default");
+                "a 300-day-old point is out of reach at the 30d Pro default");
     Entitlements::pro_lookback_ms() = 414 * kDay;
     expect_true(Entitlements::time_replayable(deep, kNow),
                 "the same point is in reach once the backend supplies the full-record claim");
@@ -183,8 +184,13 @@ void test_pro_reach_follows_the_backend_injected_lookback() {
     expect_eq(Entitlements::archive_label(), "414d archive", "the scrubber caption follows the signed lookback");
 
     Entitlements::pro_lookback_ms() = Entitlements::PRO_REPLAY_LOOKBACK_MS;
-    expect_true(Entitlements::pro_lookback_days() == 90, "the default Pro reach is 90 days");
-    expect_eq(Entitlements::archive_label(), "90d archive", "the default caption reads 90d");
+    expect_true(Entitlements::pro_lookback_days() == 30, "the default Pro replay reach is 30 days");
+    expect_eq(Entitlements::archive_label(), "30d archive", "the default caption reads 30d");
+    // History reads (liquidations, refill marks) keep 90 days beside the 30-day
+    // replay, mirroring handler.go MaxLookback vs MaxReplayLookback.
+    expect_i64(Entitlements::history_lookback_ms(), 90 * kDay, "the default history horizon is 90 days");
+    expect_true(Entitlements::history_lookback_ms() > Entitlements::pro_lookback_ms(),
+                "history reaches further than the Pro replay default");
     Entitlements::current() = Entitlements::Tier::Free;
     expect_eq(Entitlements::archive_label(), "free replay", "free advertises the free replay, not a depth");
 
@@ -193,7 +199,7 @@ void test_pro_reach_follows_the_backend_injected_lookback() {
     for (const auto t : {Entitlements::Tier::Pro, Entitlements::Tier::Research,
                          Entitlements::Tier::Admin}) {
         Entitlements::current() = t;
-        expect_i64(Entitlements::replay_start_floor_ms(kNow), kNow - 90 * kDay,
+        expect_i64(Entitlements::replay_start_floor_ms(kNow), kNow - 30 * kDay,
                    "every pro-or-better tier shares the pro floor");
         expect_i64(Entitlements::replay_end_ceil_ms(kNow), kNow,
                    "every pro-or-better tier reaches the live edge");
@@ -213,7 +219,7 @@ void test_book_floor_clamps_every_tier() {
     expect_true(Entitlements::before_book_record(book - kHour), "a point before the book is a data lock");
     expect_true(Entitlements::time_replayable(book + kHour, kNow), "a point after the book is replayable");
     Entitlements::pro_lookback_ms() = Entitlements::PRO_REPLAY_LOOKBACK_MS;
-    expect_i64(Entitlements::replay_start_floor_ms(kNow), kNow - 90 * kDay, "a shallower tier floor is unchanged");
+    expect_i64(Entitlements::replay_start_floor_ms(kNow), kNow - 30 * kDay, "a shallower tier floor is unchanged");
 }
 
 void test_symbol_and_speed_gates() {

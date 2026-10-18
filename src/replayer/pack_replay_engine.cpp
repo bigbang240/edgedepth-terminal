@@ -93,6 +93,7 @@ void PackReplayEngine::stop() {
     fetch_inflight_ = false;
     fetch_responses_.clear();
     frame_queue_.clear();
+    older_block_frames_ = 0;
     pending_candle_reqs_.clear();
     pending_footprint_reqs_.clear();
     pending_vpvr_reqs_.clear();
@@ -432,9 +433,11 @@ void PackReplayEngine::tick() {
 
 void PackReplayEngine::maybe_fetch_next_block() {
     if (next_block_ >= header_.blocks_size()) return;
-    // During reconstruction drain one decoded block before fetching another.
-    // The target may be hours ahead; it must not make the queue unbounded.
-    if (seek_priming_ && !frame_queue_.empty()) return;
+    // During reconstruction the next block downloads while the current one
+    // drains, so the network wait overlaps delivery; nothing further is
+    // fetched until the older block has drained. The target may be hours
+    // ahead; the queue stays bounded to two decoded blocks.
+    if (seek_priming_ && older_block_frames_ > 0) return;
 
     // Buffer-ahead policy (box: 5min target / 2min refill, but blocks are the
     // granularity here): keep the decoded queue covering the playhead plus a
@@ -476,6 +479,7 @@ bool PackReplayEngine::decode_block_into_queue(const std::string& raw_block) {
     const std::string& buf = decomp.data;
     size_t off = 0;
     int added = 0;
+    older_block_frames_ = frame_queue_.size();  // everything already queued is older
     while (off + 4 <= buf.size()) {
         const uint32_t rec_len = read_u32_le(buf, off);
         off += 4;
@@ -541,8 +545,12 @@ void PackReplayEngine::deliver_due_frames() {
     // Per-frame budget: the box delivers everything ≤ clock per 50ms tick and
     // the network paces the client; here we self-pace so a burst (skip, fast
     // speed, post-buffer catch-up) can't blow the render budget.
-    static constexpr int    kMaxPerTick = 6000;
-    static constexpr double kBudgetMs   = 3.0;
+    // Seek catch-up runs with the clock held behind the loading cover, where
+    // nothing on screen moves, so it takes a larger share of the frame.
+    static constexpr int    kMaxPerTick       = 6000;
+    static constexpr double kBudgetMs         = 3.0;
+    static constexpr double kCatchUpBudgetMs  = 10.0;
+    const double budget_ms = seek_priming_ ? kCatchUpBudgetMs : kBudgetMs;
     const auto t0 = std::chrono::steady_clock::now();
     int delivered = 0;
     while (!frame_queue_.empty() && delivered < kMaxPerTick) {
@@ -551,12 +559,27 @@ void PackReplayEngine::deliver_due_frames() {
         if ((delivered & 31) == 31) {
             const double spent = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - t0).count();
-            if (spent >= kBudgetMs) break;
+            if (spent >= budget_ms) break;
         }
-        if ((delivered & 31) == 0 &&
-            !RealtimeArchive::prepare_replay(mgr_->replay_context()->candles, cutoff)) break;
+        if ((delivered & 31) == 0) {
+            // Catch-up delivers recorded frames in time order with the clock
+            // held, so every record before f.ts has been delivered: bubble
+            // windows ending by then are complete and publish now instead of
+            // piling into pending capture until its cap drops the rest. The
+            // settle margin leaves room for a stream's own small reordering
+            // (the live capture allows the same). Every chart manager in the
+            // replay context owns its own capture.
+            const int64_t first_undelivered =
+                seek_priming_ ? f.ts - RealtimeBubbleHistory::settle_ms : 0;
+            bool ready = true;
+            mgr_->replay_context()->each_candles([&](CandleManager& candles) {
+                ready = RealtimeArchive::prepare_replay(&candles, cutoff, first_undelivered) && ready;
+            });
+            if (!ready) break;
+        }
         route_frame(f.ts, f.stream, f.tf, f.payload);
         frame_queue_.pop_front();
+        if (older_block_frames_ > 0) --older_block_frames_;
         delivered++;
     }
 }
@@ -634,6 +657,7 @@ void PackReplayEngine::local_seek(int64_t target_ts) {
     fetch_inflight_ = false;
     fetch_responses_.clear();
     frame_queue_.clear();
+    older_block_frames_ = 0;
     queued_through_ms_ = 0;
     skip_before_ms_ = target_ts;
     // Packs currently contain one opening seed and no seek checkpoints.

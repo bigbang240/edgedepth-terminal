@@ -191,6 +191,10 @@ private:
     bool fetch_inflight_ = false;
     int64_t skip_before_ms_ = 0; // straddling-block trim after a seek
     int64_t queued_through_ms_ = 0;  // last ts appended to the queue
+    // Queued frames from blocks decoded before the newest one. Catch-up fetches
+    // the next block only once these have drained, so at most one block is
+    // decoded or in flight ahead of the block being delivered.
+    size_t older_block_frames_ = 0;
 
     // Clock (box playbackLoop model)
     bool playing_ = false;

@@ -68,7 +68,7 @@ void ChartWidget::prepare_liquidations() {
             // The whole view and, on candles, the window the callouts' typical candle is measured over, planned
             // together: one walk, newest first, so the callouts settle with the view instead of after it.
             const int64_t typical_from=rt_mode_?0:liq_cutoff_-observed_liquidations::kTypicalCandles*candles().timeframe_seconds()*1000;
-            auto req=history.request(pair_.exchange,pair_.symbol,liq_view_from_,liq_view_to_,now,Entitlements::pro_lookback_ms(),
+            auto req=history.request(pair_.exchange,pair_.symbol,liq_view_from_,liq_view_to_,now,Entitlements::history_lookback_ms(),
                                      emscripten_get_now(),typical_from,rt_mode_?0:liq_cutoff_+1);
             if(!req.empty()){
                 const char* token=emscripten_run_script_string("window.__EDGEDEPTH_REPLAY_TOKEN__ || ''");
@@ -180,7 +180,7 @@ void ChartWidget::render_realtime_liquidation_strip() {
                 const float left=std::max(pos.x,ImPlot::PlotToPixels(double(from)-shift,0).x);
                 const float right=std::min(pos.x+size.x,ImPlot::PlotToPixels(double(to)-shift,0).x);
                 if(right<=left)return;
-                const bool before=can_load && to<=wall-Entitlements::pro_lookback_ms()+60000;
+                const bool before=can_load && to<=wall-Entitlements::history_lookback_ms()+60000;
                 const char* label=!can_load?"Live only":before?"Before your history":history.loading()?"Loading\xe2\x80\xa6":"Not loaded";
                 const float y=pos.y+size.y-4;
                 for(float x=left;x<right;x+=6)draw->AddLine(ImVec2(x,y),ImVec2(std::min(x+3,right),y),Theme::u32(Theme::Tokens::TX4),2);

@@ -803,6 +803,16 @@ void ChartWidget::set_liq_opacity(float v) {
         recon->set_opacity(liq_opacity_);
 }
 
+void ChartWidget::request_chart_of_this_market()
+{
+    using PW = Menu::SymbolPickerState::PendingWidget;
+    Menu::g_widget_add_request.type = PW::Charts;
+    Menu::g_widget_add_request.pair = pair_;
+    Menu::g_widget_add_request.fmt = fmt_;
+    Menu::g_widget_add_request.tick_size = tick_size_;
+    Menu::g_widget_add_request.pending = true;
+}
+
 void ChartWidget::change_timeframe(const int new_tf_seconds)
 {
     if (rt_mode_) set_rt_mode(false);   // back to the pre-real-time chart type

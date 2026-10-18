@@ -16,7 +16,11 @@ public:
     static constexpr int64_t target_ms = 1800000;
     static std::shared_ptr<RealtimeArchive> acquire(CandleManager&, OrderbookManager&, const Terminal::Pair&);
     ~RealtimeArchive();
-    static bool prepare_replay(CandleManager*, int64_t clock);
+    // Pack delivery gate, checked between small groups of frames. During a seek
+    // catch-up the engine also passes the time of the earliest record it has
+    // not yet delivered, so bubble windows complete before it publish now
+    // (RealtimeBubbleHistory::publish_through). 0 outside catch-up.
+    static bool prepare_replay(CandleManager*, int64_t clock, int64_t first_undelivered_ms = 0);
     void update(int64_t clock);
     static void update_live(OrderbookManager&, StreamManager&, int64_t clock);
     void request_startup(StreamManager&);
@@ -70,7 +74,7 @@ private:
     void receive_recovery(const pb::RealtimeHistory&);
     void poll();
     bool make_room(size_t count);
-    bool prepare_replay(int64_t clock);
+    bool prepare_replay(int64_t clock, int64_t first_undelivered_ms = 0);
     OrderbookManager& books_;
     Terminal::Pair pair_;
     std::string id_;

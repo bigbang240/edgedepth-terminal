@@ -1932,6 +1932,32 @@ extern "C" {
         return 0; // Host can retry while the first chart is still booting.
     }
 
+    // The web guide's "Back to real-time" / "Show candles" pair: turn the primary
+    // chart's Real-time view on or off through the same toggle as the toolbar
+    // pill (so the usual gate and upsell apply). Returns 1 when a chart answered.
+    EMSCRIPTEN_KEEPALIVE
+    int _set_chart_realtime(int on) {
+        for (auto& w : g_app.widgets)
+            if (w && w->type() == WidgetType::Chart) {
+                auto* chart = static_cast<ChartWidget*>(w.get());
+                if (chart->rt_mode() != (on != 0)) chart->toggle_rt_mode();
+                return 1;
+            }
+        return 0;
+    }
+
+    // The web guide's "Add a candle chart": the same request as the toolbar's
+    // "+ Widget > Chart" for the primary chart's market, drained next frame.
+    EMSCRIPTEN_KEEPALIVE
+    int _add_chart_widget() {
+        for (auto& w : g_app.widgets)
+            if (w && w->type() == WidgetType::Chart) {
+                static_cast<ChartWidget*>(w.get())->request_chart_of_this_market();
+                return 1;
+            }
+        return 0;
+    }
+
     EMSCRIPTEN_KEEPALIVE
     void on_popstate() {
         // Embedded in the Next host: Next owns navigation. Do nothing - a

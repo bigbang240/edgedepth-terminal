@@ -696,6 +696,8 @@ set(WASM_EXPORTED_FUNCTIONS
         __edu_cmd_seek
         __edu_set_viewport
         __set_chart_timeframe
+        __set_chart_realtime
+        __add_chart_widget
         __studio_cmd_set_source
         __studio_cmd_set_paused
         __studio_cmd_set_speed

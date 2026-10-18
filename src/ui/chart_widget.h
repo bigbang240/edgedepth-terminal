@@ -200,6 +200,10 @@ public:
     // The viewer's own toggle (the toolbar pill). Every other set_rt_mode(true)
     // is automatic, and the upsell records which one opened it.
     void toggle_rt_mode();
+    // Files the same request as "+ Widget > Chart" for this chart's market (the
+    // main loop drains it next frame). Used by the web guide's "Add a candle
+    // chart" button through Module.__add_chart_widget.
+    void request_chart_of_this_market();
     // True when turning real-time on would open the upsell instead: a Free
     // viewer on the hosted LIVE feed of a Pro market with today's free preview
     // spent (core/realtime_preview.h). Replay sessions and local packs are open

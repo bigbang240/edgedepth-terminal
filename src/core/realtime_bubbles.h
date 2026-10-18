@@ -72,25 +72,23 @@ public:
             if (it->first + interval_ms > clock_ms || pending.last_arrival_ms + settle_ms > clock_ms) {
                 ++it; continue;
             }
-            Publication publication;
-            publication.at_ms = clock_ms;
-            for (const auto& [price, bubble] : pending.prices)
-                if (bubble.value() > 0) publication.bubbles.push_back(bubble);
-            auto& bubbles = publication.bubbles;
-            if (bubbles.size() > groups_per_bin) {
-                filtered_groups += bubbles.size() - groups_per_bin;
-                std::nth_element(bubbles.begin(), bubbles.begin() + groups_per_bin, bubbles.end(),
-                    [](const Bubble& a, const Bubble& b) {
-                        return a.value() != b.value() ? a.value() > b.value() : a.price < b.price;
-                    });
-                bubbles.resize(groups_per_bin);
-            }
-            std::sort(bubbles.begin(), bubbles.end(),
-                [](const Bubble& a, const Bubble& b) { return a.price < b.price; });
-            size_ += bubbles.size();
-            published_.emplace(it->first, std::move(publication));
-            pending_groups_ -= pending.prices.size(); it = pending_.erase(it);
+            it = publish(it, clock_ms);
         }
+    }
+
+    // Seek catch-up: a pack replays recorded trades in time order while the
+    // clock holds at the target, so every record arrives "now" and no window
+    // settles by arrival. Without this the whole catch-up waits in pending
+    // capture and the cap drops everything past it. The caller passes the
+    // earliest record it has not yet delivered: a window that ends at or
+    // before it (and at or before the clock) can receive nothing more from
+    // this traversal, so it publishes now, as of the clock, with the same
+    // per-window selection as advance(). A record that still arrives for a
+    // published window is counted in late_records, as any late record is.
+    void publish_through(int64_t first_undelivered_ms, int64_t clock_ms) {
+        const int64_t limit = std::min(first_undelivered_ms, clock_ms + 1);
+        for (auto it = pending_.begin(); it != pending_.end() && it->first + interval_ms <= limit;)
+            it = publish(it, clock_ms);
     }
 
     template<class Emit>
@@ -120,4 +118,29 @@ private:
     std::map<int64_t, Publication> published_;
     size_t pending_groups_ = 0, size_ = 0;
     int64_t clock_ms_ = 0;
+
+    // Closes one pending window: its largest groups_per_bin exact-price groups,
+    // visible to readers as of at_ms. Returns the next pending window.
+    std::map<int64_t, Pending>::iterator publish(std::map<int64_t, Pending>::iterator it, int64_t at_ms) {
+        const auto& pending = it->second;
+        Publication publication;
+        publication.at_ms = at_ms;
+        for (const auto& [price, bubble] : pending.prices)
+            if (bubble.value() > 0) publication.bubbles.push_back(bubble);
+        auto& bubbles = publication.bubbles;
+        if (bubbles.size() > groups_per_bin) {
+            filtered_groups += bubbles.size() - groups_per_bin;
+            std::nth_element(bubbles.begin(), bubbles.begin() + groups_per_bin, bubbles.end(),
+                [](const Bubble& a, const Bubble& b) {
+                    return a.value() != b.value() ? a.value() > b.value() : a.price < b.price;
+                });
+            bubbles.resize(groups_per_bin);
+        }
+        std::sort(bubbles.begin(), bubbles.end(),
+            [](const Bubble& a, const Bubble& b) { return a.price < b.price; });
+        size_ += bubbles.size();
+        published_.emplace(it->first, std::move(publication));
+        pending_groups_ -= pending.prices.size();
+        return pending_.erase(it);
+    }
 };

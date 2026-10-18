@@ -98,6 +98,11 @@ add_terminal_native_test(dispatch_queue_bound_test dispatch_queue_bound_test.cpp
 add_terminal_native_test(realtime_bubbles_test realtime_bubbles_test.cpp)
 target_link_libraries(realtime_bubbles_test PRIVATE nlohmann_json::nlohmann_json)
 
+# Pack seek catch-up: recorded windows publish as delivery passes them, so a
+# held clock cannot overflow pending bubble capture (2026-10-18 TUT gap).
+add_terminal_native_test(realtime_seek_catchup_test realtime_seek_catchup_test.cpp)
+target_link_libraries(realtime_seek_catchup_test PRIVATE nlohmann_json::nlohmann_json)
+
 add_terminal_native_test(liquidity_response_test liquidity_response_test.cpp)
 target_link_libraries(liquidity_response_test PRIVATE nlohmann_json::nlohmann_json)
 

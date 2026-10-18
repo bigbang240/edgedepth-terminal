@@ -172,10 +172,27 @@ UpsellModal& UpsellModal::instance() {
 static const char* default_subline(UpsellModal::Trigger t, bool login) {
     using T = UpsellModal::Trigger;
     if (login) return "A free account replays BTC's last 3 days.";
+    // Render thread only; the line carries the live replay reach.
+    static char reach[160];
+    if (Entitlements::is_pro() && (t == T::Range || t == T::ServerTier)) {
+        // A paying viewer past their own window (TIER_WINDOW, or a locked
+        // "Replay from here"): say their reach, never the free-tier line.
+        if (Entitlements::pro_lookback_days() < Entitlements::RESEARCH_REPLAY_LOOKBACK_DAYS)
+            snprintf(reach, sizeof(reach), "Your plan replays the last %d days. Research replays %d, "
+                     "and archived moves keep their full replay.",
+                     Entitlements::pro_lookback_days(), Entitlements::RESEARCH_REPLAY_LOOKBACK_DAYS);
+        else
+            snprintf(reach, sizeof(reach), "Your plan replays the last %d days. "
+                     "Archived moves keep their full replay.", Entitlements::pro_lookback_days());
+        return reach;
+    }
     switch (t) {
         case T::Range:
         case T::Preset:
-        case T::ServerTier: return "Free replays BTC's last 3 days. Pro replays every market, 90 days back.";
+        case T::ServerTier:
+            snprintf(reach, sizeof(reach), "Free replays BTC's last 3 days. Pro replays every market, %d days back.",
+                     static_cast<int>(Entitlements::PRO_REPLAY_LOOKBACK_MS / (24LL * 3600LL * 1000LL)));
+            return reach;
         case T::Speed:      return "Free replays at 1\xc3\x97. Pro unlocks slow motion and up to 4\xc3\x97.";
         case T::Symbol:     return "Free replays BTC. Pro replays every recorded market.";
         case T::Layer:      return "Pro adds Hyperliquid levels, reported liquidations and leverage filters.";
@@ -184,7 +201,10 @@ static const char* default_subline(UpsellModal::Trigger t, bool login) {
         case T::Daily:      return "Free includes 6 replays a day. They reset at 00:00 UTC.";
         case T::Research:   return "Reading a past minute is Pro. The live read stays free.";
         case T::Timeframe:  return "Sub-minute candles show what a 1-minute bar hides.";
-        default:            return "Live depth, liquidation layers and 90-day replay on every market.";
+        default:
+            snprintf(reach, sizeof(reach), "Live depth, liquidation layers and %d-day replay on every market.",
+                     static_cast<int>(Entitlements::PRO_REPLAY_LOOKBACK_MS / (24LL * 3600LL * 1000LL)));
+            return reach;
     }
 }
 

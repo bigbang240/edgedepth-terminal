@@ -48,7 +48,16 @@ enum class Tier : uint8_t { Free, Trader, Pro, Research, Admin };
 // here (free_window_range) rather than read from the host.
 inline constexpr int64_t FREE_WINDOW_MS       = 72LL * 3600LL * 1000LL;  // mirror FreeReplayWindow
 inline constexpr int64_t FREE_WINDOW_INSET_MS = 60LL * 1000LL;           // clock-drift margin at the start
-inline constexpr int64_t PRO_REPLAY_LOOKBACK_MS   = 90LL * 24LL * 3600LL * 1000LL;  // 90d (DEFAULT, not a ceiling)
+inline constexpr int64_t PRO_REPLAY_LOOKBACK_MS   = 30LL * 24LL * 3600LL * 1000LL;  // 30d replay (DEFAULT, not a ceiling)
+// Recorded history reads (reported liquidations, refill marks) reach further than
+// replay: MIRROR handler.go TierConfigs["pro"].MaxLookback (90d) beside its
+// MaxReplayLookback (30d). Split 2026-10-18, when Pro replay went to 30 days and
+// Research to 90 with tick-level depth kept 90 days (todos-edgedepth
+// tasks/depth-raw-90-day-retention.md); the history reads kept 90.
+inline constexpr int64_t PRO_HISTORY_LOOKBACK_MS  = 90LL * 24LL * 3600LL * 1000LL;
+// Research replay reach (the web signs it as the token's maxLookbackDays claim).
+// Copy only: the claim itself arrives through __EDGEDEPTH_REPLAY_LOOKBACK_DAYS__.
+inline constexpr int     RESEARCH_REPLAY_LOOKBACK_DAYS = 90;
 
 // Pro lookback is a DEFAULT the backend can raise. Accounts whose replay token
 // carries a signed maxLookbackDays claim get more (Research and staff track the
@@ -59,10 +68,13 @@ inline constexpr int64_t PRO_REPLAY_LOOKBACK_MS   = 90LL * 24LL * 3600LL * 1000L
 // The host injects window.__EDGEDEPTH_REPLAY_LOOKBACK_DAYS__ from the SAME number
 // it mints into the token, so the client affordance and server enforcement cannot
 // disagree, the same way the order-book floor is injected. Absent or invalid
-// leaves 90d, so an ordinary Pro user sees their real reach and never fires a
-// doomed POST.
+// leaves the 30d Pro default, so an ordinary Pro user sees their real reach and
+// never fires a doomed POST. The claim WIDENS both horizons, never shrinks them,
+// exactly as the backend's ReplayLookback and HistoryLookback do.
 inline int64_t& pro_lookback_ms()   { static int64_t v = PRO_REPLAY_LOOKBACK_MS; return v; }
 inline int      pro_lookback_days() { return static_cast<int>(pro_lookback_ms() / (24LL * 3600LL * 1000LL)); }
+// The recorded-history horizon (liquidation and refill history), not replay.
+inline int64_t& history_lookback_ms() { static int64_t v = PRO_HISTORY_LOOKBACK_MS; return v; }
 
 // Free replay runs at exactly 1x. The server silently normalizes requests;
 // the client sends both slow-motion and faster-speed requests to the upsell.
@@ -233,7 +245,9 @@ inline void detect() {
         });
         if (d > 0) {
             const int clamped = d > kMaxLookbackDaysSanity ? kMaxLookbackDaysSanity : d;
-            pro_lookback_ms() = static_cast<int64_t>(clamped) * 24LL * 3600LL * 1000LL;
+            const int64_t claim = static_cast<int64_t>(clamped) * 24LL * 3600LL * 1000LL;
+            pro_lookback_ms() = std::max(PRO_REPLAY_LOOKBACK_MS, claim);
+            history_lookback_ms() = std::max(PRO_HISTORY_LOOKBACK_MS, claim);
         }
     }
 
@@ -269,7 +283,7 @@ inline bool is_authenticated() { return is_pro() || !user_email().empty(); }
 
 // ── Replay window for the current tier ───────────────────────────────────────
 // Earliest replayable START: the LATER of the tier floor and the order-book
-// floor. Tier floor: Pro = now−90d by default (deeper on a signed claim); Free =
+// floor. Tier floor: Pro = now−30d by default (90d on a signed Research claim); Free =
 // the start of the 72h BTCUSDT window. Book floor: book_replay_from_ms(), the
 // first day the archive has a book - a Research claim reaches the whole record,
 // but the record has no depth before it and replay cannot open without one.

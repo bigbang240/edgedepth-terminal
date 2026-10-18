@@ -85,7 +85,7 @@ void ChartWidget::update_refill_history() {
             Entitlements::free_window_range(now_ms, start, end);
             w.floor = start;
         } else {
-            w.floor = now_ms - Entitlements::pro_lookback_ms();
+            w.floor = now_ms - Entitlements::history_lookback_ms();
         }
     }
     if (w.clock <= 0 || w.floor <= 0) return;

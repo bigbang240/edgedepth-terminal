@@ -67,15 +67,17 @@ void RealtimeArchive::update_live(OrderbookManager& books, StreamManager& stream
         }
     }
 }
-bool RealtimeArchive::prepare_replay(CandleManager* candles, int64_t clock) {
+bool RealtimeArchive::prepare_replay(CandleManager* candles, int64_t clock, int64_t first_undelivered_ms) {
     const auto it=sessions.find(candles);
     if(it==sessions.end())return true;
     auto archive=it->second.lock();
     if(!archive)return true;
-    return archive->prepare_replay(clock);
+    return archive->prepare_replay(clock, first_undelivered_ms);
 }
-bool RealtimeArchive::prepare_replay(int64_t clock) {
+bool RealtimeArchive::prepare_replay(int64_t clock, int64_t first_undelivered_ms) {
     update(clock);
+    // Bubbles do not depend on storage, so they publish even after a recording failure.
+    if(first_undelivered_ms>0)bubbles_.publish_through(first_undelivered_ms,clock);
     if(!error.empty())return true; // Recording failure must not stop playback.
     books_.copy_realtime_since(pair_,serial_,pending_);
     const bool pending=!pending_.empty() && pending_.front()->timestamp_ms<=clock;
