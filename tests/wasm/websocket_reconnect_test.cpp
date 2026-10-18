@@ -1,6 +1,7 @@
 #include <span>
 #include <cassert>
 #include <cstdio>
+#include <cstring>
 #include <map>
 #include <vector>
 #include "core/websocket.h"
@@ -125,7 +126,42 @@ int main() {
     auto error_socket = sockets[ws.get_handle()];
     EmscriptenWebSocketErrorEvent error{ws.get_handle()};
     error_socket.error(0, &error, error_socket.user);
+    assert(sockets.size() == 1 && ws.is_connected());
+    clock_ms += 999; ws.tick();
+    assert(sockets.size() == 1);
+    clock_ms += 1; ws.tick();
+    assert(sockets.empty() && !ws.is_connected());
+    assert(ws.last_close().code == 0);
+    clock_ms += 30000; ws.tick(); opened(ws);
+
+    // An error followed by close must preserve the server's restart notice.
+    error_socket = sockets[ws.get_handle()];
+    error.socket = ws.get_handle();
+    error_socket.error(0, &error, error_socket.user);
+    clock_ms += 500; ws.tick();
+    EmscriptenWebSocketCloseEvent restart{};
+    restart.socket = ws.get_handle();
+    restart.code = 1001;
+    restart.wasClean = true;
+    std::strcpy(restart.reason, "restart 45");
+    error_socket.close(0, &restart, error_socket.user);
+    assert(sockets.empty() && !ws.is_connected());
+    assert(ws.last_close().code == 1001 && ws.last_close().clean);
+    assert(ws.last_close().reason == "restart 45");
+    assert(ws.last_close().open_ms == 500);
+    assert(ws.planned_restart_active());
+    clock_ms += 1999; ws.tick(); assert(sockets.empty());
+    clock_ms += 1; ws.tick(); opened(ws);
+    assert(ws.take_reconnected_after_restart());
+    assert(!ws.take_reconnected_after_restart());
+    assert(ws.last_close().code == 0);
+
+    // A closing readyState without a callback gets the same bounded grace.
+    sockets[ws.get_handle()].state = 2;
+    ws.tick(); assert(sockets.size() == 1);
+    clock_ms += 999; ws.tick(); assert(sockets.size() == 1);
+    clock_ms += 1; ws.tick();
     assert(sockets.empty() && !ws.is_connected());
     ws.disconnect();
-    std::puts("PASS: retry, timeout, stale callbacks, freshness, ownership and pause lifecycle");
+    std::puts("PASS: retry, timeout, stale callbacks, freshness, ownership, pause and close grace");
 }
