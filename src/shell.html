@@ -103,6 +103,57 @@
     });
 </script>
 
+<script type='text/javascript'>
+    /* ── Self-host boot helpers + tooling bridge ──────────────────────── */
+    /* Fire-and-forget boot ping for the Next.js wrapper's service starter. */
+    try { fetch("/api/services/boot", {cache: "no-store"}).catch(function(){}); } catch (e) {}
+    /* One-shot reload if the shell never reaches Ready (stale asset pair). */
+    (function () {
+        var started = Date.now();
+        var iv = setInterval(function () {
+            var s = document.getElementById("status");
+            if (s && (s.style.display === "none" || s.textContent === "Ready")) {
+                clearInterval(iv);
+                try { sessionStorage.removeItem("edBootReload"); } catch (e) {}
+                return;
+            }
+            if (Date.now() - started > 30000) {
+                clearInterval(iv);
+                try {
+                    if (!sessionStorage.getItem("edBootReload")) {
+                        sessionStorage.setItem("edBootReload", "1");
+                        location.reload();
+                    }
+                } catch (e) {}
+            }
+        }, 1000);
+    })();
+    /* ── [SELF-HOST P1] tooling bridge ────────────────────────────────────
+     * window.__ed_snapshot() → Promise<{png, ts}>: full-frame PNG captured
+     * at the end of the next rendered frame (see main.cpp readback).
+     * window.__ed_state → mirrored twice a second from the live chart
+     * (symbol/venue/tf/bid/ask/ts; the app writes Module.edState).
+     * __EDGEDEPTH_RT_ARCHIVE_MS__ raises the browser-local archive horizon
+     * (30min shipped default, 12h max; the IndexedDB budget scales with it). */
+    window.__EDGEDEPTH_RT_ARCHIVE_MS__ = window.__EDGEDEPTH_RT_ARCHIVE_MS__ || 2 * 60 * 60 * 1000;
+    window.__ed_state = null;
+    window.__ed_snapshot = function () {
+        return new Promise(function (resolve) {
+            var t0 = Date.now();
+            try { Module._edSnapPending = true; } catch (e) { resolve({ error: "not-ready" }); return; }
+            (function poll() {
+                var s = window.__ed_lastShot;
+                if (s && s.ts >= t0) resolve(s);
+                else if (Date.now() - t0 > 4000) resolve({ error: "timeout" });
+                else setTimeout(poll, 60);
+            })();
+        });
+    };
+    setInterval(function () {
+        try { if (window.Module && Module.edState) window.__ed_state = Module.edState; } catch (e) {}
+    }, 500);
+</script>
+
 {{{ SCRIPT }}}
 
 <script type='text/javascript'>
