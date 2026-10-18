@@ -1,5 +1,32 @@
 # README captures
 
+## 18 October 2026
+
+The root README uses three unretouched 1800 × 1125 PNGs captured from the OSS
+terminal at revision `fb58c4e`. The two chart views replay the public Binance
+Futures TUT/USDT pack locally, paused at 9 August 2026, 07:01:00 UTC. The UI
+displays UTC. No hosted account or analytics feed was used.
+
+- `oss-realtime-20261018.png`: depth heatmap, optional trade bubbles, pulled liquidity, attached DOM and CVD. Bubbles were enabled for the capture.
+- `oss-footprint-20261018.png`: one-minute footprints with VPVR and reported liquidations. The forming minute is awaiting its close.
+- `oss-replay-library-20261018.png`: the built-in public Replay Library, with a live BTC view behind it.
+
+The captures used headless Chromium with SwiftShader. Any displayed FPS is an
+observation from that capture setup, not a performance benchmark. These images
+show a local source build, not evidence that its Docker image has been published.
+
+The replay pack is listed in [`replay-library/manifest.json`](../replay-library/manifest.json).
+Pack SHA-256: `f5959145721176c3a05ac67a56ceffefc682226e114f5be9be3e09989df88fe3`.
+
+### Build and media checksums
+
+- Local WASM: `55795d93e502447021b616dea3419a55a59caf8a65972f5f37956d756d971dab`
+- `oss-realtime-20261018.png`: `d611c7021af488a060c26a9926177362b2ebe61d3299783d034a8058f26d36be`
+- `oss-footprint-20261018.png`: `7feec68f176e1ec8401a15a49b1d7d580d52708af5c91949368dea283c9b44c4`
+- `oss-replay-library-20261018.png`: `f1bc4b696c275144f102784052758f39d9f96e6cf62c4dbd8b2590f8e1a18b44`
+
+## 1 October 2026
+
 These assets were captured on 1 October 2026 (Pacific/Auckland) from the OSS
 terminal at source revision `72e61fa`, using its existing local Release build
 and the Codex in-app browser. No hosted account or analytics feed was used.
@@ -18,8 +45,8 @@ No market data, gaps, values or UI labels were painted over. Status-bar FPS is
 an observation from this setup, not a performance promise. These local captures
 do not establish which image digest or hosted build a visitor is running.
 
-Older assets remain for existing documentation links; the root README uses the
-October captures above.
+These earlier assets remain available for existing documentation links. The root
+README now uses the 18 October captures above.
 
 ## Build and media checksums
 

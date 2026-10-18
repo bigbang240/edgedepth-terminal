@@ -8,9 +8,9 @@
 See resting orders, watch trades as they happen, and replay recorded markets.
 The C++/WebAssembly terminal behind [EdgeDepth](https://edgedepth.com/open-source?utm_source=github&utm_medium=oss&utm_campaign=terminal), ready to run with a local feed or your own data.
 
-[![TUT replay in the OSS terminal: depth heatmap, trade bubbles and attached order-book ladder](assets/oss-realtime-20261001.gif)](https://github.com/edgedepthhq/edgedepth-terminal/raw/refs/heads/master/assets/oss-realtime-20261001.mp4)
+[![TUT replay with depth heatmap, trade bubbles, pulled liquidity, DOM and CVD](assets/oss-realtime-20261018.png)](assets/oss-realtime-20261018.png)
 
-*Actual OSS build, captured 1 October 2026. Public TUT recording from 9 August 2026, replayed locally without an account. [Download full-quality MP4](https://github.com/edgedepthhq/edgedepth-terminal/raw/refs/heads/master/assets/oss-realtime-20261001.mp4) · [Full-size screenshot](assets/oss-realtime-20261001.png)*
+*Actual OSS terminal, captured 18 October 2026. Public TUT/USDT recording from 9 August 2026, paused at 07:01 UTC and replayed locally without an account. Trade bubbles are enabled for this view; they start off in a fresh workspace. [Capture details](assets/README.md).*
 
 ## Run it locally
 
@@ -24,6 +24,8 @@ docker compose up
 
 Open **[localhost:8080](http://localhost:8080)**. This starts the terminal and the
 [community gateway](https://github.com/edgedepthhq/edgedepth-gateway) on Binance's public data. No account or API key required.
+
+The Docker Compose setup has been tested on **Linux and Windows**.
 
 - **Live:** a fresh workspace opens in **Real-time depth**. Trade bubbles start off; enable them in **Layers** when wanted. Saved workspaces keep your choices.
 - **Replay:** choose **Replay → Replay Library** and pick a free recording. It plays locally, without a live feed.
@@ -39,27 +41,50 @@ a recorded replay served by EdgeDepth, no account needed.
 
 ## What's included
 
-- **Charts:** candles down to 1 second, indicators, drawing tools and VWAP.
-- **Order flow:** depth heatmaps, trade bubbles, an order-book ladder (DOM) and trade tape.
-- **Volume analysis:** footprints showing buy/sell volume at each price, imbalances and volume profiles.
-- **Replay:** pause, scrub and revisit `.edpack` recordings in the same workspace.
+- **Order-book heatmap, DOM and time & sales:** watch resting liquidity and executed trades, with adjustable heatmap contrast and price grouping.
+- **Bid/ask liquidity withdrawals:** see pulled liquidity and resting liquidity walls.
+- **Trade bubbles and charts:** optional bubbles, candles down to 1 second, indicators, drawing tools and VWAP.
+- **Reported liquidations:** view long and short liquidations as Binance publishes them. The feed does not report every liquidation that occurs.
+- **Footprints and delta:** buy/sell volume at each price, volume delta, imbalances and cumulative volume delta (CVD).
+- **Volume profile / VPVR:** point of control (POC) and value-area high/low (VAH/VAL).
+- **TPO / Market Profile:** currently approximated from candle ranges in 30-minute blocks, rather than tick-by-tick price occupancy.
+- **Replay Library:** open a free recording, play, pause, change speed and scrub through it in the same workspace.
 - **Your workspace:** dock panels, save layouts and connect your own feed.
 
-| Depth and executed trades | Buy/sell volume inside each minute |
-| --- | --- |
-| [![OSS real-time replay with attached DOM](assets/oss-realtime-20261001.png)](assets/oss-realtime-20261001.png) | [![OSS footprint replay showing recorded buy and sell volume](assets/oss-footprint-20261001.png)](assets/oss-footprint-20261001.png) |
+[![TUT replay in one-minute footprints with VPVR and reported liquidations](assets/oss-footprint-20261018.png)](assets/oss-footprint-20261018.png)
 
-*Both views use the public TUT pack. Footprints require recorded volume at each price; older context candles may have none.*
+*The same TUT recording and playhead, viewed as one-minute footprints with VPVR and reported liquidations. Footprints use closed minutes with recorded volume at each price; the forming minute is awaiting its close, and older context candles may have no footprint data.*
 
-## Hosted EdgeDepth
+## Try a recorded move
 
-The **terminal is open source; EdgeDepth's hosted data and research services are separate.**
-Nothing in this terminal needs a subscription. Self-hosted, you run the feed: depth starts
-with what you observe, packs hold only their recorded markets, and server-derived panels
-such as VPIN stay empty ([coverage details](docs/DATA_SOURCES.md)). Hosted EdgeDepth adds
-managed Binance, Hyperliquid and Bybit feeds, recorded tick history and research tools for
-testing an idea against past cases.
-[Plans and coverage](https://edgedepth.com/pricing?utm_source=github&utm_medium=oss&utm_campaign=terminal) · [Open-source overview](https://edgedepth.com/open-source?utm_source=github&utm_medium=oss&utm_campaign=terminal)
+1. Open **Replay → Replay Library** and choose a recording, such as the TUT/USDT short squeeze.
+2. Play, pause, adjust the speed or scrub to a moment you want to inspect.
+3. Compare the depth heatmap and trades with the footprint and volume profile.
+
+The library downloads public `.edpack` recordings and plays them locally. It needs
+internet access to fetch a pack, but no account, subscription or live exchange feed.
+You can also [load your own recordings](docs/EDPACK.md).
+
+[![Built-in Replay Library with public recordings and Replay buttons](assets/oss-replay-library-20261018.png)](assets/oss-replay-library-20261018.png)
+
+*Replay Library in the actual OSS terminal, captured 18 October 2026. The live BTC view is visible behind the library.*
+
+## Local and hosted access
+
+**The terminal and community gateway are free to run locally.** You run the feed:
+depth history starts with what you observe, replay packs contain only their recorded
+markets and streams, and server-derived panels such as VPIN stay empty
+([coverage details](docs/DATA_SOURCES.md)). This is a crypto analysis and replay
+terminal; it does not provide live order execution or a bundled CME/broker feed.
+
+[Hosted EdgeDepth](https://edgedepth.com/open-source?utm_source=github&utm_medium=oss&utm_campaign=terminal)
+also has free live charts, footprints, TPO, order book and tape across its supported
+Binance, Hyperliquid and Bybit markets. Binance BTCUSDT live depth is free all day;
+other markets share a short daily depth preview. Recent BTC replay and recent
+archived-event replays have free access with limits. Broader recorded-market replay
+history, all-day depth on other markets and live reported liquidations require a
+subscription. None of that is required for the local terminal or its Replay Library.
+See [current hosted access and coverage](https://edgedepth.com/pricing?utm_source=github&utm_medium=oss&utm_campaign=terminal).
 
 ## Build on it
 
