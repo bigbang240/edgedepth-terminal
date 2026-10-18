@@ -257,6 +257,8 @@ void EducationBoot::detect() {
             free(rraw);
         }
     }
+    // The page's mode, before any hosted research switch can change mode_.
+    boot_mode_ = mode_;
 }
 
 void EducationBoot::fetch_lesson(std::function<void()> on_ready) {
@@ -313,6 +315,7 @@ void EducationBoot::on_fetch(const char* json_str, size_t len) {
 // ── Non-Emscripten stub ──────────────────────────────────────────────────────
 void EducationBoot::detect() {
     mode_ = Mode::None;
+    boot_mode_ = Mode::None;
 }
 void EducationBoot::fetch_lesson(std::function<void()> on_ready) {
     if (on_ready) on_ready();

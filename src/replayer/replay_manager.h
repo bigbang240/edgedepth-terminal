@@ -273,6 +273,10 @@ public:
     void resume();
     void toggle_pause();        // Space bar
     void stop();
+    // stop() then a full reset: what the native "Close replay" button does.
+    // Retires the context (back to live) and clears the session, so the next
+    // request starts clean. Used when a hosted research replay ends.
+    void close_replay() { stop(); reset(); }
     void set_speed(float speed);
     void speed_up();            // Next preset
     void speed_down();          // Previous preset

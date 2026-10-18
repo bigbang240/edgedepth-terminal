@@ -48,6 +48,25 @@ void StudioRuntime::set_source_json(const std::string& s) {
     has_pending_    = true;
 }
 
+void StudioRuntime::reset_hosted() {
+    pending_source_.clear();
+    has_pending_  = false;
+    has_source_   = false;
+    applied_key_.clear();
+    src_symbol_.clear();
+    src_tf_.clear();
+    src_start_ms_ = 0;
+    src_end_ms_   = 0;
+    emit_sig_     = 0;
+    last_clock_emit_ms_ = 0.0;
+    clock_floor_ms_ = 0;
+    pending_transport_ = TransportCmd::None;
+    pending_seek_ = false;
+    pending_skip_ = false;
+    capture_mode_ = 0;
+    capture_dragging_ = false;
+}
+
 void StudioRuntime::cmd_set_paused(bool paused) {
     pending_transport_ = paused ? TransportCmd::Pause : TransportCmd::Play;
 }

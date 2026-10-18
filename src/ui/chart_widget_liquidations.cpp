@@ -205,7 +205,15 @@ void ChartWidget::render_realtime_liquidation_strip() {
             const double from=std::max(bin.start_ms,liq_view_from_)-shift;
             const double to=std::min({bin.start_ms+view.step_ms,liq_view_to_,liq_cutoff_+1})-shift;
             if(to<=from)continue;
-            const float left=ImPlot::PlotToPixels(from,0).x,right=ImPlot::PlotToPixels(to,0).x;
+            float left=ImPlot::PlotToPixels(from,0).x,right=ImPlot::PlotToPixels(to,0).x;
+            // Real-time zooms in to seconds, where a bucket can be 100+ px wide and
+            // edge-to-edge bars read as one block (James, 2026-10-18). Draw each
+            // second as a narrow bar centred in its bucket so reports stay
+            // separate events; candles keep candle-width bars.
+            if(rt_mode_ && right-left>12){
+                const float mid=(left+right)*0.5f,half=std::clamp((right-left)*0.18f,3.0f,7.0f);
+                left=mid-half;right=mid+half;
+            }
             const bool forming=bin.start_ms+view.step_ms>liq_cutoff_;
             if(bin.shorts>0)draw->AddRectFilled(ImVec2(left,ImPlot::PlotToPixels(0,bin.shorts).y),ImVec2(std::max(left+1,right-1),zero),Theme::u32(forming?ImVec4(Theme::Tokens::UP.x,Theme::Tokens::UP.y,Theme::Tokens::UP.z,0.55f):Theme::Tokens::UP));
             if(bin.longs>0)draw->AddRectFilled(ImVec2(left,zero),ImVec2(std::max(left+1,right-1),ImPlot::PlotToPixels(0,-bin.longs).y),Theme::u32(forming?ImVec4(Theme::Tokens::DOWN.x,Theme::Tokens::DOWN.y,Theme::Tokens::DOWN.z,0.55f):Theme::Tokens::DOWN));

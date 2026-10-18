@@ -75,6 +75,14 @@ public:
     // overlay (next slice) only arms once this is true.
     bool has_source() const { return has_source_; }
 
+    // Forget the applied source, every queued command and the emit signature.
+    // Called when a hosted research replay ends (EducationBoot::
+    // end_hosted_research): the next hosted replay in the same page must not be
+    // swallowed by applied_key_ (opening the same window again after Back would
+    // otherwise be a silent no-op) and must not report the previous window.
+    void reset_hosted();
+    void begin_hosted() { applied_key_.clear(); has_source_ = false; emit_sig_ = 0; }
+
     // ─── Draw/capture overlay (studio phase 1) ──────────────────────────────
     // React arms ONE capture gesture (__studio_cmd_arm_capture): the author drags
     // a box on the chart; we inverse-project the pixel rect via chart_projection's

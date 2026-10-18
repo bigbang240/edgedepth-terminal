@@ -13,6 +13,12 @@ public:
     static void reset_layout();
     static void restore_layout_for(const std::string& exchange, const std::string& symbol);
     static void reset_layout_for(const std::string& exchange, const std::string& symbol);
+    // Rebuild the default layout for the pair the current dock tree was BUILT
+    // for, falling back to reset_layout() before the first build. The embedded
+    // viewport reflow uses it: in a hosted research replay of another market
+    // the route pair is the live chart's, not the replay's, and a reflow keyed
+    // on the route would undock every replay window.
+    static void relayout();
     static bool is_initialized;
 
     // Compare markets (same venue as the primary) to dock UNDER the primary

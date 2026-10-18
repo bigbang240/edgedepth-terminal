@@ -63,6 +63,7 @@ private:
     bool reconnect_enabled_ = false;
     double retry_at_ms_ = 0;
     double connecting_at_ms_ = 0;
+    double close_pending_at_ms_ = 0;
     double opened_at_ms_ = 0;
     double last_frame_ms_ = -1;
     unsigned retry_count_ = 0;

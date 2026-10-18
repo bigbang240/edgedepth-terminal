@@ -208,3 +208,13 @@ void LayoutManager::reset_layout_for(
     pending_exchange = exchange;
     pending_symbol = symbol;
 }
+
+void LayoutManager::relayout() {
+    if (layout_exchange.empty() || layout_symbol.empty()) {
+        reset_layout();
+        return;
+    }
+    // A pair already queued (a context swap earlier this frame) wins.
+    if (!is_initialized && !pending_exchange.empty() && !pending_symbol.empty()) return;
+    reset_layout_for(layout_exchange, layout_symbol);
+}

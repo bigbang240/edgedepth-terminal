@@ -247,6 +247,7 @@ Json preset(int index) {
     return d;
 }
 }
+bool enabled() { return enabled_now; }
 void checkpoint_live() {
     if (!ready || !enabled_now || !panels) return;
     auto next = capture();

@@ -351,9 +351,11 @@ ChartWidget::ChartWidget(
     // hosted free candle chart must not start with the locked Pro layer already drawing.
     liq_observed_enabled_ = Entitlements::is_pro() || !Entitlements::hosted() ||
         ctx_.replay_mgr().is_active() || EducationBoot::instance().is_pack();
-    // Preserve the existing TUT lesson's explicit real-time report default.
-    if (EducationBoot::instance().is_pack() && pair_.exchange == "binancef" &&
-        pair_.symbol == "tutusdt") {
+    // Every pack replay opens with its recorded liquidation reports in the
+    // Real-time view and the strip under it: packs carry those reports, and a
+    // demo of a cascade without them hides the point (2026-10-18; until then
+    // this was a TUTUSDT-only default, so the ARCUSDT welcome opened without).
+    if (EducationBoot::instance().is_pack()) {
         rt_liq_observed_enabled_ = true;
         rt_liq_strip_ = true;
     }
@@ -3367,6 +3369,7 @@ void ChartWidget::render_controls() {
             else liq_settings_panel_.open();
         }
         if (Theme::menu_item(UiIcon::Plus, "Add widget")) requested_popup = "add_widget_popup";
+        ui_test::mark("chart.tools.add_widget");
         if (!ClipRecorder::focus_active() && !edu::RecorderRuntime::instance().active() &&
             Theme::menu_item(UiIcon::Pencil, "Drawing tools")) requested_popup = "chart_draw_popup";
         Theme::menu_separator();
@@ -3447,6 +3450,7 @@ void ChartWidget::render_controls() {
         // works in a replay: it builds its own manager in the replay context.
         const std::string this_market = widget_symbol_label(pair_.symbol);
         if (Theme::menu_item(UiIcon::Candles, "Chart", this_market.c_str())) add(PW::Charts);
+        ui_test::mark("widget_add.chart");
         {
             const bool other_ok = !embedded && !ctx_.replay_mgr().is_active();
             if (Theme::menu_item(UiIcon::Globe, "Chart of another market\xe2\x80\xa6", nullptr, other_ok)) {
@@ -3471,6 +3475,7 @@ void ChartWidget::render_controls() {
         if (Theme::menu_item(UiIcon::Book, "Orderbook")) add(PW::Orderbook);
         if (Theme::menu_item(UiIcon::Ladder, "Depth of market", "DOM")) add(PW::DOM);
         if (Theme::menu_item(UiIcon::Tape, "Trades")) add(PW::Trades);
+        ui_test::mark("widget_add.trades");
         if (Theme::menu_item(UiIcon::Bars, "Market data & research")) Menu::request_market_data(pair_);
         if (Theme::menu_item(UiIcon::Bars, "Market statistics")) add(PW::Stats);
         Theme::menu_separator();
@@ -4084,6 +4089,11 @@ void ChartWidget::handle_plot_interaction() {
     );
     crosshair_state_.last_plot_max = crosshair_state_.first_plot_max;
     ui_test::mark_rect("chart.plot", crosshair_state_.first_plot_min, crosshair_state_.first_plot_max);
+    if (ui_test::enabled()) {
+        ui_test::mark_rect("chart.market." + pair_.exchange + "." + pair_.symbol + "." +
+                           std::to_string(chart_instance_), crosshair_state_.first_plot_min,
+                           crosshair_state_.first_plot_max);
+    }
 
     // Acquire at the click's origin within this visible window, independently
     // of ImPlot's hover bookkeeping. The cursor may already have moved since

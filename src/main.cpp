@@ -478,7 +478,10 @@ static void on_ws_status(const std::string& status) {
         // ride this same WS via the Replayer actor), but the LIVE auto-subscribes
         // below are pure waste in a lesson - and ticker24h alone is ~150KB/s. Skip
         // them; a replay session is driven separately from EducationBoot's source.
-        if (EducationBoot::instance().is_embedded()) {
+        // A boot decision: a live terminal hosting a research replay in place
+        // (EducationBoot::hosted_research) still returns to live on exit, so a
+        // reconnect during that replay must restore the live feeds too.
+        if (EducationBoot::instance().boot_embedded()) {
             return;
         }
 
@@ -1149,6 +1152,26 @@ void resolve_mode_companions() {
     }
 }
 
+namespace {
+enum class HostedRequest { None, Begin, End };
+HostedRequest g_hosted_request = HostedRequest::None;
+std::string   g_hosted_payload;          // __EDGEDEPTH_HOSTED_REPLAY__ (JSON) at begin
+bool          g_hosted_returning = false; // exited; live workspace not re-applied yet
+
+bool hosted_research_panel(WidgetType type) {
+    return type == WidgetType::Chart || type == WidgetType::DOM || type == WidgetType::Trades;
+}
+
+// The live-only panels stay out of the frame while hosted, and after the exit
+// until workspace::tick has re-applied the live workspace (that tick re-docks
+// them; submitting them earlier floats them over the research layout's tree).
+bool hosted_focus_layout() {
+    return EducationBoot::instance().hosted_research() ||
+           (g_hosted_returning && !workspace::enabled());
+}
+
+}  // namespace
+
 void update_and_render_widgets() {
     resolve_mode_companions();
     drain_data_dispatches(3.0, true);
@@ -1173,9 +1196,13 @@ void update_and_render_widgets() {
     // subscriptions and is_open are untouched - is_open=false would ERASE it.)
     const bool rec_focus_widgets = ClipRecorder::focus_active() ||
                                    edu::RecorderRuntime::instance().active();
+    // Hosted research replay: the research viewer's panel set only (chart, DOM,
+    // tape). Render-skip, never is_open=false, for the reason given above.
+    const bool hosted_focus = hosted_focus_layout();
     for (const auto& widget: g_app.widgets) {
         if (!widget->is_open || widget->hidden_by_chart || widget->suspended_for_replay) continue;
         if (rec_focus_widgets && widget->type() == WidgetType::Watchlist) continue;
+        if (hosted_focus && !hosted_research_panel(widget->type())) continue;
         // Per-widget render timing - labels by widget type so the once/sec
         // console profile shows exactly where frame time goes.
         const char* sec = "Widget";
@@ -1311,6 +1338,20 @@ static bool   g_embed_view_dirty = false;
 // reflow snaps the 248/flex/300 design widths after the size settles.
 static bool   g_embed_reflow_pending = false;
 static double g_embed_last_resize_t  = 0.0;
+// Last size each viewport path applied. File scope (they were function
+// statics) so a hosted research replay can invalidate them: the live terminal
+// switches from the window-sized path to the canvas-box path on entry and back
+// on exit, and a path that still remembers the size it applied last time would
+// skip the resize the switch needs (SDL keeps the other path's window size and
+// ImGui lays out over the wrong box).
+static int    g_embed_applied_w   = -1;
+static int    g_embed_applied_h   = -1;
+static double g_embed_applied_dpr = -1.0;
+static bool   g_embed_first_apply = true;
+static int    g_standalone_w      = 0;
+static int    g_standalone_h      = 0;
+static double g_standalone_dpr    = 0.0;
+static double g_standalone_poll_at = 0.0;
 
 #ifdef __EMSCRIPTEN__
 // Apply a corrected embedded canvas size to ImGui + SDL and re-flow the dock.
@@ -1323,11 +1364,9 @@ static void apply_embedded_viewport(int css_w, int css_h, double dpr) {
     // viewport; the canvas may letterbox for a moment, which beats a dead frame.
     css_w = std::max(css_w, 320);
     css_h = std::max(css_h, 240);
-    static int    last_w   = -1;
-    static int    last_h   = -1;
-    static double last_dpr = -1.0;
-    if (css_w == last_w && css_h == last_h && std::abs(dpr - last_dpr) <= 0.01) return;
-    last_w = css_w; last_h = css_h; last_dpr = dpr;
+    if (css_w == g_embed_applied_w && css_h == g_embed_applied_h &&
+        std::abs(dpr - g_embed_applied_dpr) <= 0.01) return;
+    g_embed_applied_w = css_w; g_embed_applied_h = css_h; g_embed_applied_dpr = dpr;
 
     // Logical CSS-px window size drives ImGui layout. SDL3's NewFrame recomputes
     // io.DisplaySize from SDL_GetWindowSize and the framebuffer scale from
@@ -1356,10 +1395,9 @@ static void apply_embedded_viewport(int css_w, int css_h, double dpr) {
     // reflow NOW (kills the boot squish). Later sizes → defer ONE reflow until the
     // size settles (see g_embed_reflow_pending). Embedded mode always uses the
     // default layout, so nothing the user arranged by hand is lost.
-    static bool first_apply = true;
-    if (first_apply) {
-        first_apply = false;
-        LayoutManager::reset_layout();
+    if (g_embed_first_apply) {
+        g_embed_first_apply = false;
+        LayoutManager::relayout();
     } else {
         g_embed_reflow_pending = true;
         g_embed_last_resize_t  = ImGui::GetTime();
@@ -1482,7 +1520,114 @@ void tick_presentation_cadence() {
 }  // namespace
 #endif
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// Hosted research replay (2026-10-13)
+//
+// "Replay from here" on the live terminal used to navigate to /terminal?replay=,
+// which reloaded the page and booted a second WASM module. The live page now
+// hosts the research replay chrome around THIS canvas instead (web
+// LiveTerminalHost): it validates the window on the server, pushes the replay
+// URL into history, and calls Module.__hosted_replay_begin; Back or Exit calls
+// Module.__hosted_replay_end. Both only RECORD the request (they arrive from a
+// browser event, between frames); main_loop applies it at the top of the next
+// frame so the whole frame sees one mode.
+//
+// While hosted, EducationBoot reports a research replay (mode Studio, chrome
+// "research"), so every per-frame branch already does what the research viewer
+// boot does: no native shell or control bar, StudioRuntime drains the source the
+// React shell pushes, the viewport follows the canvas box. The live-only panels
+// (watchlist, Data, Stats, depth, library, positions) are kept but not
+// submitted, the same render-skip the clip recorder's focus layout uses. On exit
+// the replay stops (the context swap returns every manager to live), and
+// workspace::tick re-applies the live workspace checkpointed on entry.
+// ═══════════════════════════════════════════════════════════════════════════════
+namespace {
+void apply_hosted_replay_transition() {
+    if (g_hosted_request == HostedRequest::None) return;
+    // Hold the request until the live terminal exists; the host page cannot
+    // offer "Replay from here" before then, but Forward into a hosted entry can
+    // race the boot.
+    if (!g_init_complete || !g_app.replay_mgr) return;
+    const HostedRequest req = g_hosted_request;
+    g_hosted_request = HostedRequest::None;
+    auto& boot = EducationBoot::instance();
+    if (req == HostedRequest::Begin) {
+        std::string symbol, exchange;
+        bool realtime = false;
+        try {
+            const nlohmann::json j = nlohmann::json::parse(g_hosted_payload);
+            symbol   = j.value("symbol", "");
+            exchange = j.value("exchange", "");
+            realtime = j.value("realtime", false);
+        } catch (const nlohmann::json::exception&) {
+            return;
+        }
+        std::transform(exchange.begin(), exchange.end(), exchange.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (!is_known_exchange(exchange)) exchange = g_initial_route.exchange;
+        symbol = normalize_symbol_case(exchange, symbol);
+        if (symbol.empty()) return;
+        const bool was_hosted = boot.hosted_research();
+        // Checkpoint BEFORE the switch: the tick that follows runs disabled, and
+        // the checkpoint is what the exit restores.
+        if (!was_hosted) workspace::checkpoint_live();
+        if (!boot.begin_hosted_research(symbol, exchange)) return;
+        edu::StudioRuntime::instance().begin_hosted();
+        // Every session plays one venue; a chart of another venue replays on
+        // its own. Restored to the route's venue on exit.
+        g_app.replay_mgr->set_exchange(exchange);
+        if (!was_hosted) {
+            // First canvas-box size docks the research layout immediately,
+            // exactly as a research viewer boot does.
+            g_embed_applied_w = -1;
+            g_embed_applied_h = -1;
+            g_embed_applied_dpr = -1.0;
+            g_embed_first_apply = true;
+            g_embed_reflow_pending = false;
+            // Measure the canvas box afresh (the poll reads its rect) rather
+            // than consume a push the ResizeObserver sent at boot.
+            g_embed_view_dirty = false;
+        }
+        g_hosted_returning = false;
+        if (realtime) {
+            // ?realtime=1 (the recent-BTC shortcut): the same first-chart view
+            // a research viewer boot applies.
+            for (auto& w : g_app.widgets) {
+                if (!w || w->type() != WidgetType::Chart) continue;
+                auto* chart = static_cast<ChartWidget*>(w.get());
+                if (chart->chart_instance() == 1 && !chart->is_secondary()) {
+                    chart->set_rt_mode(true);
+                    break;
+                }
+            }
+        }
+        return;
+    }
+    if (!boot.hosted_research()) return;
+    ReplayManager& rm = *g_app.replay_mgr;
+    // Same pair the native "Close replay" button uses: stop() retires the
+    // context (the swap returns every manager to live and resumes the live
+    // subscriptions), reset() clears the session for the next replay.
+    rm.close_replay();
+    edu::StudioRuntime::instance().reset_hosted();
+    boot.end_hosted_research();
+    rm.set_exchange(g_initial_route.exchange);
+    // Back to the window-sized viewport: forget the size that path applied
+    // before the replay, so the next poll resizes SDL and the canvas buffer.
+    g_standalone_w = 0;
+    g_standalone_h = 0;
+    g_standalone_dpr = 0.0;
+    g_standalone_poll_at = 0.0;
+    g_embed_reflow_pending = false;
+    // Baseline live dock for the route pair; workspace::tick replaces it with
+    // the checkpoint taken on entry (normally in this same frame).
+    LayoutManager::reset_layout_for(g_initial_route.exchange, g_initial_route.symbol);
+    g_hosted_returning = true;
+}
+}  // namespace
+
 void main_loop() {
+    apply_hosted_replay_transition();
     if (g_app.ws_client) g_app.ws_client->tick();
     if (g_app.replay_ws_client) g_app.replay_ws_client->tick();
     tick_restart_refetch();
@@ -1528,29 +1673,25 @@ void main_loop() {
         if (g_embed_reflow_pending &&
             ImGui::GetTime() - g_embed_last_resize_t > 0.25) {
             g_embed_reflow_pending = false;
-            LayoutManager::reset_layout();
+            LayoutManager::relayout();
         }
     } else {
         // Standalone terminal: the canvas IS the full window and there's no React
         // ResizeObserver - poll innerWidth at ~10Hz and own the backing buffer.
-        static double last_viewport_poll = 0.0;
         const double t_now = ImGui::GetTime();
-        if (t_now - last_viewport_poll >= 0.1) {
-            last_viewport_poll = t_now;
+        if (g_standalone_poll_at == 0.0 || t_now - g_standalone_poll_at >= 0.1) {
+            g_standalone_poll_at = t_now;
 
             int window_w = EM_ASM_INT({ return window.innerWidth; });
             int window_h = EM_ASM_INT({ return window.innerHeight; });
             double dpr = EM_ASM_DOUBLE({ return window.devicePixelRatio || 1.0; });
 
-            static int last_w = 0;
-            static int last_h = 0;
-            static double last_dpr = 0.0;
-
             // Check if window size or DPI changed
-            if (window_w != last_w || window_h != last_h || std::abs(dpr - last_dpr) > 0.01) {
-                last_w = window_w;
-                last_h = window_h;
-                last_dpr = dpr;
+            if (window_w != g_standalone_w || window_h != g_standalone_h ||
+                std::abs(dpr - g_standalone_dpr) > 0.01) {
+                g_standalone_w = window_w;
+                g_standalone_h = window_h;
+                g_standalone_dpr = dpr;
                 // CRITICAL: Resize the actual SDL window
                 SDL_SetWindowSize(g_app.window, window_w, window_h);
                 // Update canvas resolution
@@ -1990,6 +2131,43 @@ extern "C" {
         g_embed_view_h     = css_h;
         g_embed_view_dpr   = (milli_dpr > 0) ? (milli_dpr / 1000.0) : 1.0;
         g_embed_view_dirty = true;
+    }
+
+    // Hosted research replay (see apply_hosted_replay_transition). The live
+    // page sets window.__EDGEDEPTH_HOSTED_REPLAY__ = '{"symbol","exchange",
+    // "realtime"}' and calls Module.__hosted_replay_begin() once the server has
+    // admitted the window; Back or Exit calls Module.__hosted_replay_end().
+    // Both only record the request. Returns 1 when the request was recorded, 0
+    // when this mount cannot host (it booted as a lesson, event, pack or Course
+    // Studio, which never switch mode), so the page navigates instead.
+    EMSCRIPTEN_KEEPALIVE
+    int _hosted_replay_begin(void) {
+        if (EducationBoot::instance().boot_mode() != EducationBoot::Mode::None) return 0;
+        char* raw = reinterpret_cast<char*>(EM_ASM_PTR({
+            try {
+                var s = window.__EDGEDEPTH_HOSTED_REPLAY__;
+                if (!s) return 0;
+                s = String(s);
+                var len = lengthBytesUTF8(s);
+                var buf = _malloc(len + 1);
+                stringToUTF8(s, buf, len + 1);
+                return buf;
+            } catch (e) {
+                return 0;
+            }
+        }));
+        if (!raw) return 0;
+        g_hosted_payload.assign(raw);
+        free(raw);
+        g_hosted_request = HostedRequest::Begin;
+        return 1;
+    }
+
+    EMSCRIPTEN_KEEPALIVE
+    int _hosted_replay_end(void) {
+        if (EducationBoot::instance().boot_mode() != EducationBoot::Mode::None) return 0;
+        g_hosted_request = HostedRequest::End;
+        return 1;
     }
 }
 

@@ -29,7 +29,7 @@ int64_t usage_now_ms() {
 }
 
 const char* usage_chrome() {
-    switch (EducationBoot::instance().mode()) {
+    switch (EducationBoot::instance().boot_mode()) {
         case EducationBoot::Mode::Lesson: return "lesson";
         case EducationBoot::Mode::Studio: return "studio";
         case EducationBoot::Mode::Event:  return "event";
@@ -42,7 +42,7 @@ std::string usage_session_symbol(const std::string& initial_symbol) {
     const auto& edu = EducationBoot::instance();
     if (edu.is_event() && !edu.event_symbol().empty())  return edu.event_symbol();
     if (edu.is_pack()  && !edu.pack_symbol().empty())   return edu.pack_symbol();
-    if (edu.is_studio() && !edu.studio_symbol().empty()) return edu.studio_symbol();
+    if (edu.is_studio() && !edu.hosted_research() && !edu.studio_symbol().empty()) return edu.studio_symbol();
     if (!initial_symbol.empty()) return initial_symbol;
     return "";
 }

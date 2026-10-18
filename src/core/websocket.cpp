@@ -29,6 +29,7 @@ bool WebSocketClient::connect(const std::string& url) {
 
 bool WebSocketClient::open_socket() {
     connecting_at_ms_ = emscripten_get_now();
+    close_pending_at_ms_ = 0;
     EmscriptenWebSocketCreateAttributes attrs;
     emscripten_websocket_init_create_attributes(&attrs);
     attrs.url = url_.c_str();
@@ -108,9 +109,15 @@ void WebSocketClient::tick() {
     if (socket_ > 0) {
         unsigned short state = 0;
         const auto result = emscripten_websocket_get_ready_state(socket_, &state);
-        if (result != EMSCRIPTEN_RESULT_SUCCESS || state >= 2 ||
+        if (result != EMSCRIPTEN_RESULT_SUCCESS ||
             (!is_connected_ && now - connecting_at_ms_ >= 15000)) {
             schedule_retry();
+        } else if (state >= 2 || close_pending_at_ms_ > 0) {
+            // readyState/error can precede the close callback. Deleting the
+            // socket here discards its close code, reason and restart notice.
+            // Let on_close record them, with a bounded fallback if it never fires.
+            if (close_pending_at_ms_ == 0) close_pending_at_ms_ = now;
+            if (now - close_pending_at_ms_ >= 1000) schedule_retry();
         } else if (is_connected_ && now - opened_at_ms_ >= 10000) {
             retry_count_ = 0; // A flapping connection must still back off.
         }
@@ -203,7 +210,7 @@ EM_BOOL WebSocketClient::on_message(int eventType, const EmscriptenWebSocketMess
 
 EM_BOOL WebSocketClient::on_error(int eventType, const EmscriptenWebSocketErrorEvent* event, void* userData) {
     auto* client = static_cast<WebSocketClient*>(userData);
-    if (event->socket == client->socket_) client->schedule_retry();
+    if (event->socket == client->socket_) client->close_pending_at_ms_ = emscripten_get_now();
     return EM_TRUE;
 }
 

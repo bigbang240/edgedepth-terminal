@@ -52,7 +52,9 @@ EM_JS(void, activity_bookmark_open, (), {
       if(!b||!['binancef','bybit','hl'].includes(b.exchange)||typeof b.symbol!=='string'||!/^[A-Za-z0-9_]{1,40}$/.test(b.symbol)||!Number.isSafeInteger(b.t)||b.t<=0||b.t>Date.now()||typeof b.note!=='string'||b.note.length>4096)throw new Error();
       var from=Math.max(1,b.t-3600000),to=Math.min(Date.now(),b.t+2*3600000);
       var q=new URLSearchParams({replay:b.symbol,exchange:b.exchange,from:String(from),to:String(to),t:String(b.t)});
-      window.location.assign('/terminal?'+q);
+      var url='/terminal?'+q;
+      try{var open=window.__edgedepthOpenReplay;if(typeof open==='function'&&open(url)===true)return;}catch(oe){}
+      window.location.assign(url);
     }catch(e){Module['activityBookmarkStatus']='Invalid replay bookmark.';}};input.click();
 });
 

@@ -2904,6 +2904,21 @@ int64_t ReplayManager::prev_candle_boundary(int64_t ms) const {
 // Keyboard Shortcuts
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// Leave a HOSTED research replay through the host page, so the URL, the React
+// chrome and the canvas leave together (web LiveTerminalHost answers the event
+// with history navigation, which ends the hosted mode). A plain stop() would
+// return the canvas to live under a research chrome that still says REPLAY.
+// False when not hosted: the caller stops the replay itself, as before.
+static bool request_hosted_exit() {
+#ifdef __EMSCRIPTEN__
+    if (!EducationBoot::instance().hosted_research()) return false;
+    EM_ASM({ window.dispatchEvent(new CustomEvent('edgedepth:hosted-replay-exit')); });
+    return true;
+#else
+    return false;
+#endif
+}
+
 bool ReplayManager::process_keyboard_shortcuts() {
     // Don't consume shortcuts when typing in an input field
     if (ImGui::GetIO().WantTextInput ||
@@ -2924,7 +2939,7 @@ bool ReplayManager::process_keyboard_shortcuts() {
         // must never also kill the replay under it.
         if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) &&
             !ui::ResearchMomentPanel::instance().blocks_replay_escape()) {
-            stop();
+            if (!request_hosted_exit()) stop();
             return true;
         }
 
@@ -2993,6 +3008,7 @@ static bool focused_replay_nav_allowed() {
     return Entitlements::hosted() && (!boot.is_embedded() || boot.is_research_replay());
 }
 
+
 // Navigate the host browser to the focused research-replay viewer for an
 // explicit window (see header). Full-document nav via EM_ASM (the WASM canvas
 // is a non-remountable singleton, so it can't soft-nav); the destination page
@@ -3028,7 +3044,22 @@ void ReplayManager::open_focused_replay(const std::string& exchange, const std::
     std::string url = "/terminal?replay=" + symbol + "&exchange=" + ex + with_q +
                       "&from=" + std::to_string(from_ms) + "&to=" + std::to_string(to_ms);
     if (seek_ms > 0) url += "&t=" + std::to_string(seek_ms);
-    EM_ASM({ window.location.href = UTF8ToString($0); }, url.c_str());
+    // The live page can open the replay around THIS canvas (2026-10-13): it
+    // installs window.__edgedepthOpenReplay, which checks the window on the
+    // server and returns true when it takes the request (it navigates to the
+    // same URL itself when the server refuses, so the page's own message
+    // shows). An older host has no such function, and every other host keeps
+    // the full navigation: that is what the replay URL meant before.
+    EM_ASM({
+        var url = UTF8ToString($0);
+        try {
+            var open = window.__edgedepthOpenReplay;
+            if (typeof open === 'function' && open(url) === true) return;
+        } catch (e) {
+            console.warn('[replay] in-place open failed, navigating', e);
+        }
+        window.location.href = url;
+    }, url.c_str());
 #else
     // Native dev build: no browser to navigate - keep an in-place replay so
     // local replay testing still works.
@@ -3186,7 +3217,7 @@ bool ReplayManager::render_chart_context_menu(
 
     if (is_active()) {
         if (Theme::menu_item(UiIcon::Stop, "Stop replay", "Esc")) {
-            stop();
+            if (!request_hosted_exit()) stop();
         }
     }
 
@@ -3317,6 +3348,7 @@ void ReplayManager::render_control_bar() {
         {
             ImVec2 cpos = ImGui::GetCursorScreenPos();
             ImGui::InvisibleButton("##replay_close", ImVec2(close_w, close_w));
+            ui_test::mark("replay.exit");
             bool ch = ImGui::IsItemHovered();
             if (ch) Theme::tooltip("Exit replay");
             if (ImGui::IsItemClicked()) stop();
@@ -3788,10 +3820,26 @@ void ReplayManager::render_timeline_scrubber() {
     ImVec2 scrubber_max = ImVec2(cursor.x + available_width, cursor.y + hit_height);
 
     ImGui::InvisibleButton("##scrubber", ImVec2(available_width, hit_height));
+    ui_test::mark("replay.scrubber");
 
     bool hovered = ImGui::IsItemHovered();
     bool active = ImGui::IsItemActive();
     ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    // Packs currently have no preview batch. Never advertise unavailable data.
+    const auto* preview = preview_candles();
+    const bool preview_ready = preview && preview->ready();
+    if (preview_ready) {
+        ImGui::PushFont(Theme::Fonts::mono_sm());
+        const char* hint = "Hover ahead to preview candles";
+        const ImVec2 size = ImGui::CalcTextSize(hint);
+        if (size.x <= available_width) {
+            const ImVec2 at(cursor.x, cursor.y + hit_height - 3.0f);
+            dl->AddText(at, tok(Theme::Tokens::TX3), hint);
+            ui_test::mark_rect("replay.preview_hint", at, ImVec2(at.x + size.x, at.y + size.y));
+        }
+        ImGui::PopFont();
+    }
 
     // Hover animation - expand track on hover (smooth lerp)
     float target_anim = (hovered || active || scrubber_dragging_) ? 1.0f : 0.0f;
@@ -4028,7 +4076,9 @@ void ReplayManager::render_timeline_scrubber() {
         if (scrubber_dragging_) {
             Theme::tooltip("%s\nSnaps to: %s%s", hover_buf, snap_buf, px_line);
         } else {
-            Theme::tooltip("%s (click: %s)%s", hover_buf, snap_buf, px_line);
+            Theme::tooltip("%s (click: %s)%s\n%s", hover_buf, snap_buf, px_line,
+                preview_ready ? "Hover ahead to preview on candle charts. Click or drag to seek."
+                              : "Click or drag to seek.");
         }
     }
     // (no trailing end-time label - the right-aligned speed/buffer/close group

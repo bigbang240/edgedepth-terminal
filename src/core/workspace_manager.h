@@ -12,4 +12,9 @@ void reset_default();
 void flush();
 // Capture live state before the replay context replaces it, including recent UI changes.
 void checkpoint_live();
+// True when the last tick ran with the workspace enabled (live, nothing
+// replaying, no rebuild pending). After a hosted research replay ends, main.cpp
+// keeps the live-only panels out of the frame until this is true again, which
+// is the tick that re-applies the checkpoint taken when the replay began.
+bool enabled();
 }

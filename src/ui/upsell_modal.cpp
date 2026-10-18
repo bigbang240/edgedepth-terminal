@@ -680,10 +680,17 @@ void UpsellModal::render_copy(float width, bool with_benefits) {
                 EM_ASM({ window.location.href = '/terminal/binancef/btcusdt?realtime=1'; });
             } else {
                 // The last half hour of BTCUSDT, ending a minute back for ingestion.
+                // A live page that hosts replays in place (__edgedepthOpenReplay)
+                // opens it around this canvas; any other page navigates.
                 EM_ASM({
                     var n = Date.now();
-                    window.location.href = '/terminal?replay=btcusdt&exchange=binancef&from=' +
+                    var url = '/terminal?replay=btcusdt&exchange=binancef&from=' +
                         (n - 1800000) + '&to=' + (n - 60000);
+                    try {
+                        var open = window.__edgedepthOpenReplay;
+                        if (typeof open === 'function' && open(url) === true) return;
+                    } catch (e) {}
+                    window.location.href = url;
                 });
             }
 #endif

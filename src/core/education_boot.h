@@ -82,6 +82,47 @@ public:
         return mode_ == Mode::Studio && studio_chrome_ == "research";
     }
 
+    // ─── Hosted research replay (2026-10-13) ────────────────────────────────
+    // The LIVE terminal's host page can lift the research replay chrome (marker
+    // rail, transport bar, top nav) around THIS running canvas instead of
+    // navigating to /terminal?replay=, which used to reload the page and boot a
+    // second WASM module. While hosted, the canvas behaves exactly like a
+    // research viewer boot (mode Studio, chrome "research"): no native shell or
+    // control bar, StudioRuntime drains the source the shell pushes, the
+    // viewport follows the canvas box. end_hosted_research() returns to the
+    // boot mode (None) and main.cpp restores the live workspace.
+    //
+    // Only a live boot can host (boot_mode() == None): a lesson, event, pack or
+    // Course Studio mount never switches mode at runtime. Calling begin again
+    // while hosted only re-targets the symbol/venue (a re-anchor to another
+    // market from inside the hosted viewer). Returns false when refused.
+    bool begin_hosted_research(const std::string& symbol, const std::string& exchange) {
+        if (boot_mode_ != Mode::None) return false;
+        mode_ = Mode::Studio;
+        studio_chrome_ = "research";
+        studio_symbol_ = symbol;
+        studio_exchange_ = exchange;
+        hosted_ = true;
+        return true;
+    }
+    void end_hosted_research() {
+        if (!hosted_) return;
+        mode_ = boot_mode_;
+        studio_chrome_.clear();
+        studio_symbol_.clear();
+        studio_exchange_.clear();
+        hosted_ = false;
+    }
+    bool hosted_research() const { return hosted_; }
+    // The mode detect() read from the host page, before any hosted switch.
+    // Decisions made once per page (which socket boots the chart, the live
+    // auto-subscribes, the usage chrome) read this, never mode().
+    Mode boot_mode() const { return boot_mode_; }
+    bool boot_embedded() const {
+        return boot_mode_ == Mode::Lesson || boot_mode_ == Mode::Studio || boot_mode_ == Mode::Event ||
+               (boot_mode_ == Mode::Pack && pack_embedded_);
+    }
+
     // Event = an archived market-event replay (public /events → /terminal?event=<id>).
     // Set from window.__EDGEDEPTH_EVENT__ = {sessionType:'archive', eventId, symbol,
     // seekToStart, startMs, endMs}. is_embedded() (above) is now TRUE for event, so
@@ -161,6 +202,8 @@ public:
 private:
     EducationBoot() = default;
     Mode mode_ = Mode::None;
+    Mode boot_mode_ = Mode::None;  // mode_ as detect() left it (see boot_mode)
+    bool hosted_ = false;          // see begin_hosted_research
     bool lesson_ready_ = false;
     std::string doc_url_;
     std::string lesson_json_;

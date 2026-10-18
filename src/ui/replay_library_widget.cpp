@@ -2,6 +2,7 @@
 
 #include "rendering/theme.h"
 #include "core/logo_manager.h"
+#include "core/ui_test_marks.h"
 #include "ui/drawing/drawing_icons.h"
 #include "replayer/replay_manager.h"
 #include "core/entitlements.h"
@@ -668,6 +669,7 @@ void ReplayLibraryWidget::render_pack(Pack& pack, int index) {
         ImGui::Dummy(ImVec2(0.0f, 6.0f));
         constexpr float kButtonH = 28.0f;
         play |= button("Replay", ButtonKind::Soft, ImVec2(0.0f, kButtonH), UiIcon::Play);
+        if (ui_test::enabled()) ui_test::mark("library.play." + pack.id);
         ImGui::SameLine(0.0f, 6.0f);
         if (button(pack.details_open ? "Hide details" : "Details", ButtonKind::Ghost, ImVec2(0.0f, kButtonH)))
             pack.details_open = !pack.details_open;

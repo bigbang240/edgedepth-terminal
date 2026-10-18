@@ -856,6 +856,16 @@ void resolve_widget_add_request(
     if (!req.pending) return;
     req.pending = false;
     using PW = SymbolPickerState::PendingWidget;
+    // A pack has exactly one market. Resolve at the drain point as requests
+    // can outlive the chart/picker that supplied their pair during a swap.
+    if (ctx.replay_mgr().is_active() && ctx.replay_mgr().is_pack_mode()) {
+        const auto pair = ctx.replay_mgr().primary_pair();
+        if (!pair.symbol.empty()) {
+            req.pair = pair;
+            req.fmt = SymbolRegistry::instance().get_formatter(pair.exchange, pair.symbol);
+            req.tick_size = SymbolRegistry::instance().tick_or_zero(pair.exchange, pair.symbol);
+        }
+    }
     // Charts are exempt from the reopen/focus rule below: a second chart of a
     // pair that already has one is a SECONDARY chart with its own identity and
     // its own CandleManager (see ChartWidget), so a real-time depth view and a

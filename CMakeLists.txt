@@ -695,6 +695,8 @@ set(WASM_EXPORTED_FUNCTIONS
         __edu_cmd_set_speed
         __edu_cmd_seek
         __edu_set_viewport
+        __hosted_replay_begin
+        __hosted_replay_end
         __set_chart_timeframe
         __set_chart_realtime
         __add_chart_widget
