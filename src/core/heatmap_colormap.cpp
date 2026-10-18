@@ -13,6 +13,9 @@ namespace {
     // file is generated from these stops by the same linear RGB interpolation eval_stops performs.
     // Inferno/Magma/Viridis stay user-switchable live in the Tweaks panel (set_liq_map).
     LiqMap   g_liq_map = LiqMap::Ember;
+    // [SELF-HOST P1] depth ramp selection + brightness curve (see header).
+    DepthMap g_depth_map = DepthMap::EdgeDepth;
+    int      g_depth_gamma_pct = 100;
     uint32_t g_generation = 0;
 
     struct Stop { float t; uint8_t r, g, b; };
@@ -50,12 +53,80 @@ namespace {
         }
         r = stops[N - 1].r; g = stops[N - 1].g; b = stops[N - 1].b;
     }
+
+    // ── [SELF-HOST P1] depth palette stop tables ────────────────────────
+    // EdgeDepth keeps the shipped behavior (in apply()), so only the
+    // alternates need stop tables. Teal-Gold is a punchier sibling of the
+    // shipped ramp with brighter mids; Blue-Red separates resting walls
+    // (cool) from eaten-through levels (hot); Mono-Ice is a minimal
+    // single-hue ramp for screenshots; Viridis shares the liq table.
+    constexpr Stop TEAL_GOLD_STOPS[] = {
+        {0.000f,   5,  10,  14}, {0.100f,   8,  32,  40}, {0.250f,  10,  70,  82},
+        {0.450f,  22, 140, 150}, {0.620f, 120, 200, 120}, {0.780f, 235, 205,  80},
+        {0.900f, 250, 160,  60}, {1.000f, 255, 245, 210}};
+
+    constexpr Stop BLUE_RED_STOPS[] = {
+        {0.000f,   5,   8,  16}, {0.200f,  15,  35,  90}, {0.450f,  30,  90, 200},
+        {0.620f, 130,  60, 190}, {0.780f, 220,  60,  90}, {0.900f, 250, 140,  40},
+        {1.000f, 255, 230, 150}};
+
+    constexpr Stop MONO_ICE_STOPS[] = {
+        {0.000f,   6,   9,  13}, {0.300f,  26,  42,  58}, {0.550f,  70, 105, 135},
+        {0.780f, 150, 190, 215}, {1.000f, 240, 250, 255}};
+
+    // Route one of the depth ramp types through the viewer's DepthMap pick.
+    // EdgeDepth falls through to the shipped hand ramps in apply(); every
+    // other pick evaluates its stop table here. RealtimeWarm shares the same
+    // ramp by design - with an explicit palette picked, the cool/warm split
+    // would fight it.
+    bool eval_depth_stops(const Type type, float t, uint8_t& r, uint8_t& g, uint8_t& b) {
+        switch (g_depth_map) {
+            case DepthMap::TealGold: eval_stops(TEAL_GOLD_STOPS, t, r, g, b); return true;
+            case DepthMap::BlueRed:  eval_stops(BLUE_RED_STOPS,  t, r, g, b); return true;
+            case DepthMap::MonoIce:  eval_stops(MONO_ICE_STOPS,  t, r, g, b); return true;
+            case DepthMap::Viridis:  eval_stops(VIRIDIS_STOPS,   t, r, g, b); return true;
+            case DepthMap::Inferno: {
+                // matplotlib inferno as stops (close to the liq hand ramp's
+                // shape; fine for the depth context).
+                static constexpr Stop INFERNO_STOPS[] = {
+                    {0.000f,   0,   0,   4}, {0.150f,  30,   9,  68}, {0.300f,  85,  16, 109},
+                    {0.450f, 136,  34, 106}, {0.600f, 186,  54,  85}, {0.720f, 227,  89,  51},
+                    {0.840f, 249, 140,  10}, {0.930f, 252, 199,  44}, {1.000f, 252, 255, 164}};
+                eval_stops(INFERNO_STOPS, t, r, g, b);
+                return true;
+            }
+            case DepthMap::EdgeDepth: break;
+        }
+        (void)type;
+        return false;
+    }
+
+    // Brightness curve: pct=100 is neutral; >100 lifts mids, <100 darkens.
+    float depth_t(float t) {
+        if (g_depth_gamma_pct == 100) return t;
+        return std::pow(std::clamp(t, 0.0f, 1.0f), 100.0f / float(g_depth_gamma_pct));
+    }
 }
 
 LiqMap liq_map() { return g_liq_map; }
 void set_liq_map(LiqMap m) {
     if (m == g_liq_map) return;
     g_liq_map = m;
+    ++g_generation;
+}
+
+// ── [SELF-HOST P1] depth palette accessors ──────────────────────────
+DepthMap depth_map() { return g_depth_map; }
+void set_depth_map(const DepthMap m) {
+    if (m == g_depth_map) return;
+    g_depth_map = m;
+    ++g_generation;
+}
+int depth_gamma_pct() { return g_depth_gamma_pct; }
+void set_depth_gamma_pct(const int pct) {
+    const int clamped = std::clamp(pct, 50, 250);
+    if (clamped == g_depth_gamma_pct) return;
+    g_depth_gamma_pct = clamped;
     ++g_generation;
 }
 uint32_t generation() { return g_generation; }
@@ -129,6 +200,12 @@ void apply(Type type, float t, uint8_t& r, uint8_t& g, uint8_t& b) {
         return;
     }
 
+    // ── [SELF-HOST P1] Depth types route through the DepthMap picker ────
+    if (type == Type::RealtimeWarm || type == Type::RealtimeOrderbook || type == Type::Orderbook) {
+        const float tg = depth_t(t);
+        if (eval_depth_stops(type, tg, r, g, b)) return;
+        t = tg; // EdgeDepth: shipped ramps below, but still gamma-shaped
+    }
     if (type == Type::RealtimeWarm) {
         constexpr Stop stops[] = {
             {0.00f, 8, 13, 18}, {0.15f, 15, 30, 64}, {0.40f, 28, 92, 153},

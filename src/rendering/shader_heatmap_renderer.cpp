@@ -1106,6 +1106,10 @@ void ShaderHeatmapRenderer::render_cells(
 
     // Populate render uniforms - these persist until RenderDrawData()
     auto& u = render_uniforms_;
+    // [SELF-HOST P1] Pick up palette/gamma picks (generation bump) or an
+    // opacity change before the LUT textures are resolved and bound.
+    if (colormap_type_ == ColormapType::Liquidation) res.sync_liq_colormaps(opacity_);
+    else res.sync_depth_colormaps(opacity_);
     u.data_tex = data_texture_;
     u.meta_tex = meta_texture_;
     u.colormap_tex = (colormap_type_ == ColormapType::Orderbook)

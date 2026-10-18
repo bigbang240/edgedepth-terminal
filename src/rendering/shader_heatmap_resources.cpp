@@ -229,6 +229,11 @@ bool ShaderHeatmapResources::init() {
     build_colormap_texture(colormap_rt_warm_, 4, 1.0f);
     build_colormap_texture(colormap_liq_, 1, 1.0f);
     build_colormap_texture(colormap_liq_warm_, 2, 1.0f);
+    // [SELF-HOST P1] remember what the LUTs were built from so sync_colormaps
+    // can detect palette/gamma/opacity changes by a single compare.
+    colormap_generation_ = HeatmapColormap::generation();
+    depth_opacity_ = 1.0f;
+    liq_opacity_ = 1.0f;
 
     initialized_ = true;
     return true;
@@ -372,4 +377,40 @@ void ShaderHeatmapResources::rebuild_colormap(int type, float opacity) {
     } else {
         build_colormap_texture(colormap_liq_, 1, opacity);
     }
+}
+
+// [SELF-HOST P1] Palette/gamma picks bump HeatmapColormap::generation(); one
+// compare per frame decides whether the family's 256-texel LUTs rebuild.
+// Depth (orderbook/RT) and liquidation are tracked separately because the
+// shared resources singleton serves renderer instances with different opacities.
+void ShaderHeatmapResources::sync_depth_colormaps(const float opacity) {
+    if (!initialized_) return;
+    const uint32_t gen = HeatmapColormap::generation();
+    if (gen == colormap_generation_ && opacity == depth_opacity_) return;
+    build_colormap_texture(colormap_ob_, 0, opacity);
+    build_colormap_texture(colormap_rt_, 3, opacity);
+    build_colormap_texture(colormap_rt_warm_, 4, opacity);
+    depth_opacity_ = opacity;
+    if (gen != colormap_generation_) {
+        // A generation bump (palette/gamma/liq-map pick) rebuilds both
+        // families once; the liq half follows through its own sync below.
+        build_colormap_texture(colormap_liq_, 1, liq_opacity_ < 0 ? opacity : liq_opacity_);
+        build_colormap_texture(colormap_liq_warm_, 2, liq_opacity_ < 0 ? opacity : liq_opacity_);
+    }
+    colormap_generation_ = gen;
+}
+
+void ShaderHeatmapResources::sync_liq_colormaps(const float opacity) {
+    if (!initialized_) return;
+    const uint32_t gen = HeatmapColormap::generation();
+    if (gen == colormap_generation_ && opacity == liq_opacity_) return;
+    build_colormap_texture(colormap_liq_, 1, opacity);
+    build_colormap_texture(colormap_liq_warm_, 2, opacity);
+    liq_opacity_ = opacity;
+    if (gen != colormap_generation_) {
+        build_colormap_texture(colormap_ob_, 0, depth_opacity_ < 0 ? opacity : depth_opacity_);
+        build_colormap_texture(colormap_rt_, 3, depth_opacity_ < 0 ? opacity : depth_opacity_);
+        build_colormap_texture(colormap_rt_warm_, 4, depth_opacity_ < 0 ? opacity : depth_opacity_);
+    }
+    colormap_generation_ = gen;
 }

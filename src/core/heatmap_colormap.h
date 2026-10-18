@@ -19,6 +19,29 @@ enum class Type { Orderbook, Liquidation, LiquidationWarm, RealtimeOrderbook, Re
 enum class LiqMap : uint8_t { Ember, Viridis, Magma, Inferno };
 LiqMap  liq_map();
 void    set_liq_map(LiqMap m);   // bumps generation()
+
+// ── [SELF-HOST P1] Depth (orderbook) colormap selection ──────────────────────
+// The live depth heatmap previously had one hardcoded ramp (the EdgeDepth
+// cyan→gold workhorse). DepthMap lets the viewer pick the ramp for every
+// depth path at once - history Orderbook, RealtimeOrderbook and RealtimeWarm
+// all route through the same selector, exactly like LiqMap does for the
+// liquidation field. Saved as "dmap" in edgedepth.appearance.v2.
+enum class DepthMap : uint8_t {
+    EdgeDepth,   // shipped default: dark slate → cyan → gold → warm white
+    TealGold,    // punchier teal→lime→gold, brighter mids
+    BlueRed,     // navy → blue → violet → red → amber (hot/cold walls pop)
+    MonoIce,     // monochrome slate → ice → white (minimal, MMT-ish)
+    Viridis,     // matplotlib viridis (shared stop table with the liq picker)
+    Inferno,     // matplotlib inferno (shared stop table with the liq picker)
+};
+DepthMap depth_map();
+void     set_depth_map(DepthMap m);   // bumps generation()
+// Brightness curve for the depth ramps, stored as a percent: 100 = neutral,
+// 50 = darker mids (t^2), 250 = much brighter mids (t^0.4). Applied as
+// t' = t^(100/pct) inside apply() for the depth types only - liquidation
+// keeps its tuned curve untouched. Saved as "dgamma" (50..250).
+int      depth_gamma_pct();
+void     set_depth_gamma_pct(int pct); // bumps generation()
 // Increments whenever the selected map changes; consumers caching LUTs
 // compare against this to know when to rebuild.
 uint32_t generation();
