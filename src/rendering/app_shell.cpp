@@ -613,7 +613,13 @@ namespace {
         if (clicked) {
             if (locked) open_subminute_upsell();
             else if (on_star) tf_toggle_fav(t.sec);
-            else if (chart) { chart->change_timeframe(t.sec); ImGui::CloseCurrentPopup(); }
+            else if (chart) {
+                // In real-time a pick up to five minutes changes the live
+                // bucket; a longer timeframe leaves the view, as before.
+                if (chart->rt_mode() && t.sec <= 300) chart->set_rt_candle_seconds(t.sec);
+                else chart->change_timeframe(t.sec);
+                ImGui::CloseCurrentPopup();
+            }
         }
         if (rclick && !locked) tf_toggle_fav(t.sec);
         if (hov) Theme::tooltip(locked ? "Sub-minute candles are a Pro timeframe"
@@ -708,7 +714,10 @@ namespace {
                     } else if (sec < 60 && !pro) {
                         open_subminute_upsell();
                     } else if (chart) {
-                        chart->change_timeframe(sec);
+                        // Same rule as the chips: up to five minutes inside
+                        // real-time picks the live bucket, longer leaves.
+                        if (chart->rt_mode() && sec <= 300) chart->set_rt_candle_seconds(sec);
+                        else chart->change_timeframe(sec);
                         g_tf_custom[0] = '\0';
                         ImGui::CloseCurrentPopup();
                     }
@@ -747,8 +756,19 @@ namespace {
                           rt_preview::format_left(rt_left_ms).c_str());
         }
         const bool compact = ImGui::GetContentRegionAvail().x < 760.0f;
-        const std::span<const int> visible_favs = compact
+        // Real-time candle sizes: from one second to five minutes. Inside
+        // real-time the chips aggregate the live trade stream into the picked
+        // bucket instead of leaving the view; longer timeframes still leave.
+        static constexpr int kRtSizes[] = {1, 5, 15, 30, 60, 300};
+        const int rt_cur = chart ? chart->rt_candle_seconds() : 1;
+        std::vector<int> rt_visible;
+        if (realtime && compact) rt_visible = {rt_cur};
+        std::span<const int> visible_favs = compact
             ? std::span<const int>(&current_tf, 1) : std::span<const int>(g_tf_favs);
+        if (realtime)
+            visible_favs = compact
+                ? std::span<const int>(rt_visible.data(), rt_visible.size())
+                : std::span<const int>(kRtSizes, 6);
         ImDrawList* dl = ImGui::GetWindowDrawList();
         ImGui::PushFont(Fonts::ui());
         const float h = 30.0f, padx = 11.0f, caretw = 30.0f;
@@ -773,21 +793,26 @@ namespace {
         for (int sec : visible_favs) {
             const char* lbl = tf_label(sec);
             const float w = ImGui::CalcTextSize(lbl).x + padx * 2.0f;
-            const bool on = !realtime && (sec == cur);
+            const bool on = realtime ? (sec == rt_cur) : (sec == cur);
             ImGui::SetCursorScreenPos(ImVec2(x, p0.y));
             ImGui::PushID(sec);
             const bool clk = ImGui::InvisibleButton("##fav", ImVec2(w, h));
             const bool hov = ImGui::IsItemHovered();
             ImGui::PopID();
-            if (clk && chart) chart->change_timeframe(sec);
-            if (hov && realtime) Theme::tooltip("Leave real-time mode and show %s candles", lbl);
+            if (clk && chart) {
+                // In real-time a pick up to five minutes changes the live
+                // bucket; a longer timeframe leaves the view, as before.
+                if (realtime && sec <= 300) chart->set_rt_candle_seconds(sec);
+                else chart->change_timeframe(sec);
+            }
+            if (hov && realtime) Theme::tooltip("Real-time candle size: %s buckets of the live trade flow", lbl);
             // Design v3 (2026-10-11): the active duration is a soft raised chip, hover a quieter one.
             if (on || hov)
                 dl->AddRectFilled(ImVec2(x + 2, p0.y + 3), ImVec2(x + w - 2, p0.y + h - 3),
                                   u32(on ? Tokens::CONTROL_ACTIVE : Tokens::CONTROL), Radius::R2);
             const ImVec2 ts = ImGui::CalcTextSize(lbl);
-            // In real-time the timeframes do not apply (RT is a trade-driven
-            // view), so the row dims to TX3 instead of pretending one is active.
+            // The picked real-time bucket reads as active; the other chips dim
+            // to TX3 while real-time owns the row.
             const ImVec4 fav_col = on ? Tokens::TX1
                                  : hov ? Tokens::TX1
                                  : realtime ? Tokens::TX3 : Tokens::TX2;
@@ -800,7 +825,7 @@ namespace {
         if (ImGui::InvisibleButton("##tf_caret", ImVec2(caretw, h))) ImGui::OpenPopup("##tf_menu");
         const bool chov = ImGui::IsItemHovered();
         if (chov) Theme::tooltip(realtime
-            ? "All timeframes and favourites. Picking one leaves real-time mode and shows candles."
+            ? "All timeframes and favourites. Up to five minutes picks the real-time bucket; longer leaves real-time."
             : "All timeframes and favourites.");
         if (chov || menu_open) dl->AddRectFilled(ImVec2(x + 2, p0.y + 3),
             ImVec2(x + caretw - 2, p0.y + h - 3), u32(Tokens::CONTROL), Radius::R2);
@@ -935,34 +960,17 @@ namespace {
 
         const float cy = (Layout::TOPBAR_H - 30.0f) * 0.5f;
 
-        // ── brand - D mark + edgedepth wordmark + EARLY ACCESS pill, links to
-        //    the homepage. Mirrors the web AppHeader / design-system Brand lockup:
-        //    the mark reads at ~wordmark height, a 9px mark->word gap and a 12px
-        //    word->pill gap, and a hairline accent pill. ──
+        // ── brand - D mark + edgedepth wordmark, links to the homepage.
+        //    Mirrors the web AppHeader / design-system Brand lockup: the mark
+        //    reads at ~wordmark height with a 9px mark->word gap. ──
         const float mark_h = 12.0f;                            // streak-block height (~= wordmark)
         const float mark_w = 272.0f * mark_h / 104.0f;         // full mark render width (~31px)
-        const float gap1 = 9.0f, gap2 = 12.0f;                 // mark->word, word->pill
+        const float gap1 = 9.0f;                               // mark->word
         ImGui::PushFont(Fonts::ui_semibold());
         const float word_w  = ImGui::CalcTextSize("edgedepth").x;
         const float word_fs = ImGui::GetFontSize();
         ImGui::PopFont();
-        // EARLY ACCESS pill - the web .beta badge is Inter (--font-sans) 600 at
-        // 10px with 0.06em tracking, a 1px --accent border and --accent-text
-        // ink. Fonts::label() is the terminal's Inter SemiBold micro-label face;
-        // the mono face it used before read as a different product.
-        static const char* const kBeta = "EARLY ACCESS";
-        ImGui::PushFont(Fonts::label());
-        ImFont*      beta_font = ImGui::GetFont();
-        const float  beta_fs   = ImGui::GetFontSize();
-        const ImVec2 beta_ts0  = ImGui::CalcTextSize(kBeta);
-        ImGui::PopFont();
-        const float beta_track  = beta_fs * 0.06f;              // 0.06em letter-spacing (web .beta)
-        const float beta_text_w = beta_ts0.x + beta_track * static_cast<float>(strlen(kBeta) - 1);
-        const ImVec2 beta_ts(beta_text_w, beta_ts0.y);
-        const float beta_padx = 6.0f, beta_pady = 2.0f;
-        const float beta_w = beta_ts.x + beta_padx * 2.0f;
-        const float beta_h = beta_ts.y + beta_pady * 2.0f;
-        const float brand_w = mark_w + gap1 + word_w + gap2 + beta_w;
+        const float brand_w = mark_w + gap1 + word_w;
 
         ImGui::SetCursorPos(ImVec2(12.0f, cy));
         const ImVec2 bp = ImGui::GetCursorScreenPos();
@@ -975,11 +983,6 @@ namespace {
         ImGui::PushFont(Fonts::ui_semibold());
         dl->AddText(ImVec2(bp.x + mark_w + gap1, mid - word_fs * 0.5f), u32(Tokens::TX1), "edgedepth");
         ImGui::PopFont();
-
-        const float beta_x = bp.x + mark_w + gap1 + word_w + gap2;
-        draw_tracked_text(dl, beta_font, beta_fs,
-                          ImVec2(beta_x + beta_padx, mid - beta_ts.y * 0.5f),
-                          u32(Tokens::LOGO_TX), kBeta, beta_track);
 
         if (brand_click) {
 #ifdef __EMSCRIPTEN__

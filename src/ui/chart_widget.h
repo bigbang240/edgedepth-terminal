@@ -197,6 +197,11 @@ public:
     // indicators are kept, so returning to candles restores them.
     bool subplots_suppressed() const { return rt_mode_ || chart_type_ == ChartType::Renko; }
     void set_rt_mode(bool v);
+    // Real-time candle size: the OHLC bucket the live view aggregates trades
+    // into (1s / 5s / 15s / 30s / 1m / 5m). Only meaningful while rt_mode() is
+    // on; set_rt_mode(true) resets it to one second.
+    void set_rt_candle_seconds(int seconds);
+    int rt_candle_seconds() const { return rt_candle_seconds_; }
     // The viewer's own toggle (the toolbar pill). Every other set_rt_mode(true)
     // is automatic, and the upsell records which one opened it.
     void toggle_rt_mode();
@@ -487,6 +492,21 @@ private:
     // Layers > Trade bubbles > Max size (12 / 24 / 32 px), saved as rt_bubble_cap.
     float rt_bubble_cap_ = bubble_size::kStandard;
     double rt_span_ms_ = realtime_default_span_ms;
+    int rt_candle_seconds_ = 1;
+    // TradingView-style axis scaling: a drag that starts on a chart axis
+    // stretches that axis instead of panning it (latched until mouse-up;
+    // the ImPlot input map stands down for the gesture's lifetime).
+    int rt_axis_scale_axis_ = -1;              // -1 none, else ImAxis_X1/Y1
+    ImVec2 rt_axis_scale_grab_px_{0, 0};
+    double rt_axis_scale_anchor_ = 0.0;        // value (time/price) under the grab
+    double rt_axis_scale_grab_span_ = 0.0;     // X: span at grab (idempotent scale)
+    double rt_axis_scale_grab_min_ = 0.0, rt_axis_scale_grab_max_ = 0.0;
+    bool rt_axis_scale_map_override_ = false;
+    ImPlotInputMap rt_axis_scale_saved_map_{};
+    // A Y-axis scale drag releases the price axis from the RT window manager
+    // (its rows*step clamp would fight the stretch every frame). Cleared when
+    // price following re-engages.
+    bool rt_price_free_ = false;
     double rt_usage_emit_s_ = -1;
     int64_t rt_clock_ms_ = 0;
     uint64_t rt_serial_ = 0, rt_generation_ = 0;

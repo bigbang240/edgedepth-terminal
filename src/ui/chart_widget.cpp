@@ -1297,6 +1297,19 @@ void ChartWidget::render_chart() {
     if (ImGui::GetIO().KeyShift || replay_selection_.active)
         ImPlot::GetInputMap().PanMod = ImGuiMod_Ctrl | ImGuiMod_Shift |
                                        ImGuiMod_Alt | ImGuiMod_Super;
+    // TradingView-style axis scaling: while an axis drag is latched, ImPlot's
+    // own pan must stand down or it fights the stretch. The map is read at
+    // setup-lock (here), so the latch the previous frame set applies now.
+    if (rt_axis_scale_axis_ >= 0 && !rt_axis_scale_map_override_) {
+        rt_axis_scale_saved_map_ = ImPlot::GetInputMap();
+        rt_axis_scale_map_override_ = true;
+        ImPlotInputMap& axis_map = ImPlot::GetInputMap();
+        axis_map.PanMod = ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiMod_Alt | ImGuiMod_Super;
+        axis_map.SelectMod = axis_map.PanMod;
+    } else if (rt_axis_scale_axis_ < 0 && rt_axis_scale_map_override_) {
+        ImPlot::GetInputMap() = rt_axis_scale_saved_map_;
+        rt_axis_scale_map_override_ = false;
+    }
     ImPlot::PushStyleVar(ImPlotStyleVar_PlotPadding, ImVec2(10, 10));
     ImPlot::PushStyleVar(ImPlotStyleVar_PlotBorderSize, 1.0f);
     if (ImPlot::BeginPlot("##Price", ImVec2(-1, chart_allocated_height_),
@@ -1604,7 +1617,8 @@ void ChartWidget::render_chart() {
                 if (rt_auto_fit_.grouping > 0) rt_effective_multiplier_ = rt_auto_fit_.grouping;
             }
             const double step = native_tick * rt_effective_multiplier_;
-            if (step > 0) {
+            if (rt_auto_price_) rt_price_free_ = false;
+            if (step > 0 && !rt_price_free_) {
                 const double row_height = ImGui::GetFontSize() + 4.0;
                 const auto& current = plot.Axes[ImAxis_Y1].Range;
                 double focus = std::numeric_limits<double>::quiet_NaN();
@@ -1983,6 +1997,10 @@ void ChartWidget::render_chart() {
             time_link_publish();
         }
         ImPlot::EndPlot();
+    }
+    if (rt_axis_scale_map_override_) {
+        ImPlot::GetInputMap() = rt_axis_scale_saved_map_;
+        rt_axis_scale_map_override_ = false;
     }
     ImPlot::PopStyleVar(2);
 }
@@ -4327,6 +4345,111 @@ void ChartWidget::handle_plot_interaction() {
             pdl->AddCircleFilled(ImVec2(t0.x + 16.0f, t0.y + bh * 0.5f), 3.5f, Theme::u32(Theme::Tokens::WARN));
             pdl->AddText(ImVec2(t0.x + 28.0f, t0.y + 7.0f), Theme::u32(Theme::Tokens::TX1),
                          alert_toast_msg_.c_str());
+        }
+    }
+
+    // ─── TradingView-style axis scaling (outside the IsPlotHovered scope: the
+    // axis gutters sit OUTSIDE the plot rect, so IsPlotHovered is false exactly
+    // where this gesture lives). A drag that starts on the TIME axis
+    // stretches/shrinks the visible span; on the PRICE axis it stretches/
+    // shrinks the price range. Real-time only: the candle view refits its Y
+    // from visible candles every frame, and with indicator panes open the
+    // strip below the plot belongs to them. The gutters are geometric -
+    // ImPlot's own axis HoverRect collapses for the pane-owned x axis. The
+    // gesture latches on the axis mouse-down so the input map can suppress
+    // ImPlot's axis pan before the next BeginPlot.
+    if (!draw_cap && !replay_selection_.active && rt_mode_ && chart_type_ != ChartType::TPO) {
+        const ImVec2 ppos = ImPlot::GetPlotPos();
+        const ImVec2 psz = ImPlot::GetPlotSize();
+        const ImVec2 mouse_pos = ImGui::GetIO().MousePos;
+        const bool cvd_lane_open = realtime_cvd_lane_height() > 0;
+        const bool x_gutter = !cvd_lane_open &&
+            mouse_pos.y >= ppos.y + psz.y - 2.0f && mouse_pos.y <= ppos.y + psz.y + 40.0f &&
+            mouse_pos.x >= ppos.x - 6.0f && mouse_pos.x <= ppos.x + psz.x + 6.0f;
+        const bool y_gutter =
+            mouse_pos.x >= ppos.x + psz.x - 2.0f && mouse_pos.x <= ppos.x + psz.x + 82.0f &&
+            mouse_pos.y >= ppos.y - 6.0f && mouse_pos.y <= ppos.y + psz.y + 6.0f;
+        if (rt_axis_scale_axis_ < 0) {
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                if (x_gutter || ImPlot::IsAxisHovered(ImAxis_X1)) {
+                    rt_axis_scale_axis_ = ImAxis_X1;
+                    rt_axis_scale_grab_px_ = ImGui::GetIO().MouseClickedPos[ImGuiMouseButton_Left];
+                    rt_axis_scale_anchor_ = ImPlot::PixelsToPlot(rt_axis_scale_grab_px_).x;
+                    const ImPlotRange xg = ImPlot::GetPlotLimits().X;
+                    rt_axis_scale_grab_span_ = rt_mode_ ? rt_span_ms_ : xg.Size();
+                    rt_axis_scale_grab_min_ = xg.Min;
+                    rt_axis_scale_grab_max_ = xg.Max;
+                    // A detached view scales about the grab point; a following
+                    // view keeps its latch (wheel zoom does too).
+                    if (!rt_mode_) candles().set_follow_live(false);
+                } else if (y_gutter || ImPlot::IsAxisHovered(ImAxis_Y1)) {
+                    rt_axis_scale_axis_ = ImAxis_Y1;
+                    rt_axis_scale_grab_px_ = ImGui::GetIO().MouseClickedPos[ImGuiMouseButton_Left];
+                    rt_axis_scale_anchor_ = ImPlot::PixelsToPlot(rt_axis_scale_grab_px_).y;
+                    const ImPlotRange yg = ImPlot::GetPlotLimits().Y;
+                    rt_axis_scale_grab_min_ = yg.Min;
+                    rt_axis_scale_grab_max_ = yg.Max;
+                    // Same detachment a deliberate price drag causes, plus a
+                    // release from the RT price window so its rows*step clamp
+                    // cannot snap the stretched range back mid-gesture.
+                    if (rt_auto_price_) rt_auto_price_ = false;
+                    rt_price_free_ = true;
+                    rt_auto_fit_.navigate();
+                }
+            }
+        } else if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            rt_axis_scale_axis_ = -1;
+        } else if (ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+            ImPlotPlot* plot = ImPlot::GetCurrentPlot();
+            if (plot) {
+                if (rt_axis_scale_axis_ == ImAxis_X1) {
+                    const float dx = mouse_pos.x - rt_axis_scale_grab_px_.x;
+                    if (std::abs(dx) >= 0.5f) {
+                        // Drag right = stretch the ruler = zoom in. The factor
+                        // maps the TOTAL displacement from the grab, so the
+                        // result is idempotent per frame (frame-rate free).
+                        const double factor = std::exp(-double(dx) / 260.0);
+                        const double span = std::clamp(rt_axis_scale_grab_span_ * factor,
+                            5000.0, double(RealtimeArchive::target_ms) / 0.88);
+                        if (rt_mode_) {
+                            rt_span_ms_ = span;
+                            if (!candles().follow_live()) {
+                                // Detached: scale the grab range about the grab
+                                // point so the history under it stays put.
+                                const double a = std::clamp(rt_axis_scale_anchor_,
+                                    rt_axis_scale_grab_min_, rt_axis_scale_grab_max_);
+                                double mn = a - (a - rt_axis_scale_grab_min_) * factor;
+                                double mx = a + (rt_axis_scale_grab_max_ - a) * factor;
+                                const double proj = realtime_projection_until(rt_clock_ms_, span);
+                                if (mx > proj) { mn -= mx - proj; mx = proj; }
+                                if (mx > mn) ImPlot::GetCurrentPlot()->Axes[ImAxis_X1].SetRange(mn, mx);
+                            }
+                        } else {
+                            const double a = std::clamp(rt_axis_scale_anchor_,
+                                rt_axis_scale_grab_min_, rt_axis_scale_grab_max_);
+                            const double mn = a - (a - rt_axis_scale_grab_min_) * factor;
+                            const double mx = a + (rt_axis_scale_grab_max_ - a) * factor;
+                            if (mx > mn) ImPlot::GetCurrentPlot()->Axes[ImAxis_X1].SetRange(mn, mx);
+                        }
+                    }
+                } else {
+                    const float dy = mouse_pos.y - rt_axis_scale_grab_px_.y;
+                    if (std::abs(dy) >= 0.5f) {
+                        // Drag down = pull the scale apart = zoom out.
+                        const double factor = std::exp(double(dy) / 260.0);
+                        const double a = std::clamp(rt_axis_scale_anchor_,
+                            rt_axis_scale_grab_min_, rt_axis_scale_grab_max_);
+                        const double mn = a - (a - rt_axis_scale_grab_min_) * factor;
+                        const double mx = a + (rt_axis_scale_grab_max_ - a) * factor;
+                        if (mx > mn) ImPlot::GetCurrentPlot()->Axes[ImAxis_Y1].SetRange(mn, mx);
+                    }
+                }
+            }
+        }
+        // Cursor affordance on the axis gutters.
+        if (rt_axis_scale_axis_ < 0) {
+            if (x_gutter) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+            else if (y_gutter) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
         }
     }
 
