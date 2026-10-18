@@ -2047,7 +2047,7 @@ void main_loop() {
     // here (before swap), converted to a PNG in JS, and parked on
     // window.__ed_lastShot for the awaiting promise. Reads the back buffer
     // right after ImGui render, so no preserveDrawingBuffer is needed.
-    if (emscripten_run_script_int("Module._edSnapPending?1:0")) {
+    if (EM_ASM_INT({ return Module._edSnapPending ? 1 : 0; })) {
         GLint vp[4];
         glGetIntegerv(GL_VIEWPORT, vp);
         const GLsizei sw = vp[2], sh = vp[3];
