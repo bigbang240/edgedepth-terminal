@@ -128,6 +128,10 @@ Json ChartWidget::save_settings() const {
     j["rt_dom"] = rt_dom_shown_;
     j["rt_hollow_candles"] = rt_candles_hollow_;
     j["cascade_alerts"] = cascade_alerts_enabled_;
+    j["rt_candle_seconds"] = rt_candle_seconds_;
+    j["liq_alerts"] = liq_alerts_enabled_;
+    j["liq_alert_usd"] = liq_alert_usd_;
+    j["wall_alerts"] = wall_alerts_enabled_;
     j["rt_extend_depth"] = rt_extend_depth_;
     j["rt_bridge_gaps"] = rt_bridge_gaps_;
     j["rt_depth"] = rt_depth_enabled_;
@@ -283,6 +287,10 @@ void ChartWidget::load_settings(const Json& j) {
     workspace::read(j, "rt_dom", rt_dom_shown_);
     workspace::read(j, "rt_hollow_candles", rt_candles_hollow_);
     workspace::read(j, "cascade_alerts", cascade_alerts_enabled_);
+    workspace::read(j, "rt_candle_seconds", rt_candle_seconds_, 1, 300);
+    workspace::read(j, "liq_alerts", liq_alerts_enabled_);
+    workspace::read(j, "liq_alert_usd", liq_alert_usd_, 10000.0, 100000000.0);
+    workspace::read(j, "wall_alerts", wall_alerts_enabled_);
     workspace::read(j, "rt_extend_depth", rt_extend_depth_);
     workspace::read(j, "rt_bridge_gaps", rt_bridge_gaps_);
     workspace::read(j, "rt_depth", rt_depth_enabled_);

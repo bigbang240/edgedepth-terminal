@@ -477,6 +477,8 @@ void ChartWidget::unsubscribe_chart_streams() {
     }
     volume_subscribed_ = stats_subscribed_ = liq_events_subscribed_ = false;
     cascade_detector_.reset();  // chains are per-symbol observed tails
+    alert_engine_.reset();      // S2: threshold queues are per-symbol too
+    last_pull_alert_ms_ = 0;
     chart_stream_mgr_ = nullptr;
 }
 

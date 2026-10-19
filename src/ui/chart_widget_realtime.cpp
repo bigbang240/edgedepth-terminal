@@ -199,17 +199,62 @@ void ChartWidget::render_realtime_settings() {
         candles().set_follow_live(true);
     }
     ui_test::mark("rt.whole");
+    ImGui::TextDisabled("Heat window");
+    if (ImGui::IsItemHovered())
+        Theme::tooltip("How much live session the heat and candles show behind the live edge.");
+    for (const int mins : {1, 5, 15, 30}) {
+        if (mins != 1) ImGui::SameLine();
+        ImGui::PushID(mins + 1000);  // distinct from the Candle-size row IDs
+        const double want = double(mins) * 60000.0 / 0.88;
+        char lbl[8];
+        snprintf(lbl, sizeof(lbl), "%dm", mins);
+        const bool on = rt_span_ms_ > want - 1500.0 && rt_span_ms_ < want + 1500.0;
+        if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonHovered));
+        if (ImGui::SmallButton(lbl)) {
+            rt_span_ms_ = want;
+            candles().set_follow_live(true);
+        }
+        if (on) ImGui::PopStyleColor();
+        ImGui::PopID();
+    }
     Theme::menu_separator();
     if (Theme::menu_toggle("Depth ladder", rt_dom_shown_)) rt_dom_shown_ = !rt_dom_shown_;
     ui_test::mark("rt.ladder");
     if (Theme::menu_toggle("Side panels", rt_show_standalone_)) rt_show_standalone_ = !rt_show_standalone_;
     if (ImGui::IsItemHovered()) Theme::tooltip("Show the separate DOM and trade panels beside this view.");
     if (rt_candles_) {
+        ImGui::TextDisabled("Candle size");
+        if (ImGui::IsItemHovered())
+            Theme::tooltip("Aggregate the live trade flow into buckets of this length, 1s to 5m.");
+        for (const int sec : {1, 5, 15, 30, 60, 300}) {
+            if (sec != 1) ImGui::SameLine();
+            ImGui::PushID(sec);  // "1m"/"5m" also exist in the Heat window row
+            const bool on = rt_candle_seconds_ == sec;
+            char lbl[8];
+            if (sec >= 60) snprintf(lbl, sizeof(lbl), "%dm", sec / 60);
+            else snprintf(lbl, sizeof(lbl), "%ds", sec);
+            if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonHovered));
+            if (ImGui::SmallButton(lbl)) set_rt_candle_seconds(sec);
+            if (on) ImGui::PopStyleColor();
+            ImGui::PopID();
+        }
         if (Theme::menu_toggle("Hollow candles", rt_candles_hollow_)) rt_candles_hollow_ = !rt_candles_hollow_;
         if (ImGui::IsItemHovered()) Theme::tooltip("Outline candle bodies so the depth heatmap stays visible behind them.");
     }
+    ImGui::TextDisabled("Alerts");
     if (Theme::menu_toggle("Cascade alerts", cascade_alerts_enabled_)) cascade_alerts_enabled_ = !cascade_alerts_enabled_;
     if (ImGui::IsItemHovered()) Theme::tooltip("Notify when 3+ same-side liquidations fire within 2 seconds (cascade chain).");
+    if (Theme::menu_toggle("Big liquidations", liq_alerts_enabled_)) liq_alerts_enabled_ = !liq_alerts_enabled_;
+    if (ImGui::IsItemHovered())
+        Theme::tooltip("Notify on a single liquidation at or above the dollar threshold below.");
+    if (liq_alerts_enabled_) {
+        ImGui::SetNextItemWidth(170.0f);
+        if (ImGui::InputDouble("Threshold ($)", &liq_alert_usd_, 50000.0, 250000.0, "$%.0f"))
+            liq_alert_usd_ = liq_alert_usd_ < 10000.0 ? 10000.0 : liq_alert_usd_;
+    }
+    if (Theme::menu_toggle("Wall pulls", wall_alerts_enabled_)) wall_alerts_enabled_ = !wall_alerts_enabled_;
+    if (ImGui::IsItemHovered())
+        Theme::tooltip("Notify when a tracked depth wall near price is pulled (eaten or cancelled).");
 
     if (!rt_archive_) return;
     const auto& a = *rt_archive_;
@@ -245,6 +290,8 @@ void ChartWidget::render_realtime_settings() {
 void ChartWidget::on_rewind(int64_t) {
     liq_obs_size_reference_ = {};
     cascade_detector_.reset();  // the observed tail the chains were built from is gone
+    alert_engine_.reset();      // S2: the queues belong to the same tails
+    last_pull_alert_ms_ = 0;
     // The replay owner restores/replays depth separately. Never keep future
     // samples or GPU cells from the preceding traversal.
     rt_dom_frame_ = {};

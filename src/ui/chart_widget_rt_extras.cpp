@@ -492,8 +492,50 @@ void ChartWidget::render_realtime_cvd_lane() {
 // beep plumbing the price alerts use.
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// Shared S1/S2 alert path: in-app toast (alert_toast_msg_/alert_toast_until_)
+// plus the browser Notification API and a short beep. `freq` separates the
+// sources by ear: cascade 660Hz, big liquidation 880Hz, wall pull 520Hz.
+static void rt_fire_alert(const char* title, const std::string& msg, const float freq) {
+#ifdef __EMSCRIPTEN__
+    EM_ASM({
+        try {
+            var msg = UTF8ToString($0);
+            if (window.Notification && Notification.permission === 'granted')
+                new Notification(UTF8ToString($1), { body: msg });
+            var AC = window.AudioContext || window.webkitAudioContext;
+            if (AC) { var c = new AC(); var o = c.createOscillator();
+                var g = c.createGain(); o.frequency.value = $2;
+                o.connect(g); g.connect(c.destination); g.gain.value = 0.06;
+                o.start(); o.stop(c.currentTime + 0.24); }
+        } catch (e) {}
+    }, msg.c_str(), title, freq);
+#else
+    (void)title; (void)freq;
+#endif
+}
+
+static std::string rt_fmt_usd(const double v) {
+    char b[24];
+    if (v >= 1e9) snprintf(b, sizeof(b), "$%.2fB", v / 1e9);
+    else if (v >= 1e6) snprintf(b, sizeof(b), "$%.2fM", v / 1e6);
+    else if (v >= 1e3) snprintf(b, sizeof(b), "$%.0fk", v / 1e3);
+    else snprintf(b, sizeof(b), "$%.0f", v);
+    return b;
+}
+
+static std::string rt_upper_symbol(const Terminal::Pair& pair) {
+    std::string sym = pair.symbol;
+    for (char& c : sym) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 32);
+    return sym;
+}
+
 void ChartWidget::on_liquidation_observed(const Terminal::Liquidation& l) {
     cascade_detector_.observe(l.timestamp_ms, l.price, l.is_buy);
+    if (liq_alerts_enabled_) {
+        const double usd = l.qty > 0.0 && l.price > 0.0 ? l.qty * l.price : 0.0;
+        if (usd >= liq_alert_usd_)
+            alert_engine_.observe_liquidation(l.timestamp_ms, l.price, usd, l.is_buy);
+    }
     pump_cascade_alerts();
 }
 
@@ -502,33 +544,68 @@ void ChartWidget::pump_cascade_alerts() {
     while (cascade_detector_.take_finished(chain)) {
         if (!cascade_alerts_enabled_ || chain.alerted) continue;
         chain.alerted = true;
-        std::string sym = pair_.symbol;
-        for (char& c : sym) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 32);
         char span[24];
         snprintf(span, sizeof(span), "%.1fs", chain.span_s());
-        alert_toast_msg_ = sym + " cascade: " + std::to_string(chain.count) +
-                           " liquidations in " + span;
+        alert_toast_msg_ = rt_upper_symbol(pair_) + " cascade: " +
+                           std::to_string(chain.count) + " liquidations in " + span;
         alert_toast_until_ = ImGui::GetTime() + 6.0;
-#ifdef __EMSCRIPTEN__
-        EM_ASM({
-            try {
-                var msg = UTF8ToString($0);
-                if (window.Notification && Notification.permission === 'granted')
-                    new Notification('EdgeDepth cascade', { body: msg });
-                var AC = window.AudioContext || window.webkitAudioContext;
-                if (AC) { var c = new AC(); var o = c.createOscillator();
-                    var g = c.createGain(); o.frequency.value = 660;
-                    o.connect(g); g.connect(c.destination); g.gain.value = 0.06;
-                    o.start(); o.stop(c.currentTime + 0.24); }
-            } catch (e) {}
-        }, alert_toast_msg_.c_str());
-#endif
+        rt_fire_alert("EdgeDepth cascade", alert_toast_msg_, 660.0f);
     }
+}
+
+// Phase 2 S2: drain the threshold queues. Big liquidation -> 880Hz, wall pull
+// -> 520Hz, both through the same toast + notification + beep path as S1.
+void ChartWidget::pump_rt_alerts() {
+    LiqAlertEvent l;
+    while (alert_engine_.take_liq_alert(l)) {
+        if (!liq_alerts_enabled_) continue;
+        char px[24];
+        snprintf(px, sizeof(px), "%.0f", l.price);
+        alert_toast_msg_ = rt_upper_symbol(pair_) + " liq " + rt_fmt_usd(l.usd) +
+                           (l.buy ? " SHORTS" : " LONGS") + " @ " + px;
+        alert_toast_until_ = ImGui::GetTime() + 6.0;
+        rt_fire_alert("EdgeDepth liquidation", alert_toast_msg_, 880.0f);
+    }
+    WallAlertEvent w;
+    while (alert_engine_.take_wall_alert(w)) {
+        if (!wall_alerts_enabled_) continue;
+        char px[24];
+        snprintf(px, sizeof(px), "%.0f", w.price);
+        alert_toast_msg_ = rt_upper_symbol(pair_) +
+                           (w.bid ? " bid wall pulled " : " ask wall pulled ") +
+                           rt_fmt_usd(w.vanished * w.price) + " @ " + px;
+        alert_toast_until_ = ImGui::GetTime() + 6.0;
+        rt_fire_alert("EdgeDepth wall", alert_toast_msg_, 520.0f);
+    }
+}
+
+// Feed every pull the tracker has classified since the last scan exactly once
+// (newest first; the watermark stops the walk). First scan after enable/reset
+// fast-forwards to the newest pull so pre-toggle pulls never burst as stale.
+void ChartWidget::scan_new_wall_pulls() {
+    if (!wall_alerts_enabled_) return;
+    if (last_pull_alert_ms_ == 0) {
+        rt_walls_.for_each_pull_newest([&](const rt_walls::Pull& p) {
+            last_pull_alert_ms_ = p.wall.end_ms;  // arm: skip pre-toggle pulls
+            return false;                          // only the newest matters
+        });
+        return;
+    }
+    int64_t newest = last_pull_alert_ms_;
+    rt_walls_.for_each_pull_newest([&](const rt_walls::Pull& p) {
+        if (p.wall.end_ms <= last_pull_alert_ms_) return false;  // seen already
+        alert_engine_.observe_wall_pull(p.wall.end_ms, p.wall.price, p.vanished, p.wall.bid);
+        if (p.wall.end_ms > newest) newest = p.wall.end_ms;
+        return true;
+    });
+    last_pull_alert_ms_ = newest;
 }
 
 void ChartWidget::render_realtime_cascades(ImDrawList* dl, const ImPlotRect& limits) {
     cascade_detector_.sweep(int64_t(rt_clock_ms_));
     pump_cascade_alerts();  // chains closed by the quiet-gap sweep alert here
+    scan_new_wall_pulls();  // S2: newly classified pulls enter the alert queue
+    pump_rt_alerts();       // S2: drain big-liq + wall-pull queues to the toast
     const ImU32 band = Theme::u32(Theme::Tokens::WARN, 0.10f);
     const ImU32 edge = Theme::u32(Theme::Tokens::WARN, 0.55f);
     const ImU32 pill = Theme::u32(Theme::Tokens::WARN, 0.85f);

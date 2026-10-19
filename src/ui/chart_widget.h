@@ -6,6 +6,7 @@
 #include "core/refill_absorption.h"
 #include "core/realtime_bubble_size.h"
 #include "core/liq_rails.h"
+#include "core/alert_engine.h"
 #include "core/entitlements.h"
 #include "core/hl_rails.h"
 #include "rendering/hl_rails_overlay.h"
@@ -443,6 +444,11 @@ private:
     bool rt_candles_hollow_ = false;  // outline bodies so the heat shows through
     bool cascade_alerts_enabled_ = true;  // toast + notification on liquidation cascades
     CascadeDetector cascade_detector_;    // Phase 2 S1: same-side liquidation chains
+    AlertEngine alert_engine_;            // Phase 2 S2: threshold alert queues
+    bool liq_alerts_enabled_ = false;     // big single liquidations
+    double liq_alert_usd_ = 250000.0;     // alert at/above this notional
+    bool wall_alerts_enabled_ = false;    // tracked walls pulled near price
+    int64_t last_pull_alert_ms_ = 0;      // watermark: each pull alerts once
     bool rt_paused_ = false, rt_trade_line_ = false;
     bool rt_extend_depth_ = true;
     bool rt_bridge_gaps_ = true;
@@ -581,6 +587,8 @@ private:
     void render_realtime_walls(ImDrawList* dl);
     void on_liquidation_observed(const Terminal::Liquidation& l);
     void pump_cascade_alerts();
+    void pump_rt_alerts();               // S2: big-liq + wall-pull queues
+    void scan_new_wall_pulls();          // S2: watermark feed into alert_engine_
     void render_realtime_cascades(ImDrawList* dl, const ImPlotRect& limits);
     bool realtime_hover_ready() const;
     void render_realtime_hover();
