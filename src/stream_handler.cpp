@@ -431,7 +431,9 @@ void StreamManager::dispatch_candles(const StreamKey& key, const std::span<const
     if (dispatch_queue_) {
         // Must copy the span data since it won't outlive this call
         std::vector<Terminal::Candle> batch_copy(batch.begin(), batch.end());
-        dispatch_queue_->push({[key, bc = std::move(batch_copy)](StreamManager& sm) {
+        // History batches are irreplaceable (a re-request costs a round trip
+        // and keeps the chart on "Loading candles") — priority lane.
+        dispatch_queue_->push_priority({[key, bc = std::move(batch_copy)](StreamManager& sm) {
             sm.dispatch_candles_impl(key, std::span<const Terminal::Candle>(bc));
         }});
         return;
@@ -449,7 +451,7 @@ void StreamManager::dispatch_candles_impl(const StreamKey& key, const std::span<
 
 void StreamManager::dispatch_volume(const StreamKey& key, const Terminal::Volume& volume) {
     if (dispatch_queue_) {
-        dispatch_queue_->push({[key, volume](StreamManager& sm) {
+        dispatch_queue_->push_priority({[key, volume](StreamManager& sm) {
             sm.dispatch_volume_impl(key, volume);
         }});
         return;
@@ -467,7 +469,7 @@ void StreamManager::dispatch_volume_impl(const StreamKey& key, const Terminal::V
 
 void StreamManager::dispatch_stat(const StreamKey& key, const Terminal::Stat& stat) {
     if (dispatch_queue_) {
-        dispatch_queue_->push({[key, stat](StreamManager& sm) {
+        dispatch_queue_->push_priority({[key, stat](StreamManager& sm) {
             sm.dispatch_stat_impl(key, stat);
         }});
         return;

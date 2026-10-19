@@ -125,6 +125,11 @@ struct AppState {
     std::unique_ptr<AnalyticsManager> analytics_mgr;     // Positioning/Contagion state
     std::unique_ptr<DrawingManager> drawing_mgr;         // Chart drawing tools (annotations)
     std::unique_ptr<DataThread> data_thread;
+    // pthread-free builds (EDGEDEPTH_PTHREADS=OFF): pthread_create fails, the
+    // WS bytes parse inline on the main thread, and the dispatch queue would
+    // never be drained - it must be dropped everywhere (stream manager +
+    // message context) so StreamManager applies widget state directly.
+    bool inline_dispatch = false;
     // Message context (rebuilt on connect)
     MessageContext msg_ctx{};
     // App context - single dependency injection point for widgets/menus
@@ -144,7 +149,7 @@ struct AppState {
             paper_trading_mgr.get(),
             &TickerManager::instance(),
             &ScannerManager::instance(),
-            data_thread ? &data_thread->dispatch_queue() : nullptr
+            data_thread && !inline_dispatch ? &data_thread->dispatch_queue() : nullptr
         };
         msg_ctx.series = series_mgr.get();
         msg_ctx.analytics = analytics_mgr.get();
@@ -1085,7 +1090,11 @@ void drain_data_dispatches(double budget_ms, bool profile) {
     // thread. TIME-BUDGETED: ingest storms (replay catch-up, reconnect bursts)
     // used to execute unbounded in one frame - the classic 90-FPS dip. The
     // remainder stays queued in order and resumes next frame.
-    if (g_app.data_thread && g_app.data_thread->is_running()) {
+    // Unconditional on the data thread object: the pthread-free build parses
+    // inline, but a queue could still hold early-boot dispatches (the queue is
+    // only dropped after start() has failed) and the drain must not skip it.
+    if (g_app.data_thread) {
+        if (!g_app.data_thread->is_running()) budget_ms = std::max(budget_ms, 6.0);
         if (profile) g_profiler.begin("Dispatch");
         const size_t n = g_app.data_thread->drain_dispatches(*g_app.stream_mgr,
                                                              budget_ms);
@@ -2335,13 +2344,23 @@ int main(int, char**) {
     g_app.drawing_mgr->init(g_initial_route.exchange, g_initial_route.symbol);
 
     // Create and start data thread BEFORE build_message_context so it can
-    // set the dispatch_queue pointer in the context
+    // set the dispatch_queue pointer in the context. The queue is installed
+    // optimistically: the worker's copy of the context needs it for the
+    // cross-thread hand-off. If the thread could not start (self-host
+    // pthreads-free builds), drop the queue again - otherwise every widget
+    // dispatch would sit in a queue nothing drains (no tape, no CVD, history
+    // batches never applied).
     g_app.data_thread = std::make_unique<DataThread>();
     g_app.stream_mgr->set_dispatch_queue(&g_app.data_thread->dispatch_queue());
     g_app.build_message_context();
 
     // Start data thread with the fully-built context
     g_app.data_thread->start(g_app.msg_ctx);
+    if (!g_app.data_thread->is_running()) {
+        g_app.inline_dispatch = true;
+        g_app.stream_mgr->set_dispatch_queue(nullptr);
+        g_app.build_message_context();
+    }
 
     // Pack mode: NO WebSocket at all - the pack + symbol metadata are the only
     // network I/O, so N viewers cost the box zero streaming sessions.
