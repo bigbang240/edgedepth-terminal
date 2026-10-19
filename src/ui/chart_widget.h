@@ -23,6 +23,7 @@
 #include "core/reference_context.h"
 #include "core/rt_walls.h"
 #include "core/rt_cvd.h"
+#include "core/cascade_detector.h"
 #include "ui/realtime_dom_frame.h"
 #include "ui/realtime_dom_ladder.h"
 #include "ui/realtime_navigation.h"
@@ -439,6 +440,9 @@ private:
     bool    rt_mode_    = false;
     bool    rt_was_on_  = false;
     bool rt_candles_ = false, rt_bubbles_ = true, rt_book_valid_ = false;
+    bool rt_candles_hollow_ = false;  // outline bodies so the heat shows through
+    bool cascade_alerts_enabled_ = true;  // toast + notification on liquidation cascades
+    CascadeDetector cascade_detector_;    // Phase 2 S1: same-side liquidation chains
     bool rt_paused_ = false, rt_trade_line_ = false;
     bool rt_extend_depth_ = true;
     bool rt_bridge_gaps_ = true;
@@ -575,6 +579,9 @@ private:
     const char* realtime_base_asset();
     void update_realtime_walls();
     void render_realtime_walls(ImDrawList* dl);
+    void on_liquidation_observed(const Terminal::Liquidation& l);
+    void pump_cascade_alerts();
+    void render_realtime_cascades(ImDrawList* dl, const ImPlotRect& limits);
     bool realtime_hover_ready() const;
     void render_realtime_hover();
     void render_realtime_cvd_lane();

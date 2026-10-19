@@ -483,3 +483,78 @@ void ChartWidget::render_realtime_cvd_lane() {
     }
     ImGui::PopID();
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Liquidation cascades (Phase 2 S1). The observed @forceOrder tail feeds the
+// incremental detector; finished same-side chains (3+ liquidations within 2s
+// gaps) draw as amber time/price bands with a CASCADE pill over the heat and,
+// when "Cascade alerts" is on, fire the same toast + browser notification +
+// beep plumbing the price alerts use.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+void ChartWidget::on_liquidation_observed(const Terminal::Liquidation& l) {
+    cascade_detector_.observe(l.timestamp_ms, l.price, l.is_buy);
+    pump_cascade_alerts();
+}
+
+void ChartWidget::pump_cascade_alerts() {
+    CascadeChain chain;
+    while (cascade_detector_.take_finished(chain)) {
+        if (!cascade_alerts_enabled_ || chain.alerted) continue;
+        chain.alerted = true;
+        std::string sym = pair_.symbol;
+        for (char& c : sym) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 32);
+        char span[24];
+        snprintf(span, sizeof(span), "%.1fs", chain.span_s());
+        alert_toast_msg_ = sym + " cascade: " + std::to_string(chain.count) +
+                           " liquidations in " + span;
+        alert_toast_until_ = ImGui::GetTime() + 6.0;
+#ifdef __EMSCRIPTEN__
+        EM_ASM({
+            try {
+                var msg = UTF8ToString($0);
+                if (window.Notification && Notification.permission === 'granted')
+                    new Notification('EdgeDepth cascade', { body: msg });
+                var AC = window.AudioContext || window.webkitAudioContext;
+                if (AC) { var c = new AC(); var o = c.createOscillator();
+                    var g = c.createGain(); o.frequency.value = 660;
+                    o.connect(g); g.connect(c.destination); g.gain.value = 0.06;
+                    o.start(); o.stop(c.currentTime + 0.24); }
+            } catch (e) {}
+        }, alert_toast_msg_.c_str());
+#endif
+    }
+}
+
+void ChartWidget::render_realtime_cascades(ImDrawList* dl, const ImPlotRect& limits) {
+    cascade_detector_.sweep(int64_t(rt_clock_ms_));
+    pump_cascade_alerts();  // chains closed by the quiet-gap sweep alert here
+    const ImU32 band = Theme::u32(Theme::Tokens::WARN, 0.10f);
+    const ImU32 edge = Theme::u32(Theme::Tokens::WARN, 0.55f);
+    const ImU32 pill = Theme::u32(Theme::Tokens::WARN, 0.85f);
+    const ImU32 text = Theme::u32(Theme::Tokens::BASE);
+    const auto draw_one = [&](const CascadeChain& c) {
+        const ImVec2 t0 = ImPlot::PlotToPixels(double(c.start_ms), limits.Y.Max);
+        const ImVec2 t1 = ImPlot::PlotToPixels(double(c.end_ms), limits.Y.Min);
+        dl->AddRectFilled(ImVec2(t0.x, t0.y), ImVec2(t1.x, t1.y), band);
+        dl->AddLine(ImVec2(t0.x, t0.y), ImVec2(t0.x, t1.y), edge, 1.0f);
+        dl->AddLine(ImVec2(t1.x, t0.y), ImVec2(t1.x, t1.y), edge, 1.0f);
+        if (c.hi_price > c.lo_price) {
+            const ImVec2 p0 = ImPlot::PlotToPixels(limits.X.Min, c.hi_price);
+            const ImVec2 p1 = ImPlot::PlotToPixels(limits.X.Max, c.lo_price);
+            dl->AddRectFilled(ImVec2(p0.x, p0.y), ImVec2(p1.x, p1.y), band);
+        }
+        char label[32];
+        snprintf(label, sizeof(label), "CASCADE ×%d", c.count);
+        const ImVec2 ts = ImGui::CalcTextSize(label);
+        const ImVec2 plot_pos = ImPlot::GetPlotPos();
+        const ImVec2 base(std::max(t0.x, plot_pos.x) + 4.0f,
+                          std::max(t0.y, plot_pos.y) + 4.0f);
+        dl->AddRectFilled(ImVec2(base.x, base.y),
+                          ImVec2(base.x + ts.x + 10.0f, base.y + ts.y + 6.0f), pill, 3.0f);
+        dl->AddText(ImVec2(base.x + 5.0f, base.y + 3.0f), text, label);
+    };
+    if (const CascadeChain* oc = cascade_detector_.open_chain();
+        oc && oc->count >= CascadeDetector::kMinEvents) draw_one(*oc);
+    for (const auto& c : cascade_detector_.chains()) draw_one(c);
+}

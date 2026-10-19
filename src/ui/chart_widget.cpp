@@ -452,6 +452,7 @@ void ChartWidget::subscribe_chart_streams() {
             .callback = [](void* ptr, const Terminal::Liquidation& l) {
                 auto* w = static_cast<ChartWidget*>(ptr);
                 w->ctx_.liq_heatmap_mgr().add_observed_event(w->pair_, l);
+                w->on_liquidation_observed(l);  // Phase 2 S1: cascade chains
             }
         };
         chart_stream_mgr_->subscribe_liquidations(liq_key, liq_handler);
@@ -475,6 +476,7 @@ void ChartWidget::unsubscribe_chart_streams() {
         chart_stream_mgr_->unsubscribe_liquidations(liq_key, this);
     }
     volume_subscribed_ = stats_subscribed_ = liq_events_subscribed_ = false;
+    cascade_detector_.reset();  // chains are per-symbol observed tails
     chart_stream_mgr_ = nullptr;
 }
 

@@ -126,6 +126,8 @@ Json ChartWidget::save_settings() const {
     j["candle_bubble_min"] = candle_bubble_min_;
     j["rt_trade_line"] = rt_trade_line_;
     j["rt_dom"] = rt_dom_shown_;
+    j["rt_hollow_candles"] = rt_candles_hollow_;
+    j["cascade_alerts"] = cascade_alerts_enabled_;
     j["rt_extend_depth"] = rt_extend_depth_;
     j["rt_bridge_gaps"] = rt_bridge_gaps_;
     j["rt_depth"] = rt_depth_enabled_;
@@ -279,6 +281,8 @@ void ChartWidget::load_settings(const Json& j) {
     workspace::read(j, "candle_bubble_min", candle_bubble_min_, 0, 1000000000000.0);
     workspace::read(j, "rt_trade_line", rt_trade_line_);
     workspace::read(j, "rt_dom", rt_dom_shown_);
+    workspace::read(j, "rt_hollow_candles", rt_candles_hollow_);
+    workspace::read(j, "cascade_alerts", cascade_alerts_enabled_);
     workspace::read(j, "rt_extend_depth", rt_extend_depth_);
     workspace::read(j, "rt_bridge_gaps", rt_bridge_gaps_);
     workspace::read(j, "rt_depth", rt_depth_enabled_);

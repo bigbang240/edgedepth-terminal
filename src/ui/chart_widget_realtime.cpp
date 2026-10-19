@@ -204,6 +204,12 @@ void ChartWidget::render_realtime_settings() {
     ui_test::mark("rt.ladder");
     if (Theme::menu_toggle("Side panels", rt_show_standalone_)) rt_show_standalone_ = !rt_show_standalone_;
     if (ImGui::IsItemHovered()) Theme::tooltip("Show the separate DOM and trade panels beside this view.");
+    if (rt_candles_) {
+        if (Theme::menu_toggle("Hollow candles", rt_candles_hollow_)) rt_candles_hollow_ = !rt_candles_hollow_;
+        if (ImGui::IsItemHovered()) Theme::tooltip("Outline candle bodies so the depth heatmap stays visible behind them.");
+    }
+    if (Theme::menu_toggle("Cascade alerts", cascade_alerts_enabled_)) cascade_alerts_enabled_ = !cascade_alerts_enabled_;
+    if (ImGui::IsItemHovered()) Theme::tooltip("Notify when 3+ same-side liquidations fire within 2 seconds (cascade chain).");
 
     if (!rt_archive_) return;
     const auto& a = *rt_archive_;
@@ -238,6 +244,7 @@ void ChartWidget::render_realtime_settings() {
 
 void ChartWidget::on_rewind(int64_t) {
     liq_obs_size_reference_ = {};
+    cascade_detector_.reset();  // the observed tail the chains were built from is gone
     // The replay owner restores/replays depth separately. Never keep future
     // samples or GPU cells from the preceding traversal.
     rt_dom_frame_ = {};
@@ -613,8 +620,14 @@ void ChartWidget::render_realtime() {
             const ImVec2 close = ImPlot::PlotToPixels(double(candle.timestamp_ms) + mid + body, candle.close);
             const ImU32 color = Theme::u32(candle.close >= candle.open ? Theme::Tokens::UP : Theme::Tokens::DOWN);
             dl->AddLine(hi, lo, color);
-            dl->AddRectFilled(ImVec2(open.x, std::min(open.y, close.y)),
-                ImVec2(close.x, std::max(open.y + 1, close.y)), color);
+            if (rt_candles_hollow_) {
+                // Outline only: the depth heatmap stays visible behind the body.
+                dl->AddRect(ImVec2(open.x, std::min(open.y, close.y)),
+                    ImVec2(close.x, std::max(open.y + 1, close.y)), color, 0.0f, 0, 1.25f);
+            } else {
+                dl->AddRectFilled(ImVec2(open.x, std::min(open.y, close.y)),
+                    ImVec2(close.x, std::max(open.y + 1, close.y)), color);
+            }
         };
         for (const auto& trade : trades) {
             if (trade.timestamp_ms < limits.X.Min - double(bucket_ms)) continue;
@@ -656,7 +669,9 @@ void ChartWidget::render_realtime() {
                         ImVec2(center.x - radius, center.y - radius), ImVec2(center.x + radius, center.y + radius));
             });
     }
-    // The signals over the trades: wall marks and pulls, then refill marks on top of everything but the quotes.
+    // The signals over the trades: cascade bands, wall marks and pulls, then
+    // refill marks on top of everything but the quotes.
+    render_realtime_cascades(dl, limits);
     render_realtime_walls(dl);
     render_refill_levels(dl, limits);
     if (fresh && limits.X.Max > rt_clock_ms_) {
