@@ -291,6 +291,7 @@ void ChartWidget::on_rewind(int64_t) {
     liq_obs_size_reference_ = {};
     cascade_detector_.reset();  // the observed tail the chains were built from is gone
     alert_engine_.reset();      // S2: the queues belong to the same tails
+    liq_estimator_.reset();     // S3: the tape the estimate was built from is gone
     last_pull_alert_ms_ = 0;
     // The replay owner restores/replays depth separately. Never keep future
     // samples or GPU cells from the preceding traversal.
@@ -716,9 +717,11 @@ void ChartWidget::render_realtime() {
                         ImVec2(center.x - radius, center.y - radius), ImVec2(center.x + radius, center.y + radius));
             });
     }
-    // The signals over the trades: cascade bands, wall marks and pulls, then
-    // refill marks on top of everything but the quotes.
+    // The signals over the trades: cascade bands, estimated liquidation
+    // clusters (S3), wall marks and pulls, then refill marks on top of
+    // everything but the quotes.
     render_realtime_cascades(dl, limits);
+    render_realtime_liq_levels(dl, limits);
     render_realtime_walls(dl);
     render_refill_levels(dl, limits);
     if (fresh && limits.X.Max > rt_clock_ms_) {
@@ -809,6 +812,7 @@ void ChartWidget::render_realtime() {
             }
         }
     }
+    render_realtime_walls_table(dl);  // Phase 2 S4: top-right overlay panel
     // Replay priming. Embedded replays (events, lessons, /demo) cover the whole canvas with their own scrim and
     // spinner (main.cpp render_lesson_loading_overlay); a second one here showed through it, off centre.
     if (ctx_.replay_mgr().is_loading()) {

@@ -86,6 +86,8 @@ struct Wall {
     int64_t last_ms = 0;             // last observation that measured it
     double size = 0, peak = 0;       // base quantity: latest and largest
     double multiple = 0, peak_multiple = 0;  // size over its side's median
+    int touches = 0;                 // distinct seconds the price traded into it
+    int64_t last_touch_ms = 0;       // for the one-second touch grouping
     bool stood(int64_t now) const { return now - start_ms >= kMinStandMs; }
     bool contains(double p) const { return std::abs(p - price) < tick * 0.5; }
 };
@@ -123,6 +125,7 @@ public:
     void reset() {
         active_.clear(); pending_.clear(); ended_.clear(); pulls_.clear();
         grid_ = {}; median_ = {0, 0}; touch_ = {0, 0}; last_ms_ = 0;
+        touch_scan_ms_ = 0;
         mids_ = {};
     }
 
@@ -168,6 +171,31 @@ public:
             else ended_.push(p.wall);
             pending_[i] = pending_.back(); pending_.pop_back();
         }
+        count_touches(trades, trades_through_ms);
+    }
+
+    // The active walls table counts a touch each second in which at least one
+    // trade printed into the wall's level: the market leaning on it without
+    // moving it. Same bounded tail the pull decisions read, so a throttled
+    // frame only counts what has actually been delivered.
+    template <class Trades>
+    void count_touches(const Trades& trades, int64_t trades_through_ms) {
+        if (active_.empty() || trades.empty()) return;
+        const int64_t to = std::min(trades_through_ms + kTradeSlackMs,
+                                    trades.back().timestamp_ms);
+        auto it = std::lower_bound(trades.begin(), trades.end(), touch_scan_ms_,
+            [](const Terminal::Trade& t, int64_t ms) { return t.timestamp_ms < ms; });
+        int guard = 0;
+        for (; it != trades.end() && it->timestamp_ms <= to && guard < 8192; ++it, ++guard) {
+            for (auto& live : active_) {
+                auto& wall = live.wall;
+                if (!wall.contains(it->price)) continue;
+                if (it->timestamp_ms <= wall.last_touch_ms) continue;
+                wall.last_touch_ms = it->timestamp_ms;
+                ++wall.touches;
+            }
+        }
+        touch_scan_ms_ = to + 1;
     }
     // Received trades were lost before delivery (a full dispatch queue): no drop
     // waiting on them can be shown untraded, so they end as plain walls.
@@ -427,7 +455,7 @@ private:
     Grid grid_{};
     std::array<double, 2> median_{0, 0}, touch_{0, 0};
     std::array<MidSecond, kMidSeconds> mids_{};
-    int64_t last_ms_ = 0;
+    int64_t last_ms_ = 0, touch_scan_ms_ = 0;
     double bid_floor_ = 0, ask_ceiling_ = 0;
     std::vector<Live> active_;
     std::vector<Pending> pending_;

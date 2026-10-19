@@ -25,6 +25,7 @@
 #include "core/rt_walls.h"
 #include "core/rt_cvd.h"
 #include "core/cascade_detector.h"
+#include "core/liq_levels.h"
 #include "ui/realtime_dom_frame.h"
 #include "ui/realtime_dom_ladder.h"
 #include "ui/realtime_navigation.h"
@@ -223,6 +224,11 @@ public:
     int64_t rt_preview_remaining_ms() const;
     void render_realtime_settings();
     void on_rewind(int64_t cutoff_ms) override;
+
+    // Phase 2 S3: estimated liquidation clusters (OI + mark + the recent tape).
+    void render_realtime_liq_levels(ImDrawList* dl, const ImPlotRect& limits);
+    // Phase 2 S4: the tracked active walls as an always-visible table.
+    void render_realtime_walls_table(ImDrawList* dl);
 
     float liq_opacity() const { return liq_opacity_; }   // liq-heatmap opacity (Tweaks panel)
     void  set_liq_opacity(float v);                      // set + push to the reconstructor
@@ -445,6 +451,11 @@ private:
     bool cascade_alerts_enabled_ = true;  // toast + notification on liquidation cascades
     CascadeDetector cascade_detector_;    // Phase 2 S1: same-side liquidation chains
     AlertEngine alert_engine_;            // Phase 2 S2: threshold alert queues
+    bool rt_liq_levels_enabled_ = true;   // Phase 2 S3: estimated liquidation clusters
+    liq_levels::Estimator liq_estimator_; // ...the model behind them
+    double liq_mark_price_ = 0;           // live mark price (stats stream)
+    double liq_oi_contracts_ = 0;         // live open interest in contracts (stats stream)
+    bool rt_walls_table_enabled_ = false; // Phase 2 S4: active walls table overlay
     bool liq_alerts_enabled_ = false;     // big single liquidations
     double liq_alert_usd_ = 250000.0;     // alert at/above this notional
     bool wall_alerts_enabled_ = false;    // tracked walls pulled near price

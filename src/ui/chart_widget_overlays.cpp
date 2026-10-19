@@ -374,6 +374,9 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
                 chart_type_ = rt_candles_ ? ChartType::Candles : ChartType::Line;
             }
             render_realtime_cvd_layer();
+            if (layer_row("Est. liquidations", rt_liq_levels_enabled_, false)) rt_liq_levels_enabled_ = !rt_liq_levels_enabled_;
+            if (ImGui::IsItemHovered())
+                Theme::tooltip("Estimated liquidation clusters: open interest split over leverage tiers\nusing the recent tape. Red bands are forced sells (longs), green forced buys (shorts).\nAn estimate, not real orders.");
             layer_section("ORDER BOOK SIGNALS");
             render_refill_layer_row();
             render_realtime_wall_layer();

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <memory>
 #include <utility>
 
@@ -119,6 +120,10 @@ void ChartWidget::handle_stat_for_chart(const Terminal::Stat& stat) {
         oi_cache_[stat.timestamp_ms] = stat.open_interest_usd;
         latest_oi_usd_ = stat.open_interest_usd;
     }
+    // Phase 2 S3: the estimator reads the live mark and open interest only
+    // (the historical OI batch above carries a different unit).
+    if (stat.mark_price > 0 && std::isfinite(stat.mark_price)) liq_mark_price_ = stat.mark_price;
+    if (stat.open_interest_usd > 0) liq_oi_contracts_ = stat.open_interest_usd;
 }
 
 void ChartWidget::add_funding_rate_indicator() {
