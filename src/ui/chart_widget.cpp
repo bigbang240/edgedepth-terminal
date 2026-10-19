@@ -3556,6 +3556,31 @@ void ChartWidget::render_controls() {
             Theme::menu_note(line);
         }
         Theme::menu_separator();
+        // ── [SELF-HOST P1] Depth palette + brightness curve ──────────────
+        // One picker drives every depth path at once (history orderbook and
+        // real-time cool/warm); the brightness curve shapes the mids without
+        // touching the liquidation field's tuned curve.
+        {
+            static const char* const kDepthMapLabels[] = {
+                "EdgeDepth (default)", "Teal-Gold", "Blue-Red", "Mono-Ice", "Viridis", "Inferno"};
+            const int cur_map = int(HeatmapColormap::depth_map());
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::BeginCombo("##depth_palette", kDepthMapLabels[cur_map])) {
+                for (int i = 0; i < int(std::size(kDepthMapLabels)); ++i) {
+                    if (ImGui::Selectable(kDepthMapLabels[i], i == cur_map) && i != cur_map)
+                        HeatmapColormap::set_depth_map(HeatmapColormap::DepthMap(i));
+                }
+                ImGui::EndCombo();
+            }
+            if (ImGui::IsItemHovered())
+                Theme::tooltip("Colour ramp of the depth heatmap.\nApplies to history and real-time at once and survives reloads.");
+            int gamma = HeatmapColormap::depth_gamma_pct();
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::SliderInt("##depth_gamma", &gamma, 50, 250, "Brightness %d%%"))
+                HeatmapColormap::set_depth_gamma_pct(gamma);
+            if (ImGui::IsItemHovered())
+                Theme::tooltip("Below 100 darkens the mid-tones, above 100 lifts them.\nPeaks and floors stay pinned; the liquidation field is untouched.");
+        }
         if (rt_mode_) {
             Theme::menu_note("Hold Alt over depth to inspect a price row.");
             if (recon) {
@@ -3565,6 +3590,25 @@ void ChartWidget::render_controls() {
             if (Theme::menu_toggle("Auto contrast", rt_auto_contrast_)) rt_auto_contrast_ = !rt_auto_contrast_;
             if (ImGui::IsItemHovered())
                 Theme::tooltip("Colours ease toward the visible book every few seconds.\nOff keeps them fixed until Recalibrate colors.");
+            // ── [SELF-HOST P1] Peak-hold: pulled walls leave a ghost ─────
+            if (Theme::menu_toggle("Peak hold", rt_peak_hold_)) rt_peak_hold_ = !rt_peak_hold_;
+            if (ImGui::IsItemHovered())
+                Theme::tooltip("Ghost bar for the deepest level each price row held\nwithin the window - a pulled wall keeps its trace.");
+            if (rt_peak_hold_) {
+                static const char* const kHorizons[] = {"5 min", "10 min", "30 min"};
+                static const int kHorizonMin[] = {5, 10, 30};
+                const int idx = rt_peak_horizon_min_ <= 5 ? 0 : rt_peak_horizon_min_ <= 10 ? 1 : 2;
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::BeginCombo("##peak_horizon", kHorizons[idx])) {
+                    for (int i = 0; i < 3; ++i) {
+                        if (ImGui::Selectable(kHorizons[i], i == idx) && i != idx) {
+                            rt_peak_horizon_min_ = kHorizonMin[i];
+                            rt_peak_levels_.clear();
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+            }
         } else {
             if (Theme::menu_toggle("Adapt to zoom", heatmap_adapt_to_zoom_)) {
                 heatmap_adapt_to_zoom_ = !heatmap_adapt_to_zoom_;

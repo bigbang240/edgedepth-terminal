@@ -3,8 +3,10 @@
 // C++ coordinator; this worker never fetches market data.
 (function () {
 'use strict';
-function archiveWorker() {
-    const BUDGET = 256 * 1024 * 1024, TARGET = 1800000, CHUNK = 1024 * 1024;
+function archiveWorker(TARGET, BUDGET) {
+    // [SELF-HOST P1] TARGET/BUDGET arrive injected (see start()): the retention
+    // horizon in ms and the matching IndexedDB byte budget.
+    const CHUNK = 1024 * 1024;
     const sessions = new Map();
     const request = r => new Promise((resolve, reject) => {
         r.onsuccess = () => resolve(r.result); r.onerror = () => reject(r.error);
@@ -239,7 +241,9 @@ const states=new Map(); let worker, inflight=0, pendingQueries=0, failed='';
 function start() {
     if (worker || failed) return;
     try {
-        worker=new Worker(URL.createObjectURL(new Blob(['('+archiveWorker.toString()+')()'],{type:'text/javascript'})));
+        const TARGET_MS=Math.max(1800000,Number(window.__EDGEDEPTH_RT_ARCHIVE_MS__||0)||1800000);
+        const BUDGET_BYTES=Math.min(1024*1024*1024,Math.round(256*1024*1024*Math.max(1,TARGET_MS/1800000)));
+        worker=new Worker(URL.createObjectURL(new Blob(['('+archiveWorker.toString()+')('+TARGET_MS+','+BUDGET_BYTES+')'],{type:'text/javascript'})));
         worker.onmessage=e=>{
             const m=e.data,s=states.get(m.id);
             if (m.type==='ack') {

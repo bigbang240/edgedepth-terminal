@@ -260,6 +260,9 @@ void ChartWidget::on_rewind(int64_t) {
     rt_paused_trades_.clear();
     rt_book_valid_ = false;
     rt_bubble_scale_ = {};
+    // [SELF-HOST P1] peak-hold ghosts belong to the discarded traversal too.
+    rt_peak_levels_.clear();
+    rt_peak_pruned_at_ms_ = 0;
     reset_realtime_extras();
     // Candle-mode large prints belong to the traversal being discarded too.
     candle_bubble_history_.reset();
@@ -312,6 +315,26 @@ void ChartWidget::update_realtime() {
         if (sample->timestamp_ms <= clock - RealtimeDepthHistory::retention_ms) continue;
         rt_prices_.clear();
         for (const auto& level : sample->levels) rt_prices_[level.price] += float(level.size);
+        // ── [SELF-HOST P1] Peak-hold accumulation ────────────────────────
+        // Decayed per-bucket maxima keyed by the absolute bucket index, so a
+        // wall that pulled keeps a ghost bar for the horizon regardless of
+        // the GPU ring's drifting per-column price windows.
+        if (rt_peak_hold_ && tick_size_ > 0) {
+            const double tau = std::max(1.0, double(rt_peak_horizon_min_) * 60000.0 / 3.0);
+            for (const auto& level : sample->levels) {
+                const int64_t key = std::llround(level.price / tick_size_);
+                auto& entry = rt_peak_levels_[key];
+                const double dt = double(sample->timestamp_ms - entry.second);
+                entry.first = std::max(entry.first * float(std::exp(-dt / tau)), float(level.size));
+                entry.second = sample->timestamp_ms;
+            }
+            if (clock - rt_peak_pruned_at_ms_ > 5000) {
+                const int64_t cutoff = clock - 2 * int64_t(rt_peak_horizon_min_) * 60000;
+                for (auto it = rt_peak_levels_.begin(); it != rt_peak_levels_.end();)
+                    it = it->second.second < cutoff ? rt_peak_levels_.erase(it) : std::next(it);
+                rt_peak_pruned_at_ms_ = clock;
+            }
+        }
         if (!rt_history_view_ || realtime_live_edge()) rt_renderer_->finalize_column(sample->timestamp_ms, rt_prices_, sample->segment_start, (sample->bid + sample->ask) * 0.5, sample->source_bucket_ticks);
         rt_latest_ = sample;
         rt_samples_.push_back(sample);
@@ -475,6 +498,51 @@ void ChartWidget::render_realtime() {
                 Theme::end_tooltip();
             }
         }
+    }
+
+    // ── [SELF-HOST P1] Peak-hold ghost bars ──────────────────────────────
+    // Subtle horizontal ghosts at the deepest level each visible price row
+    // held within the horizon window, drawn under the quote lines so candles
+    // and bubbles stay on top.
+    if (rt_peak_hold_ && !rt_peak_levels_.empty() && tick_size_ > 0) {
+        const ImVec2 pos = ImPlot::GetPlotPos();
+        const ImVec2 size = ImPlot::GetPlotSize();
+        float visible_max = 0;
+        for (const auto& peak : rt_peak_levels_) {
+            const double price = double(peak.first) * tick_size_;
+            if (price < limits.Y.Min || price > limits.Y.Max) continue;
+            visible_max = std::max(visible_max, peak.second.first);
+        }
+        if (visible_max > 0) {
+            const float line_h = std::max(1.0f, size.y / 720.0f);
+            int drawn = 0;
+            for (const auto& peak : rt_peak_levels_) {
+                if (drawn > 600) break;
+                const double price = double(peak.first) * tick_size_;
+                if (price < limits.Y.Min || price > limits.Y.Max) continue;
+                const float intensity = peak.second.first / visible_max;
+                if (intensity < 0.02f) continue;
+                const ImVec2 p = ImPlot::PlotToPixels(limits.X.Min, price + tick_size_ * 0.5);
+                const ImU32 col = ImGui::GetColorU32(
+                    ImVec4(0.55f, 0.85f, 0.75f, 0.10f + 0.22f * intensity));
+                dl->AddRectFilled(ImVec2(pos.x, p.y), ImVec2(pos.x + size.x, p.y + line_h), col);
+                ++drawn;
+            }
+        }
+    }
+
+    // ── [SELF-HOST P1] lightweight state bridge for tooling ─────────────
+    // window.__ed_state mirrors the live chart twice a second; the snapshot
+    // API and the egress bridge read it without touching the render loop.
+    static int64_t s_state_pushed_at = 0;
+    if (rt_clock_ms_ - s_state_pushed_at >= 500) {
+        s_state_pushed_at = rt_clock_ms_;
+        EM_ASM({
+            const s = Module['edState'] || (Module['edState'] = {});
+            s.symbol = UTF8ToString($0); s.venue = UTF8ToString($1);
+            s.tf = $2; s.bid = $3; s.ask = $4; s.ts = $5;
+        }, pair_.symbol.c_str(), pair_.exchange.c_str(), rt_candle_seconds_,
+           double(rt_quote_.best_bid), double(rt_quote_.best_ask), double(rt_clock_ms_));
     }
 
     ImVec2 previous{};

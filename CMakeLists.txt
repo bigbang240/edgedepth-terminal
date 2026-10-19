@@ -686,6 +686,7 @@ set(COMMON_COMPILE_FLAGS
 set(WASM_EXPORTED_FUNCTIONS
         _main
         _sync_pointer_modifiers
+        __ed_request_snapshot
         __education_on_lesson_fetch
         __edu_cmd_continue
         __edu_cmd_back

@@ -37,6 +37,14 @@ public:
     /// type: 0=orderbook, 1=liquidation
     void rebuild_colormap(int type, float opacity);
 
+    /// [SELF-HOST P1] Rebuild the depth (orderbook/RT) colormap textures when
+    /// the shared HeatmapColormap generation (palette/gamma pick) or this
+    /// family's opacity moved. Cheap enough to call every frame - it
+    /// early-outs on a compare. Depth and liquidation families are tracked
+    /// separately because two renderer instances can carry different opacities.
+    void sync_depth_colormaps(float opacity);
+    void sync_liq_colormaps(float opacity);
+
     // ── Cached uniform locations ──
     struct Uniforms {
         GLint u_data = -1;
@@ -89,5 +97,12 @@ private:
     GLuint colormap_ob_ = 0;       // Orderbook colormap 256×1 RGBA8
     GLuint colormap_liq_ = 0;      // Liquidation cool colormap 256×1 RGBA8
     GLuint colormap_liq_warm_ = 0; // Liquidation warm colormap 256×1 RGBA8
+    // [SELF-HOST P1] generation()/opacity the LUTs were last built with.
+    // Depth (ob/rt/rt_warm) and liquidation (liq/liq_warm) are independent:
+    // the single shared resources object serves renderer instances whose
+    // opacities differ, so per-family tracking avoids rebuild thrash.
+    uint32_t colormap_generation_ = 0;
+    float    depth_opacity_ = -1.0f;
+    float    liq_opacity_ = -1.0f;
     Uniforms uniforms_{};
 };

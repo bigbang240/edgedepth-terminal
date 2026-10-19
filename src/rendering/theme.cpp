@@ -185,16 +185,23 @@ namespace Theme {
             if (version != 1) return;
         }
         int liq = int(HeatmapColormap::liq_map());
+        int dmap = int(HeatmapColormap::depth_map());
+        int dgamma = HeatmapColormap::depth_gamma_pct();
         workspace::read(j, "chrome", g_chrome, 0, std::size(kChrome) - 1);
         workspace::read(j, "accent", g_accent, 0, 3);
         workspace::read(j, "candles", g_candles, 0, int(CandleConvention::BlueOrange));
         workspace::read(j, "up", g_custom_up, 0, 0xffffff);
         workspace::read(j, "down", g_custom_down, 0, 0xffffff);
         workspace::read(j, "liq_map", liq, 0, int(HeatmapColormap::LiqMap::Inferno));
+        // [SELF-HOST P1] depth palette + gamma (append-only keys).
+        workspace::read(j, "dmap", dmap, 0, int(HeatmapColormap::DepthMap::Inferno));
+        workspace::read(j, "dgamma", dgamma, 50, 250);
         set_chrome(g_chrome);
         set_accent(g_accent);
         set_candle_convention(g_candles);
         if (liq != int(HeatmapColormap::liq_map())) HeatmapColormap::set_liq_map(HeatmapColormap::LiqMap(liq));
+        if (dmap != int(HeatmapColormap::depth_map())) HeatmapColormap::set_depth_map(HeatmapColormap::DepthMap(dmap));
+        if (dgamma != HeatmapColormap::depth_gamma_pct()) HeatmapColormap::set_depth_gamma_pct(dgamma);
         if (version == 1) save_preferences();
     }
 
@@ -202,7 +209,9 @@ namespace Theme {
 #ifdef __EMSCRIPTEN__
         const auto text = workspace::Json({{"version",2}, {"chrome",int(chrome())}, {"accent",int(accent())},
             {"candles",int(candles())}, {"up",g_custom_up}, {"down",g_custom_down},
-            {"liq_map",int(HeatmapColormap::liq_map())}}).dump();
+            {"liq_map",int(HeatmapColormap::liq_map())},
+            {"dmap",int(HeatmapColormap::depth_map())},
+            {"dgamma",HeatmapColormap::depth_gamma_pct()}}).dump();
         g_preferences_saved = EM_ASM_INT({
             try { localStorage.setItem('edgedepth.appearance.v2', UTF8ToString($0)); return 1; }
             catch (_) { return 0; }

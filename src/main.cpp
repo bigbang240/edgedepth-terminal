@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <cmath>
 #include <vector>
+#include <GLES3/gl3.h>
 #include <array>
 #include <imgui_impl_sdl3.h>
 #include <zstd.h>
@@ -2172,6 +2173,14 @@ extern "C" {
 }
 
 int main(int, char**) {
+    // ── [SELF-HOST P1] RT archive retention override ─────────────────────
+    // window.__EDGEDEPTH_RT_ARCHIVE_MS__ (optionally set from the boot
+    // script/config) raises the browser-local archive horizon from the
+    // shipped 30 minutes up to 12h; the worker budget scales with it.
+    if (const double rt_ms = EM_ASM_DOUBLE({
+            return Number(window.__EDGEDEPTH_RT_ARCHIVE_MS__ || 0);
+        }); rt_ms >= double(RealtimeArchive::kDefaultTargetMs))
+        RealtimeArchive::set_target_ms(int64_t(rt_ms));
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         return -1;
     }
