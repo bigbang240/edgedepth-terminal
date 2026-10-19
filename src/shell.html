@@ -141,7 +141,7 @@
     window.__ed_snapshot = function () {
         return new Promise(function (resolve) {
             var t0 = Date.now();
-            try { Module.ed_request_snapshot(); } catch (e) { resolve({ error: "not-ready" }); return; }
+            try { Module.__ed_request_snapshot(); } catch (e) { resolve({ error: "not-ready" }); return; }
             (function poll() {
                 var s = window.__ed_lastShot;
                 if (s && s.ts >= t0) resolve(s);

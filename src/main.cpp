@@ -1634,7 +1634,7 @@ void apply_hosted_replay_transition() {
 static bool g_ed_snapshot_pending = false;
 extern "C" {
 EMSCRIPTEN_KEEPALIVE
-void ed_request_snapshot() { g_ed_snapshot_pending = true; }
+void _ed_request_snapshot() { g_ed_snapshot_pending = true; }
 }
 
 void main_loop() {
