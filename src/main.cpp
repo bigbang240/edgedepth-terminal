@@ -1627,16 +1627,6 @@ void apply_hosted_replay_transition() {
 }
 }  // namespace
 
-// ── [SELF-HOST P1] snapshot request hook ──────────────────────────────
-// JS calls the KEEPALIVE export directly (Module.ed_request_snapshot()) -
-// a plain C++ flag, no property polling or eval involved. Consumed at the
-// end of the frame once the back buffer holds a fully drawn frame.
-static bool g_ed_snapshot_pending = false;
-extern "C" {
-EMSCRIPTEN_KEEPALIVE
-void _ed_request_snapshot() { g_ed_snapshot_pending = true; }
-}
-
 void main_loop() {
     apply_hosted_replay_transition();
     if (g_app.ws_client) g_app.ws_client->tick();
@@ -2051,43 +2041,6 @@ void main_loop() {
         g_profiler.add_count("GL Draw", commands);
         g_profiler.add_count("GLCmdLists", dd->CmdListsCount);
         g_profiler.add_count("GLVertices", dd->TotalVtxCount);
-    }
-    // ── [SELF-HOST P1] Frame capture for window.__ed_snapshot() ─────────
-    // JS sets Module._edSnapPending; the last fully-drawn frame is read back
-    // here (before swap), converted to a PNG in JS, and parked on
-    // window.__ed_lastShot for the awaiting promise. Reads the back buffer
-    // right after ImGui render, so no preserveDrawingBuffer is needed.
-    if (g_ed_snapshot_pending) {
-        GLint vp[4];
-        glGetIntegerv(GL_VIEWPORT, vp);
-        const GLsizei sw = vp[2], sh = vp[3];
-        if (sw > 0 && sh > 0) {
-            std::vector<uint8_t> shot(size_t(sw) * sh * 4);
-            glPixelStorei(GL_PACK_ALIGNMENT, 1);
-            glReadPixels(0, 0, sw, sh, GL_RGBA, GL_UNSIGNED_BYTE, shot.data());
-            EM_ASM({
-                // NOTE: EM_ASM macro args split on commas outside parens -
-                // keep every comma inside () or wrap literals in ().
-                const w = $0;
-                const h = $1;
-                const ptr = $2;
-                const rgba = new Uint8ClampedArray(Module.HEAPU8.subarray(ptr, ptr + w * h * 4));
-                // GL rows are bottom-up; flip for a natural top-down image.
-                const flipped = new Uint8ClampedArray(w * h * 4);
-                for (let y = 0; y < h; y++) {
-                    const src = (h - 1 - y) * w * 4;
-                    const dst = y * w * 4;
-                    flipped.set(rgba.subarray(src, src + w * 4), dst);
-                }
-                const c = Module._edShotCanvas || (Module._edShotCanvas = document.createElement('canvas'));
-                c.width = w;
-                c.height = h;
-                c.getContext('2d').putImageData(new ImageData(flipped, w, h), 0, 0);
-                const shot = ({ png: c.toDataURL('image/png'), ts: Date.now() });
-                window.__ed_lastShot = shot;
-            }, sw, sh, shot.data());
-        }
-        g_ed_snapshot_pending = false;
     }
     g_profiler.begin("SwapWindow");
     SDL_GL_SwapWindow(g_app.window);

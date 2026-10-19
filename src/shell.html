@@ -138,16 +138,34 @@
      * (30min shipped default, 12h max; the IndexedDB budget scales with it). */
     window.__EDGEDEPTH_RT_ARCHIVE_MS__ = window.__EDGEDEPTH_RT_ARCHIVE_MS__ || 2 * 60 * 60 * 1000;
     window.__ed_state = null;
+    /* Frame capture WITHOUT touching the WASM: captureStream(0) grabs the
+     * composited canvas frame on demand (works even though the WebGL context
+     * has preserveDrawingBuffer=false), then a 2D canvas re-encodes it to PNG. */
     window.__ed_snapshot = function () {
         return new Promise(function (resolve) {
-            var t0 = Date.now();
-            try { Module.__ed_request_snapshot(); } catch (e) { resolve({ error: "not-ready" }); return; }
-            (function poll() {
-                var s = window.__ed_lastShot;
-                if (s && s.ts >= t0) resolve(s);
-                else if (Date.now() - t0 > 4000) resolve({ error: "timeout" });
-                else setTimeout(poll, 60);
-            })();
+            try {
+                var canvas = document.getElementById('canvas');
+                if (!window.__edStream) {
+                    window.__edStream = canvas.captureStream(0);
+                    window.__edTrack = window.__edStream.getVideoTracks()[0];
+                    window.__edVideo = document.createElement('video');
+                    window.__edVideo.srcObject = window.__edStream;
+                    window.__edVideo.muted = true;
+                    window.__edVideo.play().catch(function () {});
+                }
+                window.__edTrack.requestFrame();
+                setTimeout(function () {
+                    try {
+                        var v = window.__edVideo;
+                        if (!v || !v.videoWidth) { resolve({ error: 'no-frame' }); return; }
+                        var c = document.createElement('canvas');
+                        c.width = v.videoWidth;
+                        c.height = v.videoHeight;
+                        c.getContext('2d').drawImage(v, 0, 0);
+                        resolve({ png: c.toDataURL('image/png'), ts: Date.now() });
+                    } catch (e2) { resolve({ error: String(e2) }); }
+                }, 140);
+            } catch (e) { resolve({ error: String(e) }); }
         });
     };
     setInterval(function () {
