@@ -64,9 +64,41 @@ private:
     bool replace_popup_requested_ = false;
     int hovered_pack_ = -1;  // the card under the pointer last frame (its hairline brightens)
 
+    // ── Event finder (roadmap Phase 4) ────────────────────────────────────────
+    // Searches the self-hosted recorder daemon's /events feed (same server as
+    // the catalog manifest) and can replay any hit straight into its pack.
+    struct EventHit {
+        int64_t ts_ms = 0, end_ms = 0;
+        int kind = 0;               // 0 cascade · 1 liquidation · 2 big fill · 3 volume spike
+        int side = 0;               // 0 longs/forced-sell · 1 shorts/forced-buy (trades: taker side)
+        double usd = 0.0, price = 0.0;
+        int64_t count = 0;          // cascade chain size
+        bool live = false;          // inside the still-open episode (no pack yet)
+        std::string detail, pack_file, symbol;
+        int pack_index = -1;        // resolved against the loaded catalog (-1 = pruned)
+    };
+    std::vector<EventHit> event_hits_;
+    std::string event_error_;
+    int event_kind_ = 0;            // 0 all · 1 cascades · 2 liquidations · 3 big fills · 4 vol spikes
+    double event_min_usd_ = 500000.0;
+    char event_symbol_[24] = "";    // empty = every recorded symbol
+    int event_revision_ = -1;       // last feed revision applied
+    bool event_requested_ = false;
+    int pending_event_pack_ = -1;   // pack to open for the pending event replay
+    int64_t pending_event_seek_ms_ = 0; // consumed when the replace popup confirms
+
+    void begin_event_fetch();
+    void apply_events(const std::string& payload);
+    void render_event_finder();
+    void play_event(int hit_index);
+    // "https://h/manifest.json?XTP=9002" + "events" → absolute URL pieces the
+    // JS fetch helper combines (the routing query rides along).
+    void split_manifest_url(std::string& base, std::string& query) const;
+    std::string event_endpoint_url(const char* endpoint) const;
+
     void begin_fetch(bool force);
     bool parse_manifest(const std::string& payload, std::string& parse_error);
-    void play_pack(const Pack& pack);
+    void play_pack(const Pack& pack, int64_t seek_ms = 0);
     void render_pack(Pack& pack, int index);
     // Draws the candle preview; returns true when it was clicked (it doubles as a play button).
     bool render_preview(Pack& pack, ImVec2 size);

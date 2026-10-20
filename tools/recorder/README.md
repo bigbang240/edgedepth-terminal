@@ -12,7 +12,10 @@ bun/TypeScript pointed at your own community gateway.
 
 ```
 gateway :9001 (WS) ──▶ recorder.ts (:9002, bun) ──▶ data/packs/*.edpack
-                                        └─────────▶ /manifest.json + /packs/…  (Range, ETag, CORS)
+                                        ├─────────▶ /manifest.json + /packs/…  (Range, ETag, CORS)
+                                        ├─────────▶ /events          (event finder feed)
+                                        ├─────────▶ /report, /reports (daily HTML reports)
+                                        └─────────▶ POST /snapshot   (terminal snapshot intake)
 ```
 
 ## Run
@@ -36,9 +39,59 @@ Requires [bun](https://bun.sh) ≥ 1.1 (uses `Bun.zstdCompressSync`,
 | `RECORDER_EPISODE_MS` | `3600000`                  | Roll a new pack every N ms (hourly)       |
 | `RECORDER_KEEP`     | `48`                         | Packs kept per symbol (48 h); older pruned|
 | `RECORDER_DATA`     | `./data`                     | Pack directory                            |
+| `RECORDER_BIGTRADE_USD` | `250000`                 | Single-fill notional indexed as "trade"   |
+| `RECORDER_VOL_SPIKE_X` | `5`                        | 1m volume × hourly mean = a "vol" event   |
+| `RECORDER_TZ_OFFSET_MIN` | `210`                    | Local-day offset for reports (Asia/Tehran)|
 
 Status: `curl localhost:9002/` — gateway connection, per-symbol episode state
-(frames, candles seeded, order-book seed), pack count/bytes, malformed frames.
+(frames, candles seeded, order-book seed), pack count/bytes, event index size,
+malformed frames.
+
+## Event finder (search the archive)
+
+While recording, the daemon indexes every meaningful moment in
+`data/events/events-YYYYMMDD.jsonl` (append-only, replayed into memory on
+boot, capped at 50k):
+
+- **cascade** — 3+ same-side liquidations within 2 s (the terminal's
+  `cascade_detector` rules); finalized once the chain goes quiet.
+- **liq** — every reported liquidation (`usd = qty × price`, side = which book
+  got liquidated: `long` = forced sells, `short` = forced buys).
+- **trade** — single fills over `RECORDER_BIGTRADE_USD`.
+- **vol** — a final 1m candle trading at `RECORDER_VOL_SPIKE_X` × the previous
+  hour's mean volume (15 min cooldown).
+
+```bash
+curl 'localhost:9002/events?kind=cascade&min_usd=500000&limit=50'
+curl 'localhost:9002/events?kind=liq&symbol=btcusdt&from=1792500000000'
+```
+
+Each hit carries `pack` — the containing `.edpack` resolved at query time — so
+the terminal's **Replay Library → Event finder** can play the moment: pick a
+kind + dollar floor, Search, then Play on a row to open that pack and seek 45 s
+before the event (rows whose recording was pruned show `pruned`). The feed URL
+is derived from the library manifest's directory + query, so the gateway's
+`?XTransformPort=9002` routing suffix rides along untouched.
+
+## Daily report
+
+At every local midnight (`RECORDER_TZ_OFFSET_MIN`, default +210 = Tehran) the
+daemon writes the finished day to `data/reports/report-YYYY-MM-DD.html` and
+refreshes a live "today" report every 30 minutes.
+
+- `/report` — today, live · `/report?date=2026-10-20` — any recorded day
+- `/reports` — JSON list of published reports
+
+The self-contained dark HTML includes OHLC/liquidation KPIs, an SVG 1m price
+chart with liquidation bubbles (size ∝ USD) and amber cascade bands, hourly
+liquidation bars, event tables, and a **Terminal snapshots** gallery. Every row
+links "open in terminal": `/?pack=<pack>&packsym=<sym>&packt=<event − 45s>`,
+built at click time from the browser's origin, so the links work whenever the
+report is opened through the site gateway (`/report?XTransformPort=9002`).
+
+The snapshot gallery is fed by the landing page's bridge (Phase 1 snapshot
+API): every 10 minutes it grabs one `captureStream` frame of the terminal
+canvas and POSTs it to `/snapshot?symbol=…`; the newest 12 per day are kept.
 
 ## Open the archive in the terminal
 

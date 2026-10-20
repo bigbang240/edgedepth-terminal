@@ -404,7 +404,23 @@ void PackReplayEngine::tick() {
     // Frames ≤ the held clock (pre-start context rows) still deliver below,
     // which is exactly what primes the gate.
     if (playing_ && mgr_->is_loading()) {
-        wall_base_ms_ = wall_ms();  // no wall time accrues while held
+        // Dead lead-in guard: an episode recorded across a boot/subscribe gap
+        // can open with a lone pre-gap row (e.g. the forming 1m candle at the
+        // minute boundary) followed by tens of seconds of nothing. The gate
+        // holds the clock at start_ts waiting for candles that cannot exist
+        // inside the hole, so after 6s of held clock with the queue plainly
+        // ahead, snap the clock onto the first queued frame and LET IT RUN:
+        // a held clock can never cross the hole, and the gate primes from
+        // the real frames that follow it within a second or two.
+        if (!seek_priming_ && !lead_in_skipped_ && !frame_queue_.empty() &&
+            frame_queue_.front().ts > market_base_ms_ + 6000) {
+            market_base_ms_ = frame_queue_.front().ts;
+            wall_base_ms_ = wall_ms();
+            lead_in_skipped_ = true;
+            EM_ASM({ console.log('[packdiag] dead lead-in skipped, clock running from ' + $0); },
+                   (double)market_base_ms_);
+        }
+        if (!lead_in_skipped_) wall_base_ms_ = wall_ms();  // no wall time accrues while held
     }
 
     serve_pending_requests();
@@ -581,8 +597,7 @@ void PackReplayEngine::deliver_due_frames() {
         frame_queue_.pop_front();
         if (older_block_frames_ > 0) --older_block_frames_;
         delivered++;
-    }
-}
+    }}
 
 void PackReplayEngine::emit_status() {
     if (!playing_) return;
