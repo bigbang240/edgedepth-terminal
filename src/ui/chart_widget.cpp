@@ -546,6 +546,27 @@ void ChartWidget::apply_chart_type(ChartType type) {
     }
 }
 
+// Browser-side side effects shared by every crossing alert (Phase 3): a
+// desktop notification when permitted plus a short beep at the given tone.
+#ifdef __EMSCRIPTEN__
+static void alert_notify_beep(const char* msg, double freq) {
+    EM_ASM({
+        try {
+            var msg = UTF8ToString($0);
+            if (window.Notification && Notification.permission === 'granted')
+                new Notification('EdgeDepth alert', { body: msg });
+            var AC = window.AudioContext || window.webkitAudioContext;
+            if (AC) { var c = new AC(); var o = c.createOscillator();
+                var g = c.createGain(); o.frequency.value = $1;
+                o.connect(g); g.connect(c.destination); g.gain.value = 0.06;
+                o.start(); o.stop(c.currentTime + 0.18); }
+        } catch (e) {}
+    }, msg, freq);
+}
+#else
+static void alert_notify_beep(const char*, double) {}
+#endif
+
 void ChartWidget::update() {
     ProfileScope _ps("ChartUpd");
     time_link_adopt_timeframe();
@@ -662,20 +683,7 @@ void ChartWidget::update() {
                     for (char& c : sym) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 32);
                     alert_toast_msg_ = sym + " crossed " + pbuf;
                     alert_toast_until_ = ImGui::GetTime() + 6.0;
-#ifdef __EMSCRIPTEN__
-                    EM_ASM({
-                        try {
-                            var msg = UTF8ToString($0);
-                            if (window.Notification && Notification.permission === 'granted')
-                                new Notification('EdgeDepth alert', { body: msg });
-                            var AC = window.AudioContext || window.webkitAudioContext;
-                            if (AC) { var c = new AC(); var o = c.createOscillator();
-                                var g = c.createGain(); o.frequency.value = 880;
-                                o.connect(g); g.connect(c.destination); g.gain.value = 0.06;
-                                o.start(); o.stop(c.currentTime + 0.18); }
-                        } catch (e) {}
-                    }, alert_toast_msg_.c_str());
-#endif
+                    alert_notify_beep(alert_toast_msg_.c_str(), 880);
                     alerts_.erase(alerts_.begin() + static_cast<long>(i));
                 } else {
                     ++i;
@@ -686,6 +694,64 @@ void ChartWidget::update() {
     } else {
         const double px = candles().last_close_price();
         if (px > 0.0) alert_last_price_ = px;
+    }
+
+    // ── Phase 3: drawn-shape crossing alerts ─────────────────────────────
+    // Every HLine/HRay acts as a horizontal level and every two-anchor line
+    // (Trendline/Ray/ExtendedLine/Arrow) as a projected level at the current
+    // time. Same edge + toast + beep machinery as the price alerts above;
+    // the level survives the fire so a drawn line keeps guarding until it is
+    // deleted or the toggle goes off.
+    {
+        double px = candles().last_close_price();
+        if (rt_mode_) {
+            const auto& tr = candles().realtime_trades().trades();
+            if (!tr.empty()) px = tr.back().price;
+            else if (rt_quote_.best_bid > 0.0 && rt_quote_.best_ask > 0.0)
+                px = 0.5 * (rt_quote_.best_bid + rt_quote_.best_ask);
+        }
+        if (drawing_alerts_enabled_ && px > 0.0 && drawing_alert_last_price_ > 0.0 &&
+            !ctx_.drawing_mgr().hidden_all()) {
+            const int64_t now_ms = rt_mode_ ? rt_clock_ms_
+                : std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+            const double before = drawing_alert_last_price_;
+            for (const auto& d : ctx_.drawing_mgr().items()) {
+                if (d.hidden || d.anchors.empty()) continue;
+                double level = 0.0;
+                const drawing::Tool t = d.tool;
+                if (t == drawing::Tool::HLine || t == drawing::Tool::HRay)
+                    level = d.anchors[0].price;
+                else if ((t == drawing::Tool::Trendline || t == drawing::Tool::Ray ||
+                          t == drawing::Tool::ExtendedLine || t == drawing::Tool::Arrow) &&
+                    d.anchors.size() >= 2) {
+                    // Projected price at the current time (extrapolates past
+                    // the anchors, like a ray would continue).
+                    const int64_t span = d.anchors[1].t_ms - d.anchors[0].t_ms;
+                    const double f = span != 0
+                        ? double(now_ms - d.anchors[0].t_ms) / double(span) : 0.0;
+                    level = d.anchors[0].price + (d.anchors[1].price - d.anchors[0].price) * f;
+                } else {
+                    continue;
+                }
+                if (!(level > 0.0)) continue;
+                const double before_gap = before - level, now_gap = px - level;
+                if ((before_gap >= 0.0 && now_gap < 0.0) || (before_gap <= 0.0 && now_gap > 0.0)) {
+                    char pbuf[32];
+                    fmt_.format_price(pbuf, sizeof(pbuf), level);
+                    std::string sym = pair_.symbol;
+                    for (char& c : sym) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 32);
+                    const bool flat = t == drawing::Tool::HLine || t == drawing::Tool::HRay;
+                    alert_toast_msg_ = sym + " crossed your ";
+                    alert_toast_msg_ += flat ? "line" : "trendline";
+                    alert_toast_msg_ += " at ";
+                    alert_toast_msg_ += pbuf;
+                    alert_toast_until_ = ImGui::GetTime() + 6.0;
+                    alert_notify_beep(alert_toast_msg_.c_str(), 740);
+                }
+            }
+        }
+        if (px > 0.0) drawing_alert_last_price_ = px;
     }
 
     update_volume_indicators();

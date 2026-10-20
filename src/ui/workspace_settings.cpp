@@ -127,6 +127,9 @@ Json ChartWidget::save_settings() const {
     j["rt_trade_line"] = rt_trade_line_;
     j["rt_dom"] = rt_dom_shown_;
     j["rt_hollow_candles"] = rt_candles_hollow_;
+    j["rt_heikin"] = rt_heikin_;
+    j["rt_layer_preset"] = rt_layer_preset_;
+    j["drawing_alerts"] = drawing_alerts_enabled_;
     j["cascade_alerts"] = cascade_alerts_enabled_;
     j["rt_candle_seconds"] = rt_candle_seconds_;
     j["rt_liq_levels"] = rt_liq_levels_enabled_;
@@ -289,6 +292,9 @@ void ChartWidget::load_settings(const Json& j) {
     workspace::read(j, "rt_trade_line", rt_trade_line_);
     workspace::read(j, "rt_dom", rt_dom_shown_);
     workspace::read(j, "rt_hollow_candles", rt_candles_hollow_);
+    workspace::read(j, "rt_heikin", rt_heikin_);             // absent in older saves: keeps the default (off)
+    workspace::read(j, "rt_layer_preset", rt_layer_preset_, -1, 2);
+    workspace::read(j, "drawing_alerts", drawing_alerts_enabled_); // absent in older saves: keeps the default (on)
     workspace::read(j, "cascade_alerts", cascade_alerts_enabled_);
     workspace::read(j, "rt_candle_seconds", rt_candle_seconds_, 1, 300);
     workspace::read(j, "rt_liq_levels", rt_liq_levels_enabled_);   // absent in older saves: keeps the default (on)

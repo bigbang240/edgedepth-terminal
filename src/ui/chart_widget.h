@@ -231,6 +231,8 @@ public:
     void render_realtime_walls_table(ImDrawList* dl);
     // Phase 2 S5: cumulative resting depth - the second heat layer.
     void render_realtime_cum_depth(ImDrawList* dl, const ImPlotRect& limits);
+    // Phase 3: one-click layer layouts for the real-time view (Scalp/Swing/Research).
+    void apply_layer_preset(int preset);
 
     float liq_opacity() const { return liq_opacity_; }   // liq-heatmap opacity (Tweaks panel)
     void  set_liq_opacity(float v);                      // set + push to the reconstructor
@@ -330,6 +332,12 @@ public:
     double      alert_last_price_ = 0.0;   // last live price seen (crossing edge)
     double      alert_toast_until_ = 0.0;  // ImGui::GetTime() deadline for the toast
     std::string alert_toast_msg_;
+
+    // Phase 3: drawn HLine/HRay/Trendline/Ray/ExtendedLine/Arrow shapes act as
+    // alert levels (same toast + notification + beep path). The level stays:
+    // a drawn line keeps guarding until deleted or the toggle goes off.
+    bool   drawing_alerts_enabled_ = true;
+    double drawing_alert_last_price_ = 0.0;  // last live price seen (crossing edge)
 
     struct DateBoundary {
         double timestamp;
@@ -450,6 +458,8 @@ private:
     bool    rt_was_on_  = false;
     bool rt_candles_ = false, rt_bubbles_ = true, rt_book_valid_ = false;
     bool rt_candles_hollow_ = false;  // outline bodies so the heat shows through
+    bool rt_heikin_ = false;          // Phase 3: Heikin-Ashi transform of the RT buckets
+    int  rt_layer_preset_ = -1;       // Phase 3: last applied layer preset (-1 none)
     bool cascade_alerts_enabled_ = true;  // toast + notification on liquidation cascades
     CascadeDetector cascade_detector_;    // Phase 2 S1: same-side liquidation chains
     AlertEngine alert_engine_;            // Phase 2 S2: threshold alert queues

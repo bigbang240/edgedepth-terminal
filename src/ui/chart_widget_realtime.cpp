@@ -172,6 +172,36 @@ void ChartWidget::set_rt_mode(bool on) {
 
 // Navigation and panel visibility only. Overlay switches belong in Layers;
 // recording diagnostics stay available without filling the everyday menu.
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 3: one-click layer layouts for the real-time view. Toggles only —
+// the workspace autosave keeps whatever the user changes afterwards.
+//   Scalp    - raw microstructure: 1s hollow candles, walls + pulls, CVD,
+//              bubbles, fast alerts, estimates off (they are minutes-scale)
+//   Swing    - structure: 1m solid candles, estimated liquidations + resting
+//              depth on, noise layers off
+//   Research - everything on, including the walls table and peak-hold ghosts
+// ═══════════════════════════════════════════════════════════════════════════
+void ChartWidget::apply_layer_preset(int preset) {
+    rt_depth_enabled_ = true;
+    rt_bubbles_ = preset != 1;
+    rt_trade_line_ = preset == 2;
+    rt_candles_ = true;
+    chart_type_ = ChartType::Candles;
+    rt_candles_hollow_ = preset != 1;
+    rt_heikin_ = false;
+    rt_cvd_enabled_ = preset != 1;
+    rt_liq_levels_enabled_ = preset != 0;
+    rt_cum_depth_enabled_ = preset != 0;
+    rt_walls_enabled_ = true;
+    rt_pulls_enabled_ = preset != 1;
+    rt_walls_table_enabled_ = preset == 2;
+    rt_peak_hold_ = preset == 2;
+    cascade_alerts_enabled_ = true;
+    liq_alerts_enabled_ = preset != 1;
+    wall_alerts_enabled_ = preset == 2;
+    set_rt_candle_seconds(preset == 0 ? 1 : preset == 1 ? 60 : 5);
+}
+
 void ChartWidget::render_realtime_settings() {
     using drawing::UiIcon;
     if (!ctx_.replay_mgr().is_active() && Theme::menu_toggle("Pause display", rt_paused_)) {
@@ -255,6 +285,9 @@ void ChartWidget::render_realtime_settings() {
     if (Theme::menu_toggle("Wall pulls", wall_alerts_enabled_)) wall_alerts_enabled_ = !wall_alerts_enabled_;
     if (ImGui::IsItemHovered())
         Theme::tooltip("Notify when a tracked depth wall near price is pulled (eaten or cancelled).");
+    if (Theme::menu_toggle("Drawing alerts", drawing_alerts_enabled_)) drawing_alerts_enabled_ = !drawing_alerts_enabled_;
+    if (ImGui::IsItemHovered())
+        Theme::tooltip("Notify when the price crosses a drawn line: horizontal lines and rays fire at\ntheir level, trendlines and rays project to the current time. The line stays armed.");
 
     if (!rt_archive_) return;
     const auto& a = *rt_archive_;
@@ -681,18 +714,33 @@ void ChartWidget::render_realtime() {
         // OHLC from retained trade records only, aggregated into the selected
         // real-time bucket (1s by default; the toolbar offers 5s..5m). Empty
         // buckets stay absent; a paused frame uses its frozen records and the
-        // same as-of clock.
+        // same as-of clock. Heikin-Ashi (Phase 3) transforms each finished
+        // bucket: open = midpoint of the previous HA candle, close = the raw
+        // OHLC4 — the forming bucket gets the same treatment, so the last
+        // candle eases into place exactly like the historical HA series.
         const int64_t bucket_ms = int64_t(std::max(1, rt_candle_seconds_)) * 1000;
         const double mid = 0.5 * double(bucket_ms), body = 0.35 * double(bucket_ms);
         Terminal::Candle candle{};
         bool have = false;
+        double ha_open_prev = 0.0, ha_close_prev = 0.0;
+        bool have_prev_ha = false;
         auto flush = [&]() {
             if (!have) return;
-            const ImVec2 hi = ImPlot::PlotToPixels(double(candle.timestamp_ms) + mid, candle.high);
-            const ImVec2 lo = ImPlot::PlotToPixels(double(candle.timestamp_ms) + mid, candle.low);
-            const ImVec2 open = ImPlot::PlotToPixels(double(candle.timestamp_ms) + mid - body, candle.open);
-            const ImVec2 close = ImPlot::PlotToPixels(double(candle.timestamp_ms) + mid + body, candle.close);
-            const ImU32 color = Theme::u32(candle.close >= candle.open ? Theme::Tokens::UP : Theme::Tokens::DOWN);
+            double o = candle.open, h = candle.high, l = candle.low, c = candle.close;
+            if (rt_heikin_) {
+                const double close = (candle.open + candle.high + candle.low + candle.close) * 0.25;
+                const double open = have_prev_ha ? 0.5 * (ha_open_prev + ha_close_prev)
+                                                 : 0.5 * (candle.open + candle.close);
+                o = open; c = close;
+                h = std::max(candle.high, std::max(open, close));
+                l = std::min(candle.low, std::min(open, close));
+                ha_open_prev = open; ha_close_prev = close; have_prev_ha = true;
+            }
+            const ImVec2 hi = ImPlot::PlotToPixels(double(candle.timestamp_ms) + mid, h);
+            const ImVec2 lo = ImPlot::PlotToPixels(double(candle.timestamp_ms) + mid, l);
+            const ImVec2 open = ImPlot::PlotToPixels(double(candle.timestamp_ms) + mid - body, o);
+            const ImVec2 close = ImPlot::PlotToPixels(double(candle.timestamp_ms) + mid + body, c);
+            const ImU32 color = Theme::u32(c >= o ? Theme::Tokens::UP : Theme::Tokens::DOWN);
             dl->AddLine(hi, lo, color);
             if (rt_candles_hollow_) {
                 // Outline only: the depth heatmap stays visible behind the body.
