@@ -37,6 +37,12 @@ private:
     void render_journal_tab();
     void render_by_type_tab();
 
+    // ── Phase 5: local engine views (self-hosted paper trading) ────────────
+    void render_local_summary(const class LocalPaperEngine& eng);
+    void render_local_positions(class LocalPaperEngine& eng);
+    void render_local_journal(const class LocalPaperEngine& eng);
+    void render_local_daily(const class LocalPaperEngine& eng);
+
     // Helpers
     static const char* format_duration(int64_t seconds, char* buf, size_t buf_size);
 };

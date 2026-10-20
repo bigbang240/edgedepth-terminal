@@ -60,6 +60,7 @@
 #include "core/indicator_series.h"
 #include "core/analytics_manager.h"
 #include "core/paper_trading_manager.h"
+#include "core/local_paper_engine.h"
 #include "core/ticker_manager.h"
 #include "core/scanner_manager.h"
 #include "core/drawing_manager.h"
@@ -124,6 +125,7 @@ struct AppState {
     std::unique_ptr<IndicatorSeriesManager> series_mgr;  // Indicators V1 SeriesCache
     std::unique_ptr<AnalyticsManager> analytics_mgr;     // Positioning/Contagion state
     std::unique_ptr<DrawingManager> drawing_mgr;         // Chart drawing tools (annotations)
+    std::unique_ptr<LocalPaperEngine> local_paper_mgr;   // Client-side paper engine (Phase 5)
     std::unique_ptr<DataThread> data_thread;
     // pthread-free builds (EDGEDEPTH_PTHREADS=OFF): pthread_create fails, the
     // WS bytes parse inline on the main thread, and the dispatch queue would
@@ -170,7 +172,8 @@ struct AppState {
             &TickerManager::instance(),
             series_mgr.get(),
             analytics_mgr.get(),
-            drawing_mgr.get()
+            drawing_mgr.get(),
+            local_paper_mgr.get()
         };
     }
 };
@@ -2342,6 +2345,7 @@ int main(int, char**) {
     g_app.analytics_mgr = std::make_unique<AnalyticsManager>();
     g_app.drawing_mgr = std::make_unique<DrawingManager>();
     g_app.drawing_mgr->init(g_initial_route.exchange, g_initial_route.symbol);
+    g_app.local_paper_mgr = std::make_unique<LocalPaperEngine>();
 
     // Create and start data thread BEFORE build_message_context so it can
     // set the dispatch_queue pointer in the context. The queue is installed

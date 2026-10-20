@@ -2,6 +2,8 @@
 #include "rendering/theme.h"
 #include "core/symbol_metadata.h"
 #include "core/display_time_zone.h"
+#include "core/local_paper_engine.h"
+#include "core/ticker_manager.h"
 #include "imgui.h"
 #include "implot.h"
 #include <cstdio>
@@ -45,6 +47,26 @@ static ImVec4 tp_progress_color(double pct) {
     if (pct < 50.0)  return Theme::Colors::TEXT_SECONDARY;
     if (pct < 90.0)  return ImVec4(0.95f, 0.75f, 0.20f, 1.0f); // amber
     return Theme::Colors::BUY_GREEN;
+}
+
+// ── Phase 5: local paper engine helpers ─────────────────────────────────────
+
+static int64_t local_wall_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+// Flatten price resolver: last ticker price (watchlist-wide feed), the
+// engine's own mark is preferred inside flatten_all when fresher.
+static double local_flatten_price(const char* exch, const char* sym) {
+    if (const auto* t = TickerManager::instance().get(exch, sym))
+        return t->last_price;
+    return 0.0;
+}
+
+static std::string upper_copy(std::string s) {
+    for (auto& c : s) c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
+    return s;
 }
 
 PositionsPanel::PositionsPanel(const AppContext& ctx)
@@ -145,12 +167,18 @@ void PositionsPanel::render_positions_tab() {
     auto& mgr = ctx_.paper_trading_mgr();
     const auto& positions = mgr.positions();
 
+    // Phase 5: local engine positions first (Close buttons per row).
+    const bool has_local = ctx_.local_paper && !ctx_.local_paper->positions().empty();
+    if (ctx_.local_paper) render_local_positions(*ctx_.local_paper);
+
     if (positions.empty()) {
-        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 40);
-        float w = ImGui::GetContentRegionAvail().x;
-        float tw = ImGui::CalcTextSize("No open positions").x;
-        ImGui::SetCursorPosX((w - tw) * 0.5f);
-        ImGui::TextColored(Theme::Colors::TEXT_SECONDARY, "No open positions");
+        if (!has_local) {
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 40);
+            float w = ImGui::GetContentRegionAvail().x;
+            float tw = ImGui::CalcTextSize("No open positions").x;
+            ImGui::SetCursorPosX((w - tw) * 0.5f);
+            ImGui::TextColored(Theme::Colors::TEXT_SECONDARY, "No open positions");
+        }
         return;
     }
 
@@ -409,12 +437,18 @@ void PositionsPanel::render_journal_tab() {
     auto& mgr = ctx_.paper_trading_mgr();
     const auto& trades = mgr.closed_trades();
 
+    // Phase 5: local engine closed trades first.
+    const bool has_local = ctx_.local_paper && !ctx_.local_paper->closed().empty();
+    if (ctx_.local_paper) render_local_journal(*ctx_.local_paper);
+
     if (trades.empty()) {
-        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 40);
-        float w = ImGui::GetContentRegionAvail().x;
-        float tw = ImGui::CalcTextSize("No closed trades yet").x;
-        ImGui::SetCursorPosX((w - tw) * 0.5f);
-        ImGui::TextColored(Theme::Colors::TEXT_SECONDARY, "No closed trades yet");
+        if (!has_local) {
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 40);
+            float w = ImGui::GetContentRegionAvail().x;
+            float tw = ImGui::CalcTextSize("No closed trades yet").x;
+            ImGui::SetCursorPosX((w - tw) * 0.5f);
+            ImGui::TextColored(Theme::Colors::TEXT_SECONDARY, "No closed trades yet");
+        }
         return;
     }
 
@@ -530,12 +564,18 @@ void PositionsPanel::render_by_type_tab() {
     auto& mgr = ctx_.paper_trading_mgr();
     const auto& trades = mgr.closed_trades();
 
+    // Phase 5: local daily P&L table first.
+    const bool has_local = ctx_.local_paper && !ctx_.local_paper->closed().empty();
+    if (ctx_.local_paper) render_local_daily(*ctx_.local_paper);
+
     if (trades.empty()) {
-        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 40);
-        float w = ImGui::GetContentRegionAvail().x;
-        float tw = ImGui::CalcTextSize("No closed trades yet").x;
-        ImGui::SetCursorPosX((w - tw) * 0.5f);
-        ImGui::TextColored(Theme::Colors::TEXT_SECONDARY, "No closed trades yet");
+        if (!has_local) {
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 40);
+            float w = ImGui::GetContentRegionAvail().x;
+            float tw = ImGui::CalcTextSize("No closed trades yet").x;
+            ImGui::SetCursorPosX((w - tw) * 0.5f);
+            ImGui::TextColored(Theme::Colors::TEXT_SECONDARY, "No closed trades yet");
+        }
         return;
     }
 
@@ -607,6 +647,257 @@ void PositionsPanel::render_by_type_tab() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Phase 5: local paper engine views
+// ═══════════════════════════════════════════════════════════════════════════════
+
+void PositionsPanel::render_local_summary(const LocalPaperEngine& eng) {
+    const auto& st = eng.stats();
+    const double op = eng.open_pnl();
+    // Compose the account-shaped view and reuse the same summary bar.
+    Terminal::PaperAccount a;
+    a.balance          = st.initial_balance + st.realized_total;
+    a.equity           = eng.equity();
+    a.initial_balance  = st.initial_balance;
+    a.total_pnl        = st.realized_total;
+    a.winning_trades   = st.wins;
+    a.losing_trades    = st.losses;
+    a.peak_equity      = st.peak_equity;
+    a.max_drawdown_pct = st.max_dd_pct;
+    a.profit_factor    = st.profit_factor();
+    render_account_summary(a, op);
+    ImGui::SameLine();
+    ImGui::TextColored(ImVec4(0.62f, 0.78f, 0.36f, 1.0f), "LOCAL");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Self-hosted local paper engine. Orders open from alert crossings\n(see the chart menu, Execution group); balance baseline is editable there\nvia Account ($).");
+}
+
+void PositionsPanel::render_local_positions(LocalPaperEngine& eng) {
+    const auto& open = eng.positions();
+    if (open.empty()) return;
+
+    ImGui::Spacing();
+    ImGui::TextColored(Theme::Colors::TEXT_SECONDARY, "Local engine - %d open",
+                       static_cast<int>(open.size()));
+    {
+        const float avail = ImGui::GetContentRegionAvail().x;
+        if (avail > 140.0f) {
+            ImGui::SameLine();
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail - 92.0f);
+            if (ImGui::SmallButton("Flatten all")) {
+                eng.flatten_all(&local_flatten_price, local_wall_ms());
+            }
+        }
+    }
+
+    const ImGuiTableFlags flags =
+        ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
+        ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY |
+        ImGuiTableFlags_SizingStretchProp;
+    if (!ImGui::BeginTable("##local_positions", 12, flags)) return;
+
+    ImGui::TableSetupScrollFreeze(0, 1);
+    ImGui::TableSetupColumn("Symbol", ImGuiTableColumnFlags_NoSort, 0.0f, 0);
+    ImGui::TableSetupColumn("Side",   ImGuiTableColumnFlags_NoSort, 0.0f, 1);
+    ImGui::TableSetupColumn("Src",    ImGuiTableColumnFlags_NoSort, 0.0f, 2);
+    ImGui::TableSetupColumn("Entry",  ImGuiTableColumnFlags_NoSort, 0.0f, 3);
+    ImGui::TableSetupColumn("Mark",   ImGuiTableColumnFlags_NoSort, 0.0f, 4);
+    ImGui::TableSetupColumn("P&L",    ImGuiTableColumnFlags_NoSort, 0.0f, 5);
+    ImGui::TableSetupColumn("Qty",    ImGuiTableColumnFlags_NoSort, 0.0f, 6);
+    ImGui::TableSetupColumn("Stop",   ImGuiTableColumnFlags_NoSort, 0.0f, 7);
+    ImGui::TableSetupColumn("TP1",    ImGuiTableColumnFlags_NoSort, 0.0f, 8);
+    ImGui::TableSetupColumn("TP2",    ImGuiTableColumnFlags_NoSort, 0.0f, 9);
+    ImGui::TableSetupColumn("Age",    ImGuiTableColumnFlags_NoSort, 0.0f, 10);
+    ImGui::TableSetupColumn("",       ImGuiTableColumnFlags_NoSort, 0.0f, 11);
+    ImGui::TableHeadersRow();
+
+    auto& reg = SymbolRegistry::instance();
+    const int64_t now_ms = local_wall_ms();
+
+    for (const auto& p : open) {
+        ImGui::TableNextRow();
+        const PriceFormatter fmt = reg.get_formatter(p.exchange, p.symbol);
+
+        ImGui::TableNextColumn();
+        ImGui::Text("%s", upper_copy(p.symbol).c_str());
+
+        ImGui::TableNextColumn();
+        ImGui::TextColored(p.is_long() ? Theme::Colors::BUY_GREEN
+                                       : Theme::Colors::SELL_RED,
+                           "%s", p.is_long() ? "LONG" : "SHORT");
+
+        ImGui::TableNextColumn();
+        ImGui::TextColored(Theme::Colors::TEXT_SECONDARY, "%s", p.source.c_str());
+
+        ImGui::TableNextColumn();
+        ImGui::Text(fmt.price_fmt, p.entry);
+        ImGui::TableNextColumn();
+        ImGui::Text(fmt.price_fmt, p.mark);
+
+        ImGui::TableNextColumn();
+        const double pnl = p.total_pnl();
+        ImVec4 c = pnl >= 0 ? Theme::Colors::BUY_GREEN : Theme::Colors::SELL_RED;
+        ImGui::TextColored(c, "$%.2f", pnl);
+        if (p.tp1_hit || p.tp2_hit) {
+            ImGui::SameLine();
+            ImGui::TextColored(Theme::Colors::TEXT_SECONDARY,
+                               "(%s)", p.tp2_hit ? "TP1+TP2" : "TP1");
+        }
+
+        ImGui::TableNextColumn();
+        ImGui::Text("%.4g", p.remaining_qty);
+        ImGui::TableNextColumn();
+        ImGui::Text(fmt.price_fmt, p.stop);
+        ImGui::TableNextColumn();
+        ImGui::Text(fmt.price_fmt, p.tp1);
+        ImGui::TableNextColumn();
+        ImGui::Text(fmt.price_fmt, p.tp2);
+        ImGui::TableNextColumn();
+        char dur_buf[32];
+        format_duration((now_ms - p.opened_ms) / 1000, dur_buf, sizeof(dur_buf));
+        ImGui::Text("%s", dur_buf);
+
+        ImGui::TableNextColumn();
+        ImGui::PushID(p.id.c_str());
+        if (ImGui::SmallButton("Close"))
+            eng.close(p.id, p.mark > 0.0 ? p.mark : 0.0, now_ms, "manual");
+        ImGui::PopID();
+    }
+    ImGui::EndTable();
+    ImGui::Spacing();
+}
+
+void PositionsPanel::render_local_journal(const LocalPaperEngine& eng) {
+    const auto& trades = eng.closed();
+    if (trades.empty()) return;
+
+    ImGui::Spacing();
+    ImGui::TextColored(Theme::Colors::TEXT_SECONDARY, "Local engine - %d closed",
+                       static_cast<int>(trades.size()));
+
+    const ImGuiTableFlags flags =
+        ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
+        ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY |
+        ImGuiTableFlags_SizingStretchProp;
+    if (!ImGui::BeginTable("##local_journal", 10, flags)) return;
+
+    ImGui::TableSetupScrollFreeze(0, 1);
+    ImGui::TableSetupColumn("Time",       ImGuiTableColumnFlags_NoSort, 0.0f, 0);
+    ImGui::TableSetupColumn("Symbol",     ImGuiTableColumnFlags_NoSort, 0.0f, 1);
+    ImGui::TableSetupColumn("Side",       ImGuiTableColumnFlags_NoSort, 0.0f, 2);
+    ImGui::TableSetupColumn("Src",        ImGuiTableColumnFlags_NoSort, 0.0f, 3);
+    ImGui::TableSetupColumn("Entry",      ImGuiTableColumnFlags_NoSort, 0.0f, 4);
+    ImGui::TableSetupColumn("Exit",       ImGuiTableColumnFlags_NoSort, 0.0f, 5);
+    ImGui::TableSetupColumn("P&L",        ImGuiTableColumnFlags_NoSort, 0.0f, 6);
+    ImGui::TableSetupColumn("R-Mult",     ImGuiTableColumnFlags_NoSort, 0.0f, 7);
+    ImGui::TableSetupColumn("Exit Reason",ImGuiTableColumnFlags_NoSort, 0.0f, 8);
+    ImGui::TableSetupColumn("Duration",   ImGuiTableColumnFlags_NoSort, 0.0f, 9);
+    ImGui::TableHeadersRow();
+
+    auto& reg = SymbolRegistry::instance();
+    for (const auto& p : trades) {
+        ImGui::TableNextRow();
+        if (p.realized >= 0)
+            ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1,
+                ImGui::GetColorU32(ImVec4(0.0f, 0.3f, 0.15f, 0.08f)));
+        else
+            ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1,
+                ImGui::GetColorU32(ImVec4(0.3f, 0.0f, 0.05f, 0.08f)));
+
+        ImGui::TableNextColumn();
+        if (p.closed_ms > 0) {
+            char time_str[24]{};
+            DisplayTimeZone::instance().format(p.closed_ms,
+                TimeZoneFormat::MonthDayTime, time_str, sizeof(time_str));
+            ImGui::Text("%s", time_str);
+        }
+        ImGui::TableNextColumn();
+        ImGui::Text("%s", upper_copy(p.symbol).c_str());
+        ImGui::TableNextColumn();
+        ImGui::TextColored(p.is_long() ? Theme::Colors::BUY_GREEN
+                                       : Theme::Colors::SELL_RED,
+                           "%s", p.is_long() ? "LONG" : "SHORT");
+        ImGui::TableNextColumn();
+        ImGui::TextColored(Theme::Colors::TEXT_SECONDARY, "%s", p.source.c_str());
+
+        const PriceFormatter fmt = reg.get_formatter(p.exchange, p.symbol);
+        ImGui::TableNextColumn();
+        ImGui::Text(fmt.price_fmt, p.entry);
+        ImGui::TableNextColumn();
+        ImGui::Text(fmt.price_fmt, p.mark);   // mark holds the exit price once closed
+        ImGui::TableNextColumn();
+        ImVec4 c = p.realized >= 0 ? Theme::Colors::BUY_GREEN : Theme::Colors::SELL_RED;
+        ImGui::TextColored(c, "$%.2f", p.realized);
+        if (p.tp1_hit || p.tp2_hit) {
+            ImGui::SameLine();
+            ImGui::TextColored(Theme::Colors::TEXT_SECONDARY,
+                               "(%s)", p.tp2_hit ? "TP1+TP2" : "TP1");
+        }
+        ImGui::TableNextColumn();
+        ImGui::TextColored(c, "%.2fR", p.r_multiple);
+        ImGui::TableNextColumn();
+        ImGui::Text("%s", p.exit_reason.c_str());
+        ImGui::TableNextColumn();
+        char dur_buf[32];
+        format_duration((p.closed_ms - p.opened_ms) / 1000, dur_buf, sizeof(dur_buf));
+        ImGui::Text("%s", dur_buf);
+    }
+    ImGui::EndTable();
+    ImGui::Spacing();
+}
+
+void PositionsPanel::render_local_daily(const LocalPaperEngine& eng) {
+    const auto& trades = eng.closed();
+    if (trades.empty()) return;
+
+    auto rows = eng.daily_stats();
+    std::sort(rows.begin(), rows.end(),
+              [](const LocalPaperEngine::DailyRow& a,
+                 const LocalPaperEngine::DailyRow& b) { return a.day < b.day; });
+
+    ImGui::Spacing();
+    ImGui::TextColored(Theme::Colors::TEXT_SECONDARY, "Daily P&L (local)");
+
+    const ImGuiTableFlags flags =
+        ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
+        ImGuiTableFlags_SizingStretchProp;
+    if (!ImGui::BeginTable("##local_daily", 4, flags)) return;
+    ImGui::TableSetupColumn("Day",       ImGuiTableColumnFlags_NoSort, 0.0f, 0);
+    ImGui::TableSetupColumn("Trades",    ImGuiTableColumnFlags_NoSort, 0.0f, 1);
+    ImGui::TableSetupColumn("Win rate",  ImGuiTableColumnFlags_NoSort, 0.0f, 2);
+    ImGui::TableSetupColumn("P&L",       ImGuiTableColumnFlags_NoSort, 0.0f, 3);
+    ImGui::TableHeadersRow();
+
+    // Today's day string for the highlight (display time zone).
+    char today[16]{};
+    const int64_t now_ms = local_wall_ms();
+    DisplayTimeZone::instance().format(now_ms, TimeZoneFormat::DateOnly,
+                                       today, sizeof(today));
+
+    for (const auto& r : rows) {
+        ImGui::TableNextRow();
+        const bool is_today = r.day == today;
+        if (is_today)
+            ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1,
+                ImGui::GetColorU32(ImVec4(0.25f, 0.35f, 0.10f, 0.15f)));
+        ImGui::TableNextColumn();
+        ImGui::Text("%s%s", r.day.c_str(), is_today ? "  <- today" : "");
+        ImGui::TableNextColumn();
+        ImGui::Text("%d", r.trades);
+        ImGui::TableNextColumn();
+        const double wr = r.trades > 0 ? 100.0 * r.wins / r.trades : 0.0;
+        ImGui::TextColored(wr >= 50.0 ? Theme::Colors::BUY_GREEN
+                                      : Theme::Colors::SELL_RED,
+                           "%.0f%%", wr);
+        ImGui::TableNextColumn();
+        ImGui::TextColored(r.pnl >= 0 ? Theme::Colors::BUY_GREEN
+                                      : Theme::Colors::SELL_RED,
+                           "$%.2f", r.pnl);
+    }
+    ImGui::EndTable();
+    ImGui::Spacing();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Main render - tab bar with all sections
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -620,16 +911,20 @@ void PositionsPanel::render() {
         return;
     }
 
-    // Account summary bar always visible
-    auto& mgr = ctx_.paper_trading_mgr();
-    const auto& acct = mgr.account();
-
-    // Calculate total open P&L
-    double open_pnl = 0.0;
-    for (const auto& [id, pos] : mgr.positions()) {
-        open_pnl += pos.unrealized_pnl;
+    // Account summary bar always visible. When the local paper engine has
+    // state it REPLACES the server bar (the hosted STREAM_PAPER_TRADING
+    // backend does not exist behind the self-hosted gateway - all zeros).
+    if (ctx_.local_paper && !ctx_.local_paper->empty()) {
+        render_local_summary(*ctx_.local_paper);
+    } else {
+        auto& mgr = ctx_.paper_trading_mgr();
+        const auto& acct = mgr.account();
+        double open_pnl = 0.0;
+        for (const auto& [id, pos] : mgr.positions()) {
+            open_pnl += pos.unrealized_pnl;
+        }
+        render_account_summary(acct, open_pnl);
     }
-    render_account_summary(acct, open_pnl);
 
     ImGui::Spacing();
 

@@ -349,6 +349,12 @@ public:
     bool   drawing_alerts_enabled_ = true;
     double drawing_alert_last_price_ = 0.0;  // last live price seen (crossing edge)
 
+    // Phase 5: local paper engine + webhook bridge (settings persist in the
+    // workspace; the engine itself lives in AppContext, shared across charts).
+    bool   paper_on_alerts_ = false;      // auto-open a local paper order on alert crossings
+    double paper_auto_stop_pct_ = 1.0;    // stop distance %% for alert-triggered orders
+    void   maybe_paper_on_alert(bool long_side, double price, const char* source);
+
     struct DateBoundary {
         double timestamp;
         bool show_date;

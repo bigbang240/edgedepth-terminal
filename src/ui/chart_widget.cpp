@@ -28,6 +28,9 @@
 #include "core/liqmap2_scorecard.h"
 #include "ui/realtime_navigation.h"
 #include "core/drawing_manager.h"
+#include "core/local_paper_engine.h"
+#include "core/position_sizing.h"
+#include "core/execution_bridge.h"
 #include "ui/price_profile_renderer.h"
 #include "ui/custom_implot.h"
 #include "core/footprint_manager.h"
@@ -584,6 +587,32 @@ static void alert_notify_beep(const char* msg, double freq) {
 static void alert_notify_beep(const char*, double) {}
 #endif
 
+// Phase 5: auto-open a local paper position on an alert crossing (price alert
+// or drawn-line crossing). Entry at the trigger price, stop = stop%% away,
+// TP1 = 1R / TP2 = 2R, quantity risk-based from position_sizing. Rejections
+// (cooldown, duplicate, sizing) fail silently - the toast only reports opens.
+void ChartWidget::maybe_paper_on_alert(bool long_side, double price,
+                                       const char* source) {
+    auto* eng = ctx_.local_paper;
+    if (!eng || !(price > 0.0)) return;
+    const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    const bool ok = eng->open(pair_.exchange.c_str(), pair_.symbol.c_str(),
+                              long_side, price,
+                              std::clamp(paper_auto_stop_pct_, 0.05, 20.0),
+                              source, now) != nullptr;
+    if (!ok) return;
+    char pbuf[32];
+    fmt_.format_price(pbuf, sizeof(pbuf), price);
+    std::string sym = pair_.symbol;
+    for (char& c : sym) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 32);
+    alert_toast_msg_ = std::string("Paper ") + (long_side ? "long" : "short") +
+                       " opened at " + pbuf;
+    alert_toast_until_ = ImGui::GetTime() + 5.0;
+    alert_notify_beep(alert_toast_msg_.c_str(), 600);
+    eng->tick(now);
+}
+
 void ChartWidget::update() {
     ProfileScope _ps("ChartUpd");
     time_link_adopt_timeframe();
@@ -701,6 +730,12 @@ void ChartWidget::update() {
                     alert_toast_msg_ = sym + " crossed " + pbuf;
                     alert_toast_until_ = ImGui::GetTime() + 6.0;
                     alert_notify_beep(alert_toast_msg_.c_str(), 880);
+                    if (paper_on_alerts_)
+                        maybe_paper_on_alert(a.arm_above, px, "alert");
+                    if (exec_bridge::settings().enabled)
+                        exec_bridge::notify("alert", pair_.exchange.c_str(),
+                            pair_.symbol.c_str(), a.arm_above ? "long" : "short",
+                            px, alert_toast_msg_.c_str());
                     alerts_.erase(alerts_.begin() + static_cast<long>(i));
                 } else {
                     ++i;
@@ -727,11 +762,19 @@ void ChartWidget::update() {
             else if (rt_quote_.best_bid > 0.0 && rt_quote_.best_ask > 0.0)
                 px = 0.5 * (rt_quote_.best_bid + rt_quote_.best_ask);
         }
+        const int64_t now_ms = rt_mode_ ? rt_clock_ms_
+            : std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+        // Phase 5: mark-to-market feed for the local paper engine - this chart's
+        // price path (RT tick / quote mid / candle close) drives every open
+        // position on this symbol, including stop/TP/trail exits.
+        if (px > 0.0 && ctx_.local_paper) {
+            ctx_.local_paper->on_price(pair_.exchange.c_str(), pair_.symbol.c_str(),
+                                       px, now_ms);
+            ctx_.local_paper->tick(now_ms);   // 1s persistence debounce
+        }
         if (drawing_alerts_enabled_ && px > 0.0 && drawing_alert_last_price_ > 0.0 &&
             !ctx_.drawing_mgr().hidden_all()) {
-            const int64_t now_ms = rt_mode_ ? rt_clock_ms_
-                : std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::system_clock::now().time_since_epoch()).count();
             const double before = drawing_alert_last_price_;
             for (const auto& d : ctx_.drawing_mgr().items()) {
                 if (d.hidden || d.anchors.empty()) continue;
@@ -765,6 +808,12 @@ void ChartWidget::update() {
                     alert_toast_msg_ += pbuf;
                     alert_toast_until_ = ImGui::GetTime() + 6.0;
                     alert_notify_beep(alert_toast_msg_.c_str(), 740);
+                    if (paper_on_alerts_)
+                        maybe_paper_on_alert(now_gap > 0.0, px, "drawing");
+                    if (exec_bridge::settings().enabled)
+                        exec_bridge::notify("alert", pair_.exchange.c_str(),
+                            pair_.symbol.c_str(), now_gap > 0.0 ? "long" : "short",
+                            px, alert_toast_msg_.c_str());
                 }
             }
         }

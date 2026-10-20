@@ -1,5 +1,7 @@
 #include "ui/chart_widget.h"
 #include "core/ui_test_marks.h"
+#include "core/position_sizing.h"
+#include "core/execution_bridge.h"
 #include "ui/drawing/drawing_icons.h"
 #include "core/candle_bubble_display.h"
 #include "ui/realtime_navigation.h"
@@ -15,6 +17,7 @@
 #include "core/education_boot.h"
 #include "ui/upsell_modal.h"
 #include "rendering/theme.h"
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <emscripten.h>
@@ -291,6 +294,42 @@ void ChartWidget::render_realtime_settings() {
     if (Theme::menu_toggle("Drawing alerts", drawing_alerts_enabled_)) drawing_alerts_enabled_ = !drawing_alerts_enabled_;
     if (ImGui::IsItemHovered())
         Theme::tooltip("Notify when the price crosses a drawn line: horizontal lines and rays fire at\ntheir level, trendlines and rays project to the current time. The line stays armed.");
+
+    // ── Phase 5: execution & risk ──────────────────────────────────────────
+    Theme::menu_separator();
+    ImGui::TextDisabled("Execution");
+    if (Theme::menu_toggle("Paper on alerts", paper_on_alerts_)) paper_on_alerts_ = !paper_on_alerts_;
+    if (ImGui::IsItemHovered())
+        Theme::tooltip("Open a local paper position whenever a price or drawing alert fires.\nEntry at the alert price, stop at the % below, TP1 = 1R, TP2 = 2R, then a\ntrailing runner. Quantity is risk-based (account x risk% / stop distance).\nSee the Paper Trading widget for the open positions and daily stats.");
+    {
+        auto& ps = position_sizing::settings();
+        ImGui::SetNextItemWidth(170.0f);
+        if (ImGui::InputDouble("Account ($)", &ps.account_usd, 1000.0, 5000.0, "$%.0f"))
+            position_sizing::clamp_settings(ps);
+        if (ImGui::IsItemHovered()) Theme::tooltip("Account equity used by the size calculator on position drawings\nand by the alert paper orders.");
+        ImGui::SetNextItemWidth(170.0f);
+        if (ImGui::InputDouble("Risk per trade (%)", &ps.risk_pct, 0.1, 0.5, "%.2f%%"))
+            position_sizing::clamp_settings(ps);
+        if (ImGui::IsItemHovered()) Theme::tooltip("Risk per trade as a percentage of the account.");
+    }
+    if (paper_on_alerts_) {
+        ImGui::SetNextItemWidth(170.0f);
+        if (ImGui::InputDouble("Paper stop (%)", &paper_auto_stop_pct_, 0.1, 0.5, "%.2f%%"))
+            paper_auto_stop_pct_ = std::clamp(paper_auto_stop_pct_, 0.05, 20.0);
+    }
+    {
+        auto& wb = exec_bridge::settings();
+        if (Theme::menu_toggle("Webhook bridge", wb.enabled)) wb.enabled = !wb.enabled;
+        if (ImGui::IsItemHovered())
+            Theme::tooltip("POST a JSON message to your own bot for every alert\n(and paper opens/closes when enabled below). The target must\nallow CORS from this origin - self-hosted users point it at\ntheir own box or a proxy.");
+        if (wb.enabled) {
+            ImGui::SetNextItemWidth(170.0f);
+            ImGui::InputText("##webhook_url", wb.url, sizeof(wb.url));
+            if (ImGui::IsItemHovered()) Theme::tooltip("Webhook endpoint URL, e.g. http://your-box:8080/edgedepth");
+            if (Theme::menu_toggle("Include paper fills", wb.paper_fills)) wb.paper_fills = !wb.paper_fills;
+            ImGui::TextDisabled("last: %s", exec_bridge::last_status().c_str());
+        }
+    }
 
     if (!rt_archive_) return;
     const auto& a = *rt_archive_;

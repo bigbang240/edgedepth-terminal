@@ -2,6 +2,7 @@
 
 #include "core/app_context.h"
 #include "core/drawing_manager.h"
+#include "core/position_sizing.h"
 #include "education/chart_projection.h"
 #include "rendering/layout.h"
 #include "rendering/theme.h"
@@ -232,6 +233,21 @@ void render_style_editor(const AppContext& ctx) {
                     mgr.end_modify(d->id);
                 }
             }
+            ImGui::PopFont();
+        } else if (d->tool == Tool::LongPosition || d->tool == Tool::ShortPosition) {
+            // Phase 5: risk-based size calculator settings (globals; shared
+            // with the RT menu Execution group and the paper engine).
+            ImGui::PushFont(Theme::Fonts::mono_sm());
+            auto& ps = position_sizing::settings();
+            ImGui::SetNextItemWidth(120.0f);
+            if (ImGui::InputDouble("Account $##se_pos", &ps.account_usd, 1000.0, 5000.0, "%.0f"))
+                position_sizing::clamp_settings(ps);
+            ImGui::SetNextItemWidth(80.0f);
+            if (ImGui::InputDouble("Risk %##se_pos", &ps.risk_pct, 0.1, 0.5, "%.2f"))
+                position_sizing::clamp_settings(ps);
+            ImGui::Checkbox("Show size##se_pos", &ps.show_on_chart);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Draw the size line (qty / notional / $ risk) on the chip\nabove this position tool. Settings are global and shared\nwith the alert paper orders.");
             ImGui::PopFont();
         } else if (d->tool == Tool::Text) {
             ImGui::PushFont(Theme::Fonts::mono_sm());
