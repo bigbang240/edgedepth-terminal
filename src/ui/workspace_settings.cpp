@@ -130,6 +130,7 @@ Json ChartWidget::save_settings() const {
     j["cascade_alerts"] = cascade_alerts_enabled_;
     j["rt_candle_seconds"] = rt_candle_seconds_;
     j["rt_liq_levels"] = rt_liq_levels_enabled_;
+    j["rt_cum_depth"] = rt_cum_depth_enabled_;
     j["rt_walls_table"] = rt_walls_table_enabled_;
     j["liq_alerts"] = liq_alerts_enabled_;
     j["liq_alert_usd"] = liq_alert_usd_;
@@ -291,6 +292,7 @@ void ChartWidget::load_settings(const Json& j) {
     workspace::read(j, "cascade_alerts", cascade_alerts_enabled_);
     workspace::read(j, "rt_candle_seconds", rt_candle_seconds_, 1, 300);
     workspace::read(j, "rt_liq_levels", rt_liq_levels_enabled_);   // absent in older saves: keeps the default (on)
+    workspace::read(j, "rt_cum_depth", rt_cum_depth_enabled_);     // absent in older saves: keeps the default (off)
     workspace::read(j, "rt_walls_table", rt_walls_table_enabled_); // absent in older saves: keeps the default (off)
     workspace::read(j, "liq_alerts", liq_alerts_enabled_);
     workspace::read(j, "liq_alert_usd", liq_alert_usd_, 10000.0, 100000000.0);

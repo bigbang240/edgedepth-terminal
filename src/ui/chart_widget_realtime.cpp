@@ -318,6 +318,9 @@ void ChartWidget::on_rewind(int64_t) {
     // [SELF-HOST P1] peak-hold ghosts belong to the discarded traversal too.
     rt_peak_levels_.clear();
     rt_peak_pruned_at_ms_ = 0;
+    // [Phase 2 S5] the resting-depth accumulator belongs to it as well.
+    rt_cum_levels_.clear();
+    rt_cum_pruned_at_ms_ = 0;
     reset_realtime_extras();
     // Candle-mode large prints belong to the traversal being discarded too.
     candle_bubble_history_.reset();
@@ -388,6 +391,26 @@ void ChartWidget::update_realtime() {
                 for (auto it = rt_peak_levels_.begin(); it != rt_peak_levels_.end();)
                     it = it->second.second < cutoff ? rt_peak_levels_.erase(it) : std::next(it);
                 rt_peak_pruned_at_ms_ = clock;
+            }
+        }
+        // ── [Phase 2 S5] Cumulative resting-depth accumulation ────────────
+        // An exponential average of the size each level holds (≈10-minute
+        // memory): depth that sits - shelves, walls - keeps its value while
+        // flicker fades. Always accumulated; the decay of levels absent from
+        // a sample happens lazily at draw time from the last-seen stamp.
+        if (tick_size_ > 0) {
+            for (const auto& level : sample->levels) {
+                const int64_t key = std::llround(level.price / tick_size_);
+                auto& entry = rt_cum_levels_[key];
+                const double dt = std::clamp(double(sample->timestamp_ms - entry.second), 1.0, 5000.0);
+                entry.first += (float(level.size) - entry.first) * float(1.0 - std::exp(-dt / kCumTauMs));
+                entry.second = sample->timestamp_ms;
+            }
+            if (clock - rt_cum_pruned_at_ms_ > 5000) {
+                const int64_t cutoff = clock - kCumRetentionMs;
+                for (auto it = rt_cum_levels_.begin(); it != rt_cum_levels_.end();)
+                    it = it->second.second < cutoff ? rt_cum_levels_.erase(it) : std::next(it);
+                rt_cum_pruned_at_ms_ = clock;
             }
         }
         if (!rt_history_view_ || realtime_live_edge()) rt_renderer_->finalize_column(sample->timestamp_ms, rt_prices_, sample->segment_start, (sample->bid + sample->ask) * 0.5, sample->source_bucket_ticks);
@@ -585,6 +608,9 @@ void ChartWidget::render_realtime() {
             }
         }
     }
+
+    // ── [Phase 2 S5] Cumulative resting depth — the second heat layer ────
+    render_realtime_cum_depth(dl, limits);
 
     // ── [SELF-HOST P1] lightweight state bridge for tooling ─────────────
     // window.__ed_state mirrors the live chart twice a second; the snapshot

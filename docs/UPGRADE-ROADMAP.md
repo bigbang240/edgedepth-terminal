@@ -100,7 +100,7 @@
 - [x] **Cascade detector**: شناسایی زنجیره (۳+ لیکوییدیشن در <۲ ثانیه در یک جهت) + مارکر ویژه + هشدار — باند کهربایی زمان/قیمت + pill «CASCADE» روی هیت‌مپ، toast + Notification + بیپ (`core/cascade_detector.h`)
 - [x] **Alert engine**: آستانهٔ دلاری لیکوییدیشن (تک‌ریکوییدیشن ≥ آستانه، ددوپ ۲s)، هشدار خوردن دیوار (pull ردیابی‌شدهٔ rt_walls) → toast + Notification + بیپ (کاسکید 660Hz / لیکوییدیشن 880Hz / دیوار 520Hz) — S2 (`core/alert_engine.h`)
 - [x] جدول «دیوارهای فعال» (widget جدید): سن، حجم اولیه/حاضر، touch count، فاصلهٔ قیمت — S4 (`render_realtime_walls_table`): پنل همیشه‌نمایان بالا-راست داخل نمودار، sort بر اساس حجم، pip رنگی bid/ask، شمارش تاچ بر پایهٔ ثانیه در `rt_walls::Tracker::count_touches`، toggle «Active walls table» زیر لایهٔ Walls
-- [ ] Heat-map دوم: عمق انباشته در زمان (cumulative resting depth) به‌صورت لایهٔ اختیاری
+- [x] Heat-map دوم: عمق انباشته در زمان (cumulative resting depth) به‌صورت لایهٔ اختیاری — S5 (`render_realtime_cum_depth`): میانگین نمایی اندازهٔ هر سطح قیمت با حافظهٔ ~۱۰ دقیقه (کاهیدهٔ تنبل هنگام خروج سطح)، ردیف‌های طلایی روی هیت‌مپ برای قفسه/دیوارهای ماندگار، نرمال‌سازی درون دید، tooltip اندازهٔ استراحت، لایهٔ «Resting depth heat» در منوی Layers، ذخیره در workspace، تجمیع همیشگی (آماده هنگام فعال‌سازی)
 
 ### فاز ۳ — «چارت تریدینگ-گرید»
 - [ ] ذخیره/بارگذاری **چیدمان لایه‌ها به‌صورت preset** («اسکالپ»، «سوئینگ»، «تحقیق»)

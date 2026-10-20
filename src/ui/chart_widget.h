@@ -229,6 +229,8 @@ public:
     void render_realtime_liq_levels(ImDrawList* dl, const ImPlotRect& limits);
     // Phase 2 S4: the tracked active walls as an always-visible table.
     void render_realtime_walls_table(ImDrawList* dl);
+    // Phase 2 S5: cumulative resting depth - the second heat layer.
+    void render_realtime_cum_depth(ImDrawList* dl, const ImPlotRect& limits);
 
     float liq_opacity() const { return liq_opacity_; }   // liq-heatmap opacity (Tweaks panel)
     void  set_liq_opacity(float v);                      // set + push to the reconstructor
@@ -456,6 +458,7 @@ private:
     double liq_mark_price_ = 0;           // live mark price (stats stream)
     double liq_oi_contracts_ = 0;         // live open interest in contracts (stats stream)
     bool rt_walls_table_enabled_ = false; // Phase 2 S4: active walls table overlay
+    bool rt_cum_depth_enabled_ = false;   // Phase 2 S5: resting-depth heat layer
     bool liq_alerts_enabled_ = false;     // big single liquidations
     double liq_alert_usd_ = 250000.0;     // alert at/above this notional
     bool wall_alerts_enabled_ = false;    // tracked walls pulled near price
@@ -537,6 +540,16 @@ private:
     bool rt_peak_hold_ = false;
     int  rt_peak_horizon_min_ = 10;   // 5 / 10 / 30
     int64_t rt_peak_pruned_at_ms_ = 0;
+
+    // ── [Phase 2 S5] Cumulative resting depth ─────────────────────────────
+    // Time-weighted resting size per exact price (an exponential average with
+    // ≈10-minute memory, lazily decayed when a level leaves), keyed by the
+    // absolute bucket index like the peak-hold ghosts. Always accumulated:
+    // one map pass per delivered sample, so the layer is warm on toggle.
+    static constexpr double kCumTauMs = 200000.0;             // 200 s ≈ 10-min memory
+    static constexpr int64_t kCumRetentionMs = 20 * 60000;    // prune unseen entries
+    std::unordered_map<int64_t, std::pair<float, int64_t>> rt_cum_levels_;
+    int64_t rt_cum_pruned_at_ms_ = 0;
 
     double rt_usage_emit_s_ = -1;
     int64_t rt_clock_ms_ = 0;

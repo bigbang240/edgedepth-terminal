@@ -743,6 +743,74 @@ void ChartWidget::render_realtime_liq_levels(ImDrawList* dl, const ImPlotRect& l
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Phase 2 S5: cumulative resting depth - the second heat map. One intensity row
+// per price where depth has been resting: brightness follows the time-weighted
+// size the level holds (10-minute memory, lazily decayed once a level leaves),
+// so persistent shelves and walls stand out from flicker. Gold ramp: distinct
+// from the teal main heat, the red/green quotes and the S3 estimate bands.
+// ═══════════════════════════════════════════════════════════════════════════════
+void ChartWidget::render_realtime_cum_depth(ImDrawList* dl, const ImPlotRect& limits) {
+    if (!rt_cum_depth_enabled_ || rt_cum_levels_.empty() || !(tick_size_ > 0) || !rt_mode_) return;
+    ProfileScope profile("RT resting depth");
+    const ImVec2 pos = ImPlot::GetPlotPos(), size = ImPlot::GetPlotSize();
+    if (size.x <= 0 || size.y <= 0) return;
+    // The layer normalizes within the view, like the depth heat itself.
+    double visible_max = 0;
+    for (const auto& entry : rt_cum_levels_) {
+        const double price = double(entry.first) * tick_size_;
+        if (price < limits.Y.Min || price > limits.Y.Max) continue;
+        visible_max = std::max(visible_max,
+            double(entry.second.first) * std::exp(-double(rt_clock_ms_ - entry.second.second) / kCumTauMs));
+    }
+    if (!(visible_max > 0)) return;
+    const double mid = rt_book_valid_ && rt_latest_ ? 0.5 * (rt_latest_->bid + rt_latest_->ask) : 0.0;
+    const float row_h = std::max(1.0f, size.y / 720.0f);
+    int drawn = 0;
+    // Hover: map the mouse straight to the nearest tracked price bucket, so
+    // the readout works at any zoom (rows are sub-pixel when zoomed out).
+    double hover_price = 0, hover_rest = 0;
+    bool hover_bid = false;
+    if (ImPlot::IsPlotHovered()) {
+        const double at = ImPlot::PixelsToPlot(ImGui::GetIO().MousePos).y;
+        const auto it = rt_cum_levels_.find(std::llround(at / tick_size_));
+        if (it != rt_cum_levels_.end()) {
+            const double rested = double(it->second.first) *
+                std::exp(-double(rt_clock_ms_ - it->second.second) / kCumTauMs);
+            if (rested / visible_max >= 0.03) {
+                hover_price = double(it->first) * tick_size_;
+                hover_rest = rested;
+                hover_bid = mid > 0 && hover_price < mid;
+            }
+        }
+    }
+    for (const auto& entry : rt_cum_levels_) {
+        if (drawn > 600) break;
+        const double price = double(entry.first) * tick_size_;
+        if (price < limits.Y.Min || price > limits.Y.Max) continue;
+        const double rested = double(entry.second.first) *
+            std::exp(-double(rt_clock_ms_ - entry.second.second) / kCumTauMs);
+        const float intensity = float(rested / visible_max);
+        if (intensity < 0.03f) continue;
+        const float y = ImPlot::PlotToPixels(0, price + tick_size_ * 0.5).y;
+        dl->AddRectFilled(ImVec2(pos.x, y), ImVec2(pos.x + size.x, y + row_h),
+            ImGui::GetColorU32(ImVec4(0.94f, 0.70f, 0.31f, 0.05f + 0.30f * intensity)));
+        ++drawn;
+    }
+    if (!(hover_price > 0)) return;
+    ImGui::PushFont(Theme::Fonts::mono_sm());
+    char price[48], amount[24];
+    fmt_.format_price(price, sizeof(price), hover_price);
+    format_base(hover_rest, amount, sizeof(amount));
+    ImGui::PopFont();
+    Theme::begin_tooltip();
+    ImGui::TextUnformatted("Resting depth (cumulative)");
+    ImGui::Text("%s · %s %s resting on average over the last minutes",
+        price, amount, hover_bid ? "bid" : "ask");
+    ImGui::TextUnformatted("Time-weighted from the delivered book samples; flicker fades,\norders that sit keep glowing.");
+    Theme::end_tooltip();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Phase 2 S4: the tracked active walls as an always-visible compact table,
 // top-right inside the plot. Hand-drawn over the clip exactly like the status
 // chip - no layout change, no input grab; the per-wall interactivity stays

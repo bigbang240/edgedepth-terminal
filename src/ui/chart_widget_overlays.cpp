@@ -377,6 +377,9 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
             if (layer_row("Est. liquidations", rt_liq_levels_enabled_, false)) rt_liq_levels_enabled_ = !rt_liq_levels_enabled_;
             if (ImGui::IsItemHovered())
                 Theme::tooltip("Estimated liquidation clusters: open interest split over leverage tiers\nusing the recent tape. Red bands are forced sells (longs), green forced buys (shorts).\nAn estimate, not real orders.");
+            if (layer_row("Resting depth heat", rt_cum_depth_enabled_, false)) rt_cum_depth_enabled_ = !rt_cum_depth_enabled_;
+            if (ImGui::IsItemHovered())
+                Theme::tooltip("A second heat map: time-weighted resting depth per price (10-minute\nmemory). Gold rows are prices where orders have been sitting - shelves and\nwalls stand out from flicker. Hover a row for its size.");
             layer_section("ORDER BOOK SIGNALS");
             render_refill_layer_row();
             render_realtime_wall_layer();
