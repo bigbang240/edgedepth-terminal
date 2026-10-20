@@ -140,6 +140,7 @@ Json ChartWidget::save_settings() const {
     j["wall_alerts"] = wall_alerts_enabled_;
     j["rt_extend_depth"] = rt_extend_depth_;
     j["rt_bridge_gaps"] = rt_bridge_gaps_;
+    j["link_charts"] = link_charts_enabled();   // global link-group toggle, same value from every chart
     j["rt_depth"] = rt_depth_enabled_;
     j["liquidity_response"] = liquidity_response_enabled_;
     j["rt_refill"] = rt_refill_enabled_;
@@ -305,6 +306,11 @@ void ChartWidget::load_settings(const Json& j) {
     workspace::read(j, "wall_alerts", wall_alerts_enabled_);
     workspace::read(j, "rt_extend_depth", rt_extend_depth_);
     workspace::read(j, "rt_bridge_gaps", rt_bridge_gaps_);
+    {
+        bool link = link_charts_enabled();
+        workspace::read(j, "link_charts", link);  // absent in older saves: keeps the current global
+        set_link_charts_enabled(link);
+    }
     workspace::read(j, "rt_depth", rt_depth_enabled_);
     workspace::read(j, "liquidity_response", liquidity_response_enabled_);
     workspace::read(j, "rt_refill", rt_refill_enabled_);  // absent in older saves: keeps the default (on)

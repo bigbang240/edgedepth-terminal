@@ -82,7 +82,19 @@ EM_JS(void, edrl_fetch_begin, (const char* url_ptr, int force), {
             !Array.isArray(parsed.packs)) {
             throw new Error('Unsupported replay-library manifest');
         }
-        return text;
+        // Self-hosted catalogs (the recorder daemon's manifest, a NAS, a LAN
+        // box) may ship host-agnostic RELATIVE pack URLs ("/packs/x.edpack"),
+        // which the C++ side rejects by design (is_http_url). Resolve them
+        // against this manifest's URL so every pack_url the widget sees is a
+        // plain absolute http(s) URL. Absolute entries pass through untouched.
+        var base = requestUrl ? requestUrl.href : window.location.href;
+        for (var i = 0; i < parsed.packs.length; i++) {
+            var p = parsed.packs[i];
+            if (p && typeof p.pack_url === 'string' && p.pack_url.charAt(0) === '/') {
+                try { p.pack_url = new URL(p.pack_url, base).href; } catch (_) {}
+            }
+        }
+        return JSON.stringify(parsed);
     };
 
     var cacheKey = 'edgedepth.replay_library.v1:' + url;

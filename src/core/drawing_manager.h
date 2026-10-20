@@ -68,6 +68,26 @@ public:
     // Style applied to newly placed drawings (mutated by the style editor).
     drawing::Style& default_style() { return default_style_; }
 
+    // ── Drawing templates (Phase 3) ─────────────────────────────────────────
+    // Named snapshots of a chart's drawings ("personal support levels"), kept
+    // GLOBALLY in localStorage (not per symbol) so any chart can re-place
+    // them. Anchor times are stored as offsets from the template's earliest
+    // anchor, so applying re-bases the set to the current time (a trendline
+    // ends "now"); prices stay absolute. Other windows see template edits on
+    // their next reload.
+    struct DrawingTemplate {
+        std::string                   name;
+        std::vector<drawing::Drawing> items;
+    };
+    [[nodiscard]] const std::vector<DrawingTemplate>& templates();
+    // Captures the current symbol's drawings under `name` (upsert). Returns
+    // false when there is nothing to save or the name is blank.
+    bool save_template(const std::string& name);
+    // Re-places a template on the current symbol: fresh ids, anchors re-based
+    // to end at "now". Returns the number of drawings added.
+    int  apply_template(const std::string& name);
+    bool delete_template(const std::string& name);
+
     // ── Esc arbitration ──────────────────────────────────────────────────────
     // The layer stamps the frame when Esc cancels a placement/selection so
     // main.cpp can skip the replay Esc handler the same frame (widgets render
@@ -154,4 +174,12 @@ public:
     // mutation site has to stamp anything, and an id present here but gone
     // from items_ is a deletion this window made.
     std::unordered_map<uint64_t, std::string> last_flushed_;
+
+    // Drawing templates (see the public block above). Mutable: loaded lazily
+    // on first access from a read-only store. Parsing/serialization live in
+    // the .cpp (nlohmann + the localStorage bridge stay out of this header).
+    void        load_templates() const;
+    void        store_templates() const;
+    mutable std::vector<DrawingTemplate> templates_;
+    mutable bool templates_loaded_ = false;
 };

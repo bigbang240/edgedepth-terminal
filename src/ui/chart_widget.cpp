@@ -235,10 +235,23 @@ static Terminal::Pair hl_census_pair_for(const Terminal::Pair& pair) {
 // (closed, hidden tab) drops out of the group without a teardown hook.
 namespace {
 struct TimeLink {
+    bool   enabled = false;    // user toggle ("Link charts", workspace link_charts)
+    // Candle-family owner: candle charts sync their full axis verbatim (or
+    // just the follow latch when the owner follows live, both landing on the
+    // same clock at the same timeframe).
     int    owner = 0;            // link_id_ of the chart that last drove the axis
     int    owner_frame = -1;
     double x_min = 0.0, x_max = 0.0;
     bool   follow = true;        // the owner's follow-live latch
+    // Real-time family owner: RT charts follow the live edge from the shared
+    // wall clock, so they sync the owner's zoom SPAN while live (each chart
+    // keeps its own right edge, honouring a paused view) and the full axis
+    // verbatim once the owner is scrolled back into history. The families
+    // never take each other's ranges; the crosshair mirror crosses both.
+    int    rt_owner = 0;
+    int    rt_owner_frame = -1;
+    double rt_x_min = 0.0, rt_x_max = 0.0;
+    bool   rt_follow = true;
     int    hover_owner = 0;      // link_id_ of the chart under the mouse
     int    hover_frame = -1;
     double hover_x = 0.0;
@@ -249,6 +262,10 @@ struct TimeLink {
 };
 TimeLink g_time_link;
 }  // namespace
+
+bool ChartWidget::link_charts_enabled() { return g_time_link.enabled; }
+void ChartWidget::set_link_charts_enabled(bool on) { g_time_link.enabled = on; }
+bool ChartWidget::link_active() const { return time_linked_ || g_time_link.enabled; }
 
 CandleManager& ChartWidget::candles() const {
     if (owned_candles_) return *owned_candles_;
@@ -906,7 +923,7 @@ void ChartWidget::change_timeframe(const int new_tf_seconds)
         ctx_.replay_mgr().set_timeframe_ms(static_cast<int64_t>(new_tf_seconds) * 1000);
     }
     // Linked charts read one time axis, so they read one timeframe too.
-    if (time_linked_) {
+    if (link_active() && !rt_mode_) {
         g_time_link.tf_seconds = new_tf_seconds;
         g_time_link.tf_frame = ImGui::GetFrameCount();
         g_time_link.tf_owner = link_id_;
@@ -2062,8 +2079,10 @@ void ChartWidget::render_chart() {
         x_axis_min_ = last_visible_range_.X.Min;
         x_axis_max_ = last_visible_range_.X.Max;
         // Linked charts: mirror the other chart's crosshair time, and publish
-        // this chart's axis + hover for the rest of the group.
-        if (time_linked_ && !rt_mode_ && chart_type_ != ChartType::TPO) {
+        // this chart's axis + hover for the rest of the group. Works for the
+        // compare link and the user "Link charts" toggle, in both real-time
+        // and candle mode (TPO has its own axis semantics and stays out).
+        if (link_active() && chart_type_ != ChartType::TPO) {
             time_link_draw_mirror();
             time_link_publish();
         }
@@ -2085,9 +2104,30 @@ void ChartWidget::render_chart() {
 // last owner keeps publishing, so a follower keeps tracking it. Ownership
 // is a frame stamp: an owner that stopped rendering releases the group.
 void ChartWidget::time_link_apply(double& x_min, double& x_max, bool& force_always) {
-    if (!time_linked_ || rt_mode_ || chart_type_ == ChartType::TPO) return;
+    if (!link_active() || chart_type_ == ChartType::TPO) return;
     const int frame = ImGui::GetFrameCount();
     const TimeLink& l = g_time_link;
+    if (rt_mode_) {
+        if (l.rt_owner == 0 || l.rt_owner == link_id_ || l.rt_owner_frame < frame - 2) return;
+        const double span = l.rt_x_max - l.rt_x_min;
+        if (l.rt_follow) {
+            // Both ride the same wall clock: match the owner's zoom span and
+            // let each chart keep its own right edge (a paused view stays put).
+            if (span > 0) rt_span_ms_ = std::clamp(span, 5000.0, 1800000.0 / 0.88);
+            if (!candles().follow_live()) candles().set_follow_live(true);
+            return;
+        }
+        // Owner is parked in history: take its axis verbatim, like candles.
+        if (candles().follow_live()) candles().set_follow_live(false);
+        if (span > 0) {
+            x_min = l.rt_x_min;
+            x_max = l.rt_x_max;
+            last_visible_range_.X.Min = l.rt_x_min;
+            last_visible_range_.X.Max = l.rt_x_max;
+            force_always = true;
+        }
+        return;
+    }
     if (l.owner == 0 || l.owner == link_id_ || l.owner_frame < frame - 2) return;
     if (l.follow) {
         // Both follow the same clock at the same timeframe: the chart's own
@@ -2106,18 +2146,31 @@ void ChartWidget::time_link_apply(double& x_min, double& x_max, bool& force_alwa
 }
 
 // Owner side, after the plot: the hovered chart takes ownership; the current
-// owner re-stamps every frame it renders so followers keep tracking.
+// owner re-stamps every frame it renders so followers keep tracking. Each
+// family (candle / real-time) keeps its own owner so a mixed desktop syncs
+// within both without either stealing the other's axis.
 void ChartWidget::time_link_publish() {
     const int frame = ImGui::GetFrameCount();
     TimeLink& l = g_time_link;
     const bool hovered = ImPlot::IsPlotHovered() || ImPlot::IsAxisHovered(ImAxis_X1);
-    const bool owner_gone = l.owner == 0 || l.owner_frame < frame - 2;
-    if (hovered || owner_gone || l.owner == link_id_) {
-        l.owner = link_id_;
-        l.owner_frame = frame;
-        l.x_min = last_visible_range_.X.Min;
-        l.x_max = last_visible_range_.X.Max;
-        l.follow = candles().follow_live();
+    if (rt_mode_) {
+        const bool owner_gone = l.rt_owner == 0 || l.rt_owner_frame < frame - 2;
+        if (hovered || owner_gone || l.rt_owner == link_id_) {
+            l.rt_owner = link_id_;
+            l.rt_owner_frame = frame;
+            l.rt_x_min = last_visible_range_.X.Min;
+            l.rt_x_max = last_visible_range_.X.Max;
+            l.rt_follow = candles().follow_live();
+        }
+    } else {
+        const bool owner_gone = l.owner == 0 || l.owner_frame < frame - 2;
+        if (hovered || owner_gone || l.owner == link_id_) {
+            l.owner = link_id_;
+            l.owner_frame = frame;
+            l.x_min = last_visible_range_.X.Min;
+            l.x_max = last_visible_range_.X.Max;
+            l.follow = candles().follow_live();
+        }
     }
     if (hovered) {
         l.hover_owner = link_id_;
@@ -2148,7 +2201,7 @@ void ChartWidget::time_link_draw_mirror() {
 
 // Per frame (update): adopt a timeframe another linked chart switched to.
 void ChartWidget::time_link_adopt_timeframe() {
-    if (!time_linked_) return;
+    if (!link_active() || rt_mode_) return;  // RT buckets are per-chart by design
     const TimeLink& l = g_time_link;
     if (l.tf_seconds <= 0 || l.tf_owner == link_id_ || l.tf_frame <= link_tf_seen_frame_) return;
     link_tf_seen_frame_ = l.tf_frame;

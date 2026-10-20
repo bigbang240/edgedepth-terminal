@@ -105,12 +105,12 @@
 ### فاز ۳ — «چارت تریدینگ-گرید»
 - [x] ذخیره/بارگذاری **چیدمان لایه‌ها به‌صورت preset** («اسکالپ»، «سوئینگ»، «تحقیق») — بخش «LAYER PRESETS» در منوی Layers نمای RT: سه چیدمان یک‌کلیکی (Scalp: کندل توخالی 1s + دیوارها و پول‌ها + CVD + بابل‌ها + هشدارهای سریع / Swing: کندل 1m + برآورد لیکوییدیشن + عمق انباشته، نویز خاموش / Research: همه‌چیز روشن شامل جدول دیوارها و peak-hold) — `apply_layer_preset`، آخرین preset انتخابی در workspace ذخیره می‌شود (`rt_layer_preset`)
 - [x] هشدار متصل به اشکال Draw (عبور قیمت از Trendline/HLine → alert) — هر HLine/HRay به‌صورت سطح افقی و هر خط دو-لنگری (Trendline/Ray/ExtendedLine/Arrow) به‌صورت سطح تصویرشده در زمان حال پایش می‌شود؛ عبور در هر دو جهت → toast + Notification + بیپ 740Hz (helper مشترک `alert_notify_beep`)؛ سطح مصرف نمی‌شود (برخلاف price alert یک‌بارمصرف) و تا حذف خط مسلح می‌ماند؛ toggle «Drawing alerts» در گروه Alerts منوی RT، ذخیره در workspace (`drawing_alerts`)؛ در هر دو حالت RT (آخرین قیمت معامله/میانگین quote) و کندلی (last close) کار می‌کند
-- [ ] چند-چارت sync (کراس‌هیر و زوم هماهنگ بین نمادها)
-- [ ] نام‌گذاری و ذخیرهٔ الگوهای رسم (template lines: سطوح حمایت شخصی)
+- [x] چند-چارت sync (کراس‌هیر و زوم هماهنگ بین نمادها) — تاگل «Link charts» در منوی RT (کنار Side panels): همهٔ چارت‌های باز (هر نماد، لایو/ریپلی) یک گروه می‌شوند؛ کراس‌هیر به‌صورت خط‌چین عمودی روی بقیه چارت‌ها آینه می‌شود. دو خانوادهٔ مستقل: چارت‌های RT zoom span مالک را همگام می‌کنند (لبهٔ راست هر چارت از ساعت خودش، view مکث‌شده جابه‌جا نمی‌شود) و چارت‌های کندلی محور کامل را؛ mirror کراس‌هیر بین هر دو خانواده کار می‌کند. فریم-استمپ مالکیت (hover = مالک)، میراث لینک compare هم حفظ شد — ذخیره در workspace (`link_charts`)
+- [x] نام‌گذاری و ذخیرهٔ الگوهای رسم (template lines: سطوح حمایت شخصی) — بخش «TEMPLATES» در منوی Draw: نام + دکمهٔ Save = ذخیرهٔ همهٔ رسم‌های نماد فعلی؛ کلیک روی هر الگو = جای‌گذاری روی چارت فعلی (id تازه، زمان‌ها به "الان" re-base می‌شوند، قیمت‌ها مطلق می‌مانند)، راست-کلیک = حذف. فروشگاه سراسری در localStorage (`edgedepth.drawtemplates.v1`، تا ۶۴ الگو) — بین نمادها و نمادهای دیگر مشترک
 - [x] گزینهٔ Heikin-Ashi روی RT (فعلاً فقط کندل/خط در RT) — toggle «Heikin-Ashi» زیر «1s candles» در Layers: تبدیل HA روی باکت‌های RT (open = میانهٔ HA قبلی، close = OHLC4 خام؛ باکت درحال‌شکل‌گیری هم همین‌طور) — دقیقاً هم‌فرمول سری تاریخی HA؛ با hollow candles و ذخیرهٔ workspace (`rt_heikin`) سازگار است
 
 ### فاز ۴ — «ضبط و درک»
-- [ ] **Recorder daemon**: سرویس Node که ۲۴/۷ همهٔ نمادهای watchlist را در .edpack ذخیره کند → آرشیو شخصی بی‌نهایت
+- [~] **Recorder daemon**: سرویس Node که ۲۴/۷ همهٔ نمادهای watchlist را در .edpack ذخیره کند → آرشیو شخصی بی‌نهایت — `tools/recorder/` (سرویس bun، پورت ۹۰۰۲): اتصال WS به gateway، اشتراک trades/orderbook/liquidations/candles(1m)، بلاک‌بندی zstd (~۴MiB)، هدر PackHeader با ob_seed (اسنپ‌شات اول) و candle_seeds، اپیزود ساعت‌به‌ساعت + manifest.json با سازگاری replay-library (schema v1)؛ HTTP با پشتیبانی Range/ETag/CORS؛ resolve نسبتی pack_url در ویجت کتابخانه (fetch جاوااسکریپت) تا کاتالوگ شخصی با `?replayLibrary=` باز شود
 - [ ] Event finder: جست‌وجو در آرشیو («همهٔ لحظه‌هایی که cascade>500k$ بود»)
 - [ ] گزارش روزانهٔ خودکار (HTML/PNG از snapshot API فاز ۱)
 

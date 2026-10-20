@@ -2432,10 +2432,24 @@ int main(int, char**) {
 
             // Reset chart widget overlay state so subscriptions are re-established
             // on the replay StreamManager, and stale heatmap data is cleared.
+            // A chart parked in real-time mode also leaves it here: replays are
+            // historical views, and when the replay pair EQUALS the chart's pair
+            // the widget is reused rather than rebuilt, so its live RT latch
+            // would otherwise survive the swap. An RT chart over a replay keeps
+            // the replay's readiness gate unsatisfied (the replay candle context
+            // is never consumed) and the session stalls in Buffering until the
+            // 20s watchdog fires - seen launching a recorder pack for the same
+            // symbol the live RT chart was showing. Candle mode on replay is
+            // what a rebuilt chart would do anyway.
             for (auto& w : g_app.widgets) {
                 if (w && w->type() == WidgetType::Chart) {
                     auto* chart = static_cast<ChartWidget*>(w.get());
                     chart->reset_overlay_subscriptions();
+                    // Standalone only: self-hosted packs are the only replays
+                    // this swap serves there, and none of them carry the live
+                    // RT stream. Hosted research replays keep their RT option.
+                    if (chart->rt_mode() && !Entitlements::hosted())
+                        chart->set_rt_mode(false);
                 }
             }
 

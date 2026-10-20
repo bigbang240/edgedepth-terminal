@@ -174,6 +174,16 @@ public:
     void set_time_linked(bool on) { time_linked_ = on; }
     [[nodiscard]] bool time_linked() const { return time_linked_; }
 
+    // User-facing cross-chart sync (Phase 3): the same shared axis + crosshair
+    // mirror as the compare link, but for ANY open charts - different symbols,
+    // live and replay side by side. Toggled from the RT menu ("Link charts")
+    // and persisted in the workspace. Static because the link group is global;
+    // candle charts and RT charts form two sub-groups that never take each
+    // other's ranges (an RT view follows the live edge, a candle view reads
+    // history), while the crosshair mirror works across both.
+    static bool link_charts_enabled();
+    static void set_link_charts_enabled(bool on);
+
     void render() override;
     void update() override;
 
@@ -381,6 +391,8 @@ private:
     void time_link_publish();
     void time_link_draw_mirror();
     void time_link_adopt_timeframe();
+    // time_linked_ (compare wiring) OR the global "Link charts" toggle.
+    [[nodiscard]] bool link_active() const;
 
     // ─── Chart Identity ──────────────────────────────────────────────────
     // title_ = "Chart <ex> <sym> <tf>###chart_<ex>_<sym>" for the primary. The

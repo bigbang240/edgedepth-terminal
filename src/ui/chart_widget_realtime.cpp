@@ -252,6 +252,9 @@ void ChartWidget::render_realtime_settings() {
     ui_test::mark("rt.ladder");
     if (Theme::menu_toggle("Side panels", rt_show_standalone_)) rt_show_standalone_ = !rt_show_standalone_;
     if (ImGui::IsItemHovered()) Theme::tooltip("Show the separate DOM and trade panels beside this view.");
+    if (Theme::menu_toggle("Link charts", link_charts_enabled())) set_link_charts_enabled(!link_charts_enabled());
+    if (ImGui::IsItemHovered())
+        Theme::tooltip("Sync crosshair and zoom across every open chart, any symbols.\nThe chart under the mouse drives the group; real-time views share\nthe zoom span, candle charts share the full axis.");
     if (rt_candles_) {
         ImGui::TextDisabled("Candle size");
         if (ImGui::IsItemHovered())
