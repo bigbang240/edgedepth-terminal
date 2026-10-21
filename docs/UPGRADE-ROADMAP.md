@@ -121,7 +121,7 @@
 
 ### فاز ۶ — «داده و یکپارچه‌سازی»
 - [ ] REST/WS سرور تحلیلی (gRPC هم شدنی) روی دادهٔ OrderbookManager — ترمینال اصلی شما به‌عنوان consumer
-- [ ] پشتیبانی OKX/DeepCoin در گیت‌وی Go (الگوی Bybit موجود است)
+- [x] **پشتیبانی OKX در گیت‌وی Go** (`internal/okx` — الگوی adapter.go بایننس): کانال‌های books/trades/mark-price/funding-rate/open-interest روی `/ws/v5/public` + liquidation-orders (نیازمند `instType`، همان ریشهٔ public — بدون `/business` درست می‌شود)؛ تبدیل واحد قرارداد→کوین با ctVal در نقطهٔ ورود؛ نرمال‌سازی case-insensitive نماد (deep link حروف کوچک هم روت می‌شود)؛ تیکر سراسری REST-poll هر ۳۰s (OKX پوش همه‌بازار ندارد)؛ کندل تاریخی REST با پشتیبانی 1s و ادامهٔ صفحه‌بندی از history-candles؛ ثبت در `hub.New(log, binance.New(log), okx.New(log))`. سمت ترمینال: venue id «okx» در url_router + watchlist + subscribe تیکر؛ جهانی‌سازی universe خود-سرو (نمادهای venue هایی که API متادیتا ندارد از تیکر خودش ساخته می‌شود) + **tick ضمنی از کتاب زنده** (کمینهٔ گپ اسک‌های snapshot → seed_tick؛ قاعدهٔ «پاسخ API همیشه برنده» حفظ شده)
 - [ ] ذخیرهٔ تاریخی SQLite/Timescale از جریان نرمال‌شده
 
 ### فاز ۷ — «تجربهٔ کاربری فارسی»
