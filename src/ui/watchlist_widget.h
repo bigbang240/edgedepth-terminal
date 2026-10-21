@@ -50,7 +50,7 @@ private:
     std::vector<int> category_counts_;   // pair count per category (aligned to categories_)
     int all_count_ = 0;                  // active-symbol total (the "All" count)
     int scoped_count_ = 0;               // active count after the exchange filter
-    std::array<int, 3> exchange_counts_{}; // Binance Futures, Hyperliquid, Bybit
+    std::array<int, 4> exchange_counts_{}; // Binance Futures, Hyperliquid, Bybit, OKX
     bool categories_loaded_ = false;
 
     // Row extras: starred favourites (in-memory), compact mode, and the

@@ -18,6 +18,7 @@ inline const char* widget_venue_label(const std::string& exchange) {
     if (exchange == "binancef") return "Binance Futures";
     if (exchange == "binance") return "Binance";
     if (exchange == "bybit") return "Bybit";
+    if (exchange == "okx") return "OKX";
     return exchange.c_str();
 }
 

@@ -529,6 +529,17 @@ static void on_ws_status(const std::string& status) {
             0
         };
         g_app.stream_mgr->send_subscribe(ticker24h_bybit_key);
+
+        // OKX 24h ticker - ticker24h.okx.global, REST-polled by the gateway's
+        // OKX adapter (no venue push exists; ~30s cadence). Also the seed of
+        // the OKX watchlist universe: entries for venues the metadata API does
+        // not carry are upserted into SymbolRegistry as they arrive.
+        StreamKey ticker24h_okx_key{
+            Terminal::Pair{"okx", "global"},
+            Terminal::Stream::Ticker24h,
+            0
+        };
+        g_app.stream_mgr->send_subscribe(ticker24h_okx_key);
     }
 }
 
@@ -1294,7 +1305,7 @@ void update_and_render_widgets() {
         draw->PushClipRect(rect.Min, rect.Max, true);
         const auto texture = LogoManager::instance().exchange(pair->exchange);
         if (texture) draw->AddImage(texture, pos, ImVec2(pos.x + size, pos.y + size));
-        else draw_logo_monogram(draw, pair->exchange == "hl" ? "HL" : pair->exchange == "bybit" ? "BY" : "B", pos, size);
+        else draw_logo_monogram(draw, pair->exchange == "hl" ? "HL" : pair->exchange == "bybit" ? "BY" : pair->exchange == "okx" ? "OK" : "B", pos, size);
         draw->PopClipRect();
         if (ImGui::IsMouseHoveringRect(pos, ImVec2(pos.x + size, pos.y + size)))
             Theme::tooltip("%s", widget_venue_label(pair->exchange));

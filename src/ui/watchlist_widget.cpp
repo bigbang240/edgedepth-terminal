@@ -34,6 +34,7 @@ constexpr WatchlistVenue kWatchlistVenues[] = {
     {"binancef", "Binance",     "Binance"},
     {"hl",       "Hyperliquid", "Hyperliquid"},
     {"bybit",    "Bybit",       "Bybit"},
+    {"okx",      "OKX",         "OKX"},
 };
 
 int64_t now_ms() {

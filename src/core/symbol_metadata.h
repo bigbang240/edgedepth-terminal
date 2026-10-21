@@ -158,15 +158,25 @@ public:
 
     // Seed one instrument from a source that is not the metadata API. A pack
     // carries its own tick in the header it already downloads (PackHeader
-    // field 14), which makes a /demo session independent of a 500 KB fetch it
-    // would otherwise be racing. Never overwrites an API entry.
+    // field 14), and a self-serve venue (OKX behind the Go gateway) reveals
+    // its grid from the live book's smallest ask gap. Never overwrites an API
+    // entry — but it DOES fill a known-unknown (tick 0) left by the
+    // self-serve upsert path, because a resolved grid beats no grid.
     void seed_tick(const std::string& exchange, const std::string& symbol, double tick_size) {
         if (tick_size <= 0.0) return;
         const std::string key = make_key(exchange, symbol);
         seeded_.push_back({exchange, symbol, tick_size});
-        if (symbols_.count(key)) return;      // API answer wins
-        apply_seed(seeded_.back());
-        bump_epoch();
+        auto it = symbols_.find(key);
+        if (it == symbols_.end()) {
+            apply_seed(seeded_.back());
+            bump_epoch();
+            return;
+        }
+        if (it->second.tick_size <= 0.0) {
+            it->second.tick_size = tick_size;
+            it->second.fmt = PriceFormatter::from_tick_and_step(tick_size, it->second.step_size);
+            bump_epoch();
+        }
     }
 
     // Bumped on every load (localStorage read, XHR refresh, pack-header seed).

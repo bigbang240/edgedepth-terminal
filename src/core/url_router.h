@@ -181,15 +181,18 @@ inline std::string parse_exchange_query(const std::string& search) {
 // The venues the hub serves, by their exchange id. This is the ONLY list the
 // router consults: a first path segment is a venue iff it is in here, so a
 // symbol can never be mistaken for a venue and a typo'd venue never routes
-// anywhere. Mirrors markets.IsVenue in the Go backend.
+// anywhere. Mirrors markets.IsVenue in the Go backend. "okx" routes deep
+// links like /terminal/okx/BTC-USDT-SWAP at the Go gateway's OKX adapter.
 inline bool is_known_exchange(const std::string& ex) {
-    return ex == "binancef" || ex == "bybit" || ex == "hl";
+    return ex == "binancef" || ex == "bybit" || ex == "hl" || ex == "okx";
 }
 
 // Symbol case is venue dependent: Binance and Bybit product symbols are
 // lowercase end-to-end (the hub lowercases both in normalizePair); Hyperliquid
 // coins keep native case ("BTC", "kPEPE") because their subjects and DB rows
-// do. One helper so boot, the studio symbol and the router agree.
+// do, and OKX instIds keep native case ("BTC-USDT-SWAP") because the gateway
+// whitelists both the canonical and lowercase form and canonicalizes before
+// the feed dials. One helper so boot, the studio symbol and the router agree.
 inline std::string normalize_symbol_case(const std::string& exchange, std::string symbol) {
     if (exchange == "binancef" || exchange == "bybit") {
         std::transform(symbol.begin(), symbol.end(), symbol.begin(),

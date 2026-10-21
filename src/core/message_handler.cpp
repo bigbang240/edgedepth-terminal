@@ -14,11 +14,65 @@
 #include "paper_trading_manager.h"
 #include "ticker_manager.h"
 #include "scanner_manager.h"
+#include "symbol_metadata.h"
 #include "preview_candle_store.h"
 #include <cmath>
+#include <mutex>
+#include <unordered_set>
 
 // ── Static member initialization ────────────────────────────────────────────
 int64_t MessageHandler::last_timestamp_ms = 0;
+
+// ── Implied-tick seeding (self-serve venues) ────────────────────────────────
+// Venues the metadata API does not carry (OKX behind the Go gateway) have no
+// registry tick, and the peak-hold walls / resting-depth buckets and the DOM
+// ladder all key on it. The live book reveals the grid itself: on a full
+// snapshot the smallest nonzero gap between consecutive ask prices IS the
+// tick to float precision. The data thread computes and stashes it; the
+// ticker24h dispatch (main thread) drains it into SymbolRegistry::seed_tick,
+// which keeps the single house rule that an API answer always wins.
+namespace {
+
+std::mutex g_implied_mu;
+std::unordered_map<std::string, double> g_implied_pending;   // data thread → main
+std::unordered_set<std::string> g_implied_applied;           // drained keys, main+data read under mu
+
+} // namespace
+
+void stash_implied_tick(const Terminal::Pair& pair, const pb::BookUpdate& snap) {
+    const int n = std::min(snap.asks_size(), 64);
+    if (n < 8) return;   // too thin to expose the grid
+    double min_gap = 0.0;
+    for (int i = 1; i < n; ++i) {
+        const double d = snap.asks(i).price() - snap.asks(i - 1).price();
+        if (d > 0.0 && (min_gap == 0.0 || d < min_gap)) min_gap = d;
+    }
+    if (min_gap <= 0.0) return;
+    const std::string key = pair.exchange + '|' + pair.symbol;
+    std::lock_guard<std::mutex> lk(g_implied_mu);
+    if (g_implied_applied.count(key) || g_implied_pending.count(key)) return;
+    g_implied_pending.emplace(key, min_gap);
+}
+
+void drain_implied_ticks() {
+    std::unordered_map<std::string, double> batch;
+    {
+        std::lock_guard<std::mutex> lk(g_implied_mu);
+        if (g_implied_pending.empty()) return;
+        batch.swap(g_implied_pending);
+        for (const auto& k : batch) g_implied_applied.insert(k.first);
+    }
+    auto& reg = SymbolRegistry::instance();
+    for (const auto& [key, tick] : batch) {
+        const auto bar = key.find('|');
+        if (bar == std::string::npos) continue;
+        const std::string ex = key.substr(0, bar);
+        const std::string sym = key.substr(bar + 1);
+        // API metadata landed in between? Its answer wins, always.
+        if (reg.has(ex, sym) && reg.tick_or_zero(ex, sym) > 0.0) continue;
+        reg.seed_tick(ex, sym, tick);
+    }
+}
 
 // ── Reusable arena for protobuf message allocation ──────────────────────────
 // Instead of stack-allocating pb::Trade, pb::BookUpdate, etc. per message
@@ -457,8 +511,10 @@ void MessageHandler::handle_candle_message(const Terminal::Pair& pair, int64_t t
 void MessageHandler::handle_orderbook_message(const Terminal::Pair& pair, const void* data, size_t size, OrderbookManager* orderbook_mgr) {
     auto* update_pb = google::protobuf::Arena::CreateMessage<pb::BookUpdate>(&s_arena);
     if (update_pb->ParseFromArray(data, static_cast<int>(size))) {
+
         if (update_pb->snapshot()) {
             orderbook_mgr->apply_orderbook_snapshot_from_pb(pair, *update_pb);
+            stash_implied_tick(pair, *update_pb);
             return;
         }
         orderbook_mgr->apply_book_update_from_pb(pair, *update_pb);
@@ -1102,6 +1158,39 @@ void MessageHandler::handle_ticker24h_message(
     }
 
     ticker_mgr->apply_update(exchange, *update_pb);
+
+    // Self-serve venue universes: a venue the metadata API does not carry (OKX
+    // behind the Go gateway) builds its watchlist from its own ticker stream.
+    // insert() is a no-op-free overwrite keyed by (exchange, symbol) and runs
+    // on the main thread via the dispatch queue, so no registry race. Hosted
+    // venues are already covered by parse_json, so this is O(1) lookups there.
+    if (update_pb->entries_size() > 0) {
+        auto& registry = SymbolRegistry::instance();
+        for (const auto& entry : update_pb->entries()) {
+            if (registry.has(exchange, entry.symbol())) continue;
+            SymbolMetadata meta;
+            meta.exchange = exchange;
+            meta.symbol   = entry.symbol();
+            // OKX SWAP instIds are "BTC-USDT-SWAP"; base/quote split on '-'.
+            // Unknown venues keep an empty base/quote and display their symbol.
+            if (const auto dash1 = entry.symbol().find('-'); dash1 != std::string::npos) {
+                meta.base_asset  = entry.symbol().substr(0, dash1);
+                const auto rest  = entry.symbol().substr(dash1 + 1);
+                const auto dash2 = rest.find('-');
+                meta.quote_asset = (dash2 != std::string::npos) ? rest.substr(0, dash2) : rest;
+            }
+            meta.perpetual = true;
+            meta.is_active = true;
+            // Tick stays UNKNOWN (0), never the struct default: a guessed grid
+            // silently misaligns the peak-hold / resting-depth buckets and the
+            // DOM ladder. The real grid arrives via the implied-tick stash.
+            meta.tick_size = 0.0;
+            meta.step_size = 0.0;
+            registry.insert(std::move(meta));
+        }
+    }
+
+    drain_implied_ticks();
 }
 
 // ── Scanner ──────────────────────────────────────────────────────────────────
