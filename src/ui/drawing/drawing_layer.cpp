@@ -3,6 +3,7 @@
 #include "core/app_context.h"
 #include "core/candle_manager.h"
 #include "core/drawing_manager.h"
+#include "core/position_sizing.h"
 #include "core/symbol_metadata.h"
 #include "rendering/theme.h"
 
@@ -335,22 +336,24 @@ void price_pill(ImDrawList* dl, const PriceFormatter& fmt, float y, ImU32 col,
     ImGui::PopFont();
 }
 
-// Two-line readout chip (measure / price range / date range).
+// Two/three-line readout chip (measure / price range / date range / position
+// size). The optional third line carries the Phase 5 size readout.
 void readout_chip(ImDrawList* dl, ImVec2 center_top, const char* l1,
-                  const char* l2, ImU32 col) {
+                  const char* l2, ImU32 col, const char* l3 = nullptr) {
     ImGui::PushFont(Theme::Fonts::mono_sm());
     const ImVec2 s1 = ImGui::CalcTextSize(l1);
     const ImVec2 s2 = l2 ? ImGui::CalcTextSize(l2) : ImVec2(0, 0);
-    const float w = std::max(s1.x, s2.x) + 16.0f;
-    const float h = s1.y + (l2 ? s2.y + 3.0f : 0.0f) + 10.0f;
+    const ImVec2 s3 = l3 ? ImGui::CalcTextSize(l3) : ImVec2(0, 0);
+    const float w = std::max({s1.x, s2.x, s3.x}) + 16.0f;
+    const float h = s1.y + (l2 ? s2.y + 3.0f : 0.0f) + (l3 ? s3.y + 3.0f : 0.0f) + 10.0f;
     const ImVec2 p0(center_top.x - w * 0.5f, center_top.y);
     const ImVec2 p1(p0.x + w, p0.y + h);
     dl->AddRectFilled(p0, p1, with_alpha(col, 235), Theme::Radius::R1);
     const ImU32 txt = Theme::u32(Theme::Tokens::BRAND_INK);
     dl->AddText(ImVec2(center_top.x - s1.x * 0.5f, p0.y + 5.0f), txt, l1);
-    if (l2)
-        dl->AddText(ImVec2(center_top.x - s2.x * 0.5f, p0.y + 5.0f + s1.y + 3.0f),
-                    txt, l2);
+    float y = p0.y + 5.0f + s1.y + 3.0f;
+    if (l2) { dl->AddText(ImVec2(center_top.x - s2.x * 0.5f, y), txt, l2); y += s2.y + 3.0f; }
+    if (l3) dl->AddText(ImVec2(center_top.x - s3.x * 0.5f, y), txt, l3);
     ImGui::PopFont();
 }
 
@@ -565,13 +568,36 @@ void render_one(ImDrawList* dl, const Drawing& d, const PriceFormatter& fmt,
             char l1[64], l2[64];
             snprintf(l1, sizeof(l1), "RR %.2f", rr);
             snprintf(l2, sizeof(l2), "target %+.2f%% · stop %+.2f%%", tpct, spct);
+            // Phase 5: risk-based size readout (account x risk% / stop dist).
+            char l3[96];
+            l3[0] = 0;
+            if (position_sizing::settings().show_on_chart && risk > 0.0) {
+                const position_sizing::SizeResult sz =
+                    position_sizing::compute(entry, d.stop);
+                if (sz.valid)
+                    snprintf(l3, sizeof(l3),
+                             "size %.4g · $%.0f @ risk $%.0f",
+                             sz.qty, sz.notional, sz.risk_usd);
+            }
             const float yt = to_px(Anchor{d.anchors[0].t_ms, d.target}).y;
             const float ys = to_px(Anchor{d.anchors[0].t_ms, d.stop}).y;
             const float top = std::min({p0.y, yt, ys});
-            readout_chip(dl, ImVec2((p0.x + p1.x) * 0.5f, top - 42.0f), l1, l2,
+            // Chip anchor: center over the VISIBLE span of the box and keep it
+            // inside the plot. The placement right edge can sit far outside the
+            // RT time window (+10 min default vs a ~90 s live view), which used
+            // to push the readout chip (RR + size) off-plot and invisible.
+            const float vis_l = std::max(p0.x, rmin.x + 8.0f);
+            const float vis_r = std::min(p1.x, rmax.x - 8.0f);
+            float cx = vis_r > vis_l ? 0.5f * (vis_l + vis_r) : p0.x;
+            cx = std::clamp(cx, rmin.x + 110.0f, rmax.x - 110.0f);
+            const float chip_top =
+                std::clamp(top - (l3[0] ? 58.0f : 42.0f),
+                           rmin.y + 6.0f, rmax.y - 60.0f);
+            readout_chip(dl, ImVec2(cx, chip_top), l1, l2,
                          Theme::u32(d.tool == Tool::LongPosition
                                         ? Theme::Tokens::UP
-                                        : Theme::Tokens::DOWN));
+                                        : Theme::Tokens::DOWN),
+                         l3[0] ? l3 : nullptr);
             break;
         }
         case Tool::Text: {

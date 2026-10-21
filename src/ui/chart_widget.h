@@ -6,6 +6,7 @@
 #include "core/refill_absorption.h"
 #include "core/realtime_bubble_size.h"
 #include "core/liq_rails.h"
+#include "core/alert_engine.h"
 #include "core/entitlements.h"
 #include "core/hl_rails.h"
 #include "rendering/hl_rails_overlay.h"
@@ -23,6 +24,8 @@
 #include "core/reference_context.h"
 #include "core/rt_walls.h"
 #include "core/rt_cvd.h"
+#include "core/cascade_detector.h"
+#include "core/liq_levels.h"
 #include "ui/realtime_dom_frame.h"
 #include "ui/realtime_dom_ladder.h"
 #include "ui/realtime_navigation.h"
@@ -171,6 +174,16 @@ public:
     void set_time_linked(bool on) { time_linked_ = on; }
     [[nodiscard]] bool time_linked() const { return time_linked_; }
 
+    // User-facing cross-chart sync (Phase 3): the same shared axis + crosshair
+    // mirror as the compare link, but for ANY open charts - different symbols,
+    // live and replay side by side. Toggled from the RT menu ("Link charts")
+    // and persisted in the workspace. Static because the link group is global;
+    // candle charts and RT charts form two sub-groups that never take each
+    // other's ranges (an RT view follows the live edge, a candle view reads
+    // history), while the crosshair mirror works across both.
+    static bool link_charts_enabled();
+    static void set_link_charts_enabled(bool on);
+
     void render() override;
     void update() override;
 
@@ -221,6 +234,15 @@ public:
     int64_t rt_preview_remaining_ms() const;
     void render_realtime_settings();
     void on_rewind(int64_t cutoff_ms) override;
+
+    // Phase 2 S3: estimated liquidation clusters (OI + mark + the recent tape).
+    void render_realtime_liq_levels(ImDrawList* dl, const ImPlotRect& limits);
+    // Phase 2 S4: the tracked active walls as an always-visible table.
+    void render_realtime_walls_table(ImDrawList* dl);
+    // Phase 2 S5: cumulative resting depth - the second heat layer.
+    void render_realtime_cum_depth(ImDrawList* dl, const ImPlotRect& limits);
+    // Phase 3: one-click layer layouts for the real-time view (Scalp/Swing/Research).
+    void apply_layer_preset(int preset);
 
     float liq_opacity() const { return liq_opacity_; }   // liq-heatmap opacity (Tweaks panel)
     void  set_liq_opacity(float v);                      // set + push to the reconstructor
@@ -321,6 +343,18 @@ public:
     double      alert_toast_until_ = 0.0;  // ImGui::GetTime() deadline for the toast
     std::string alert_toast_msg_;
 
+    // Phase 3: drawn HLine/HRay/Trendline/Ray/ExtendedLine/Arrow shapes act as
+    // alert levels (same toast + notification + beep path). The level stays:
+    // a drawn line keeps guarding until deleted or the toggle goes off.
+    bool   drawing_alerts_enabled_ = true;
+    double drawing_alert_last_price_ = 0.0;  // last live price seen (crossing edge)
+
+    // Phase 5: local paper engine + webhook bridge (settings persist in the
+    // workspace; the engine itself lives in AppContext, shared across charts).
+    bool   paper_on_alerts_ = false;      // auto-open a local paper order on alert crossings
+    double paper_auto_stop_pct_ = 1.0;    // stop distance %% for alert-triggered orders
+    void   maybe_paper_on_alert(bool long_side, double price, const char* source);
+
     struct DateBoundary {
         double timestamp;
         bool show_date;
@@ -363,6 +397,8 @@ private:
     void time_link_publish();
     void time_link_draw_mirror();
     void time_link_adopt_timeframe();
+    // time_linked_ (compare wiring) OR the global "Link charts" toggle.
+    [[nodiscard]] bool link_active() const;
 
     // ─── Chart Identity ──────────────────────────────────────────────────
     // title_ = "Chart <ex> <sym> <tf>###chart_<ex>_<sym>" for the primary. The
@@ -439,6 +475,22 @@ private:
     bool    rt_mode_    = false;
     bool    rt_was_on_  = false;
     bool rt_candles_ = false, rt_bubbles_ = true, rt_book_valid_ = false;
+    bool rt_candles_hollow_ = false;  // outline bodies so the heat shows through
+    bool rt_heikin_ = false;          // Phase 3: Heikin-Ashi transform of the RT buckets
+    int  rt_layer_preset_ = -1;       // Phase 3: last applied layer preset (-1 none)
+    bool cascade_alerts_enabled_ = true;  // toast + notification on liquidation cascades
+    CascadeDetector cascade_detector_;    // Phase 2 S1: same-side liquidation chains
+    AlertEngine alert_engine_;            // Phase 2 S2: threshold alert queues
+    bool rt_liq_levels_enabled_ = true;   // Phase 2 S3: estimated liquidation clusters
+    liq_levels::Estimator liq_estimator_; // ...the model behind them
+    double liq_mark_price_ = 0;           // live mark price (stats stream)
+    double liq_oi_contracts_ = 0;         // live open interest in contracts (stats stream)
+    bool rt_walls_table_enabled_ = false; // Phase 2 S4: active walls table overlay
+    bool rt_cum_depth_enabled_ = false;   // Phase 2 S5: resting-depth heat layer
+    bool liq_alerts_enabled_ = false;     // big single liquidations
+    double liq_alert_usd_ = 250000.0;     // alert at/above this notional
+    bool wall_alerts_enabled_ = false;    // tracked walls pulled near price
+    int64_t last_pull_alert_ms_ = 0;      // watermark: each pull alerts once
     bool rt_paused_ = false, rt_trade_line_ = false;
     bool rt_extend_depth_ = true;
     bool rt_bridge_gaps_ = true;
@@ -517,6 +569,16 @@ private:
     int  rt_peak_horizon_min_ = 10;   // 5 / 10 / 30
     int64_t rt_peak_pruned_at_ms_ = 0;
 
+    // ── [Phase 2 S5] Cumulative resting depth ─────────────────────────────
+    // Time-weighted resting size per exact price (an exponential average with
+    // ≈10-minute memory, lazily decayed when a level leaves), keyed by the
+    // absolute bucket index like the peak-hold ghosts. Always accumulated:
+    // one map pass per delivered sample, so the layer is warm on toggle.
+    static constexpr double kCumTauMs = 200000.0;             // 200 s ≈ 10-min memory
+    static constexpr int64_t kCumRetentionMs = 20 * 60000;    // prune unseen entries
+    std::unordered_map<int64_t, std::pair<float, int64_t>> rt_cum_levels_;
+    int64_t rt_cum_pruned_at_ms_ = 0;
+
     double rt_usage_emit_s_ = -1;
     int64_t rt_clock_ms_ = 0;
     uint64_t rt_serial_ = 0, rt_generation_ = 0;
@@ -575,6 +637,11 @@ private:
     const char* realtime_base_asset();
     void update_realtime_walls();
     void render_realtime_walls(ImDrawList* dl);
+    void on_liquidation_observed(const Terminal::Liquidation& l);
+    void pump_cascade_alerts();
+    void pump_rt_alerts();               // S2: big-liq + wall-pull queues
+    void scan_new_wall_pulls();          // S2: watermark feed into alert_engine_
+    void render_realtime_cascades(ImDrawList* dl, const ImPlotRect& limits);
     bool realtime_hover_ready() const;
     void render_realtime_hover();
     void render_realtime_cvd_lane();

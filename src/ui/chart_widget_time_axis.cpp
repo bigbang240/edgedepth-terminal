@@ -13,6 +13,14 @@
 
 // Time Axis
 
+// "Nice" tick intervals shared by the candle-TF chooser and the RT span cap.
+static constexpr int64_t kNiceTickIntervals[] = {
+    1, 2, 5, 10, 15, 20, 30, 60, 120, 180, 300, 600, 900, 1200, 1800, 2700,
+    3600, 5400, 7200, 10800, 14400, 18000, 21600,
+    28800, 36000, 43200, 64800, 86400, 172800,
+    259200, 432000, 604800, 1209600, 2592000, 5184000, 7776000
+};
+
 void ChartWidget::setup_time_axis_ticks(double visible_x_min, double visible_x_max) const {
     generate_time_ticks(visible_x_min, visible_x_max);
 }
@@ -81,6 +89,21 @@ void ChartWidget::generate_time_ticks(double visible_x_min, double visible_x_max
         const double visible_span = visible_x_max - visible_x_min;
         const double visible_candles = visible_span / (static_cast<double>(tf_sec) * 1000.0);
         interval_s = calculate_tick_interval(visible_candles);
+        // RT: the x axis is wall-clock ms, so a candle-TF-derived interval can
+        // exceed the whole live window at narrow widths — zero aligned ticks
+        // then let ImPlot fall back to its raw scientific labels ("e+12").
+        // Cap the interval at the span so at least one boundary always lands
+        // inside the window (any window of length >= interval has one).
+        if (rt_mode_) {
+            const double span_s = std::max(1.0, (visible_x_max - visible_x_min) / 1000.0);
+            if (static_cast<double>(interval_s) > span_s) {
+                interval_s = 1;
+                for (const int64_t it : kNiceTickIntervals) {
+                    if (static_cast<double>(it) > span_s) break;
+                    interval_s = it;
+                }
+            }
+        }
         const auto start_s = static_cast<int64_t>(visible_x_min / 1000.0);
         first_tick_s = align_to_interval(start_s, interval_s);
         while (first_tick_s * 1000.0 < visible_x_min) first_tick_s += interval_s;
@@ -169,6 +192,8 @@ int64_t ChartWidget::calculate_tick_interval(double visible_candles) const {
         28800, 36000, 43200, 64800, 86400, 172800,
         259200, 432000, 604800, 1209600, 2592000, 5184000, 7776000
     };
+    static_assert(std::size(nice_intervals) == std::size(kNiceTickIntervals),
+                  "keep the two interval tables in sync");
     const float axis_width = std::max(1.0f, ImGui::GetContentRegionAvail().x -
         ImGui::CalcTextSize("00000000.00000000").x - 20.0f);
     const float label_pitch = ImGui::CalcTextSize("23:59:59").x + 16.0f;

@@ -82,7 +82,19 @@ EM_JS(void, edrl_fetch_begin, (const char* url_ptr, int force), {
             !Array.isArray(parsed.packs)) {
             throw new Error('Unsupported replay-library manifest');
         }
-        return text;
+        // Self-hosted catalogs (the recorder daemon's manifest, a NAS, a LAN
+        // box) may ship host-agnostic RELATIVE pack URLs ("/packs/x.edpack"),
+        // which the C++ side rejects by design (is_http_url). Resolve them
+        // against this manifest's URL so every pack_url the widget sees is a
+        // plain absolute http(s) URL. Absolute entries pass through untouched.
+        var base = requestUrl ? requestUrl.href : window.location.href;
+        for (var i = 0; i < parsed.packs.length; i++) {
+            var p = parsed.packs[i];
+            if (p && typeof p.pack_url === 'string' && p.pack_url.charAt(0) === '/') {
+                try { p.pack_url = new URL(p.pack_url, base).href; } catch (_) {}
+            }
+        }
+        return JSON.stringify(parsed);
     };
 
     var cacheKey = 'edgedepth.replay_library.v1:' + url;
@@ -249,6 +261,81 @@ EM_JS(void, edrl_open_url, (const char* url_ptr), {
     window.open(UTF8ToString(url_ptr), '_blank', 'noopener');
 });
 
+// ── Event finder feed (the recorder daemon's /events endpoint) ────────────────
+// The endpoint lives NEXT TO the catalog manifest on the same server, so the
+// query reuses the manifest URL's directory + query string (a self-hosted
+// setup's XTransformPort routing suffix rides along untouched). One browser
+// side state, same shape as the catalog fetch above.
+EM_JS(void, ed_ev_fetch_begin, (const char* base_ptr, const char* path_ptr), {
+    var base = UTF8ToString(base_ptr);
+    var path = UTF8ToString(path_ptr);
+    var state = Module['__edEventFinder'] || (Module['__edEventFinder'] = {
+        payload: String(), revision: 0, loading: false, error: String()});
+    if (state.loading) return;
+    var url;
+    try {
+        url = new URL(path, base ? base : window.location.href);
+    } catch (_) {
+        state.error = 'Bad event feed URL';
+        return;
+    }
+    state.loading = true;
+    state.error = String();
+    fetch(url.href, {method: 'GET', cache: 'no-cache', credentials: 'omit'})
+        .then(function(response) {
+            if (!response.ok) throw new Error('HTTP ' + response.status);
+            return response.text();
+        })
+        .then(function(text) {
+            var parsed = JSON.parse(text);
+            if (!parsed || parsed.schema !== 'edgedepth.events.v1' ||
+                !Array.isArray(parsed.events)) {
+                throw new Error('Unsupported event feed');
+            }
+            if (text.length > 4 * 1024 * 1024) throw new Error('Event feed too large');
+            state.payload = JSON.stringify(parsed);
+            state.revision += 1;
+            state.loading = false;
+        })
+        .catch(function(error) {
+            state.loading = false;
+            state.error = error && error.message ? error.message : 'Event search failed';
+        });
+});
+
+EM_JS(int, ed_ev_loading, (), {
+    var state = Module['__edEventFinder'];
+    return state && state.loading ? 1 : 0;
+});
+
+EM_JS(int, ed_ev_revision, (), {
+    var state = Module['__edEventFinder'];
+    return state ? state.revision : 0;
+});
+
+EM_JS(int, ed_ev_failed, (), {
+    var state = Module['__edEventFinder'];
+    return state && state.error ? 1 : 0;
+});
+
+EM_JS(char*, ed_ev_copy_payload, (), {
+    var state = Module['__edEventFinder'];
+    var value = state && state.payload ? state.payload : String();
+    var n = lengthBytesUTF8(value) + 1;
+    var p = _malloc(n);
+    stringToUTF8(value, p, n);
+    return p;
+});
+
+EM_JS(char*, ed_ev_copy_error, (), {
+    var state = Module['__edEventFinder'];
+    var value = state && state.error ? state.error : String();
+    var n = lengthBytesUTF8(value) + 1;
+    var p = _malloc(n);
+    stringToUTF8(value, p, n);
+    return p;
+});
+
 #else
 
 static char* edrl_resolve_manifest_url() { return nullptr; }
@@ -264,6 +351,12 @@ static void* edrl_preview_take(int, int*) { return nullptr; }
 static void edrl_preview_cancel(int) {}
 static void edrl_copy_url(const char*) {}
 static void edrl_open_url(const char*) {}
+static void ed_ev_fetch_begin(const char*, const char*) {}
+static int ed_ev_loading() { return 0; }
+static int ed_ev_revision() { return 0; }
+static int ed_ev_failed() { return 0; }
+static char* ed_ev_copy_payload() { return nullptr; }
+static char* ed_ev_copy_error() { return nullptr; }
 
 #endif
 
@@ -497,10 +590,26 @@ void ReplayLibraryWidget::update() {
             std::free(error);
         }
     }
+
+    // Event finder feed: apply new revisions, surface failures once.
+    const int ev_revision = ed_ev_revision();
+    if (ev_revision != event_revision_ && ev_revision > 0) {
+        event_revision_ = ev_revision;
+        if (char* payload = ed_ev_copy_payload()) {
+            apply_events(payload);
+            std::free(payload);
+        }
+    }
+    if (event_requested_ && event_error_.empty() && ed_ev_failed() != 0) {
+        if (char* error = ed_ev_copy_error()) {
+            event_error_ = error[0] ? error : "Event search failed";
+            std::free(error);
+        }
+    }
 }
 
-void ReplayLibraryWidget::play_pack(const Pack& pack) {
-    ctx_.replay_mgr().request_pack_replay(pack.pack_url, pack.symbol, 1.0f);
+void ReplayLibraryWidget::play_pack(const Pack& pack, int64_t seek_ms) {
+    ctx_.replay_mgr().request_pack_replay(pack.pack_url, pack.symbol, 1.0f, seek_ms);
     is_open = false;
 }
 
@@ -571,6 +680,291 @@ void ReplayLibraryWidget::request_play(int index) {
     if (index < 0 || index >= static_cast<int>(packs_.size())) return;
     if (ctx_.replay_mgr().is_active()) { pending_pack_ = index; replace_popup_requested_ = true; }
     else play_pack(packs_[index]);
+}
+
+// ── Event finder (roadmap Phase 4) ────────────────────────────────────────────
+// "همهٔ لحظه‌هایی که cascade>500k$ بود" - every cascade, liquidation, outsized
+// fill and volume spike the 24/7 recorder captured, searchable and replayable
+// straight into its .edpack recording.
+
+void ReplayLibraryWidget::split_manifest_url(std::string& base, std::string& query) const {
+    const auto qpos = manifest_url_.find('?');
+    const std::string noq = qpos == std::string::npos ? manifest_url_ : manifest_url_.substr(0, qpos);
+    query = qpos == std::string::npos ? std::string() : manifest_url_.substr(qpos + 1);
+    const auto slash = noq.rfind('/');
+    base = slash == std::string::npos ? std::string() : noq.substr(0, slash + 1);
+}
+
+std::string ReplayLibraryWidget::event_endpoint_url(const char* endpoint) const {
+    std::string base, query;
+    split_manifest_url(base, query);
+    return base + endpoint + (query.empty() ? "" : "?" + query);
+}
+
+void ReplayLibraryWidget::begin_event_fetch() {
+    event_error_.clear();
+    event_hits_.clear();  // a new search replaces the old results
+    std::string base, query;
+    split_manifest_url(base, query);
+    static const char* const kKinds[] = {"all", "cascade", "liq", "trade", "vol"};
+    std::string symbol;
+    for (const unsigned char c : std::string(event_symbol_))
+        if (std::isalnum(c)) symbol += static_cast<char>(std::tolower(c));
+    std::string path = std::string("events?kind=") + kKinds[event_kind_] +
+                       "&min_usd=" + std::to_string(static_cast<long long>(std::max(0.0, event_min_usd_))) +
+                       "&limit=300";
+    if (!symbol.empty()) path += "&symbol=" + symbol;
+    if (!query.empty()) path += "&" + query;
+    ed_ev_fetch_begin(base.c_str(), path.c_str());
+    event_requested_ = true;
+}
+
+void ReplayLibraryWidget::apply_events(const std::string& payload) {
+    const auto doc = json::parse(payload, nullptr, false);
+    if (doc.is_discarded() || !doc.is_object()) {
+        event_error_ = "Event feed returned invalid JSON";
+        return;
+    }
+    // NOTE: this WASM build runs with exception catching disabled, so a
+    // throwing nlohmann accessor (item.value on a null/foreign-typed field)
+    // would abort the whole terminal instead of unwinding. Every access below
+    // goes through non-throwing find() + explicit type checks - the same
+    // reason parse_manifest's value() calls only touch fields the manifest
+    // always ships.
+    auto get_i64 = [](const json& o, const char* key, int64_t dflt) -> int64_t {
+        const auto f = o.find(key);
+        if (f == o.end() || f->is_null() || !f->is_number_integer()) return dflt;
+        return f->get<int64_t>();
+    };
+    auto get_f64 = [](const json& o, const char* key, double dflt) -> double {
+        const auto f = o.find(key);
+        if (f == o.end() || f->is_null() || !(f->is_number_float() || f->is_number_integer()))
+            return dflt;
+        return f->get<double>();
+    };
+    auto get_str = [](const json& o, const char* key) -> std::string {
+        const auto f = o.find(key);
+        return f != o.end() && f->is_string() ? f->get<std::string>() : std::string();
+    };
+    try {
+        if (get_str(doc, "schema") != "edgedepth.events.v1") {
+            event_error_ = "This catalog does not serve the event finder";
+            return;
+        }
+        const auto it = doc.find("events");
+        if (it == doc.end() || !it->is_array()) {
+            event_error_ = "Event feed has no events array";
+            return;
+        }
+        std::vector<EventHit> hits;
+        for (const auto& item : *it) {
+            if (!item.is_object()) continue;
+            EventHit h;
+            h.ts_ms = get_i64(item, "ts_ms", 0);
+            h.end_ms = get_i64(item, "end_ms", 0);
+            const auto kind = get_str(item, "kind");
+            h.kind = kind == "cascade" ? 0 : kind == "liq" ? 1 : kind == "trade" ? 2 : 3;
+            const auto side = get_str(item, "side");
+            h.side = (side == "short" || side == "buy") ? 1 : 0;
+            h.usd = get_f64(item, "usd", 0.0);
+            h.price = get_f64(item, "price", 0.0);
+            h.count = get_i64(item, "count", 0);
+            h.detail = get_str(item, "detail");
+            h.pack_file = get_str(item, "pack");
+            h.symbol = get_str(item, "symbol");
+            {
+                const auto f = item.find("live");
+                h.live = f != item.end() && f->is_boolean() && f->get<bool>();
+            }
+            if (h.ts_ms <= 0) continue;
+            // Resolve the containing pack inside the loaded catalog: absolute
+            // pack URLs carry /packs/<file> (plus a routing query suffix, so
+            // this is a substring match, not an ends-with). Missing = the
+            // recording was pruned since the moment happened.
+            h.pack_index = -1;
+            if (!h.pack_file.empty()) {
+                const std::string needle = "/packs/" + h.pack_file;
+                for (std::size_t i = 0; i < packs_.size(); ++i) {
+                    if (packs_[i].pack_url.find(needle) != std::string::npos) {
+                        h.pack_index = static_cast<int>(i);
+                        break;
+                    }
+                }
+            }
+            hits.push_back(std::move(h));
+            if (hits.size() >= 300) break;
+        }
+        event_hits_ = std::move(hits);
+    } catch (const json::exception&) {
+        // Belt and braces: nothing above throws by construction any more.
+        event_error_ = "Event feed contains an invalid field type";
+    }
+}
+
+void ReplayLibraryWidget::play_event(int hit_index) {
+    if (hit_index < 0 || hit_index >= static_cast<int>(event_hits_.size())) return;
+    const EventHit& hit = event_hits_[hit_index];
+    if (hit.pack_index < 0 || hit.pack_index >= static_cast<int>(packs_.size())) return;
+    // Pre-roll 45s so book and tape are already flowing when the moment hits.
+    // The seek latch lives in ReplayManager (apply_pending_pack_seek): the
+    // widget closes itself here, long before the session primes.
+    const int64_t want = std::max<int64_t>(hit.ts_ms - 45000, 0);
+    if (ctx_.replay_mgr().is_active()) {
+        pending_pack_ = hit.pack_index;
+        pending_event_seek_ms_ = want;
+        replace_popup_requested_ = true;
+    } else {
+        play_pack(packs_[hit.pack_index], want);
+    }
+}
+
+// Mirrored into ReplayManager::apply_pending_pack_seek (runs per frame for
+// every replay, regardless of this widget's open state).
+
+namespace {
+std::string format_usd_compact(double value) {
+    char out[32];
+    const double a = value < 0 ? -value : value;
+    if (a >= 1e9) std::snprintf(out, sizeof(out), "$%.2fB", value / 1e9);
+    else if (a >= 1e6) std::snprintf(out, sizeof(out), "$%.2fM", value / 1e6);
+    else if (a >= 1e3) std::snprintf(out, sizeof(out), "$%.1fK", value / 1e3);
+    else std::snprintf(out, sizeof(out), "$%.0f", value);
+    return out;
+}
+} // namespace
+
+void ReplayLibraryWidget::render_event_finder() {
+    using namespace Theme;
+    using drawing::UiIcon;
+
+    const float top = ImGui::GetCursorPosY();
+    ImGui::PushFont(Fonts::heading());
+    const float head_h = ImGui::GetTextLineHeight();
+    ImGui::TextUnformatted("Event finder");
+    ImGui::PopFont();
+    ImGui::SameLine(0.0f, 9.0f);
+    ImGui::SetCursorPosY(top + (head_h - ImGui::GetTextLineHeight()) * 0.5f);
+    ImGui::TextColored(Tokens::TX3, "search the 24/7 personal archive");
+    if (ImGui::IsItemHovered())
+        Theme::tooltip(
+            "Cascades, liquidations, outsized fills and volume spikes captured by the recorder daemon. "
+            "Play opens the recording 45s before the moment, paused at it.");
+    // The recorder daemon's live HTML report for today (same server as the feed).
+    constexpr float kReportW = 108.0f;
+    ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - kReportW);
+    ImGui::SetCursorPosY(top + (head_h - 24.0f) * 0.5f);
+    if (Theme::button("Daily report", ButtonKind::Ghost, ImVec2(kReportW, 24.0f), UiIcon::ArrowUpRight))
+        edrl_open_url(event_endpoint_url("report").c_str());
+
+    static const char* const kKinds[] = {"All", "Cascades", "Liquidations", "Big fills", "Volume spikes"};
+    event_kind_ = segmented("##event_kind", kKinds, 5, event_kind_);
+    if (ImGui::IsItemHovered())
+        Theme::tooltip("What counts as a moment: cascade chains (3+ same-side liquidations within 2s), single liquidations, fills over the threshold, and 1m candles trading at 5x the hour's average.");
+
+    ImGui::SetNextItemWidth(190.0f);
+    if (ImGui::InputDouble("##event_min_usd", &event_min_usd_, 50000.0, 250000.0, "Min $%.0f"))
+        event_min_usd_ = std::max(0.0, event_min_usd_);
+    ImGui::SameLine(0.0f, 10.0f);
+    ImGui::SetNextItemWidth(120.0f);
+    ImGui::InputTextWithHint("##event_symbol", "any symbol", event_symbol_, sizeof(event_symbol_));
+    ImGui::SameLine(0.0f, 10.0f);
+    const bool searching = ed_ev_loading() != 0;
+    if (Theme::button(searching ? "Searching" : "Search", ButtonKind::Primary, ImVec2(96.0f, 0.0f)) && !searching)
+        begin_event_fetch();
+
+    if (!event_error_.empty()) {
+        ImGui::Spacing();
+        ImGui::TextColored(Tokens::DOWN, "%s", event_error_.c_str());
+        if (event_error_.find("HTTP 404") != std::string::npos)
+            ImGui::TextColored(Tokens::TX3,
+                "The event feed lives on the self-hosted recorder. Open the library with "
+                "?replayLibrary=/manifest.json?XTransformPort=9002 (or your recorder's address).");
+    } else if (searching) {
+        ImGui::Spacing();
+        ImGui::TextColored(Tokens::TX3, "Searching the archive...");
+    } else if (!event_requested_) {
+        ImGui::Spacing();
+        ImGui::TextColored(Tokens::TX3, "Pick a kind, a dollar floor and search every recorded moment.");
+    } else if (event_hits_.empty()) {
+        ImGui::Spacing();
+        ImGui::TextColored(Tokens::TX3, "No matching moments in the archive yet.");
+    } else {
+        char found[64];
+        std::snprintf(found, sizeof(found), "%d moment%s found", static_cast<int>(event_hits_.size()),
+                      event_hits_.size() == 1 ? "" : "s");
+        ImGui::Spacing();
+        Theme::chip(found, Tokens::TX2, Tokens::CONTROL);
+    }
+
+    if (!event_hits_.empty()) {
+        const float list_h = std::min(280.0f, std::max(160.0f, ImGui::GetContentRegionAvail().y * 0.45f));
+        ImGui::PushFont(Fonts::mono_sm());
+        if (ImGui::BeginTable("##event_hits", 5,
+                              ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_NoBordersInBody,
+                              ImVec2(0.0f, list_h))) {
+            ImGui::TableSetupScrollFreeze(0, 0);
+            ImGui::TableSetupColumn("time", ImGuiTableColumnFlags_WidthFixed, 122.0f);
+            ImGui::TableSetupColumn("kind", ImGuiTableColumnFlags_WidthFixed, 104.0f);
+            ImGui::TableSetupColumn("side", ImGuiTableColumnFlags_WidthFixed, 62.0f);
+            ImGui::TableSetupColumn("usd", ImGuiTableColumnFlags_WidthFixed, 84.0f);
+            ImGui::TableSetupColumn("detail", ImGuiTableColumnFlags_WidthStretch);
+            static const char* const kKindLabels[] = {"cascade", "liquidation", "big fill", "vol spike"};
+            for (int i = 0; i < static_cast<int>(event_hits_.size()); ++i) {
+                const EventHit& h = event_hits_[i];
+                ImGui::PushID(i);
+                ImGui::TableNextRow();
+                // UTC stamp (the archive's clock), one row per moment.
+                const auto seconds = static_cast<std::time_t>(h.ts_ms / 1000);
+                char tbuf[24];
+                if (const auto* tm = std::gmtime(&seconds)) std::strftime(tbuf, sizeof(tbuf), "%m-%d %H:%M:%S", tm);
+                else std::snprintf(tbuf, sizeof(tbuf), "--");
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(tbuf);
+                ImGui::TableNextColumn();
+                const bool bullish = h.side != 0;
+                const ImVec4& fg = h.kind == 0 ? Tokens::WARN
+                                 : h.kind == 2 ? Tokens::TX2
+                                 : bullish ? Tokens::UP : Tokens::DOWN;
+                Theme::chip(kKindLabels[h.kind], fg, Tokens::CONTROL);
+                ImGui::TableNextColumn();
+                if (h.kind == 2) ImGui::TextColored(bullish ? Tokens::UP : Tokens::DOWN, "%s", bullish ? "buy" : "sell");
+                else ImGui::TextColored(bullish ? Tokens::UP : Tokens::DOWN, "%s", bullish ? "shorts" : "longs");
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(format_usd_compact(h.usd).c_str());
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(h.detail.c_str());
+                if (ImGui::IsItemHovered()) {
+                    const auto full = static_cast<std::time_t>(h.ts_ms / 1000);
+                    char iso[40] = "";
+                    if (const auto* tm = std::gmtime(&full)) std::strftime(iso, sizeof(iso), "%Y-%m-%d %H:%M:%S UTC", tm);
+                    if (h.pack_index >= 0)
+                        Theme::tooltip("%s\n%s\nClick Play to open this recording 45s before the moment.",
+                                       iso, h.detail.c_str());
+                    else if (h.live)
+                        Theme::tooltip("%s\n%s\nThe episode holding this moment is still being recorded -\nit becomes replayable when the hour rolls over.",
+                                       iso, h.detail.c_str());
+                    else
+                        Theme::tooltip("%s\n%s\nThe containing recording has been pruned from the archive.",
+                                       iso, h.detail.c_str());
+                }
+                const bool playable = h.pack_index >= 0 && h.pack_index < static_cast<int>(packs_.size());
+                if (playable) {
+                    ImGui::SameLine(ImGui::GetContentRegionAvail().x - 54.0f);
+                    if (Theme::button("Play", ButtonKind::Ghost, ImVec2(50.0f, 20.0f), UiIcon::Play))
+                        play_event(i);
+                } else if (h.live) {
+                    ImGui::SameLine(ImGui::GetContentRegionAvail().x - 82.0f);
+                    ImGui::TextColored(Tokens::TX3, "recording");
+                } else {
+                    ImGui::SameLine(ImGui::GetContentRegionAvail().x - 56.0f);
+                    ImGui::TextColored(Tokens::TX3, "pruned");
+                }
+                ImGui::PopID();
+            }
+            ImGui::EndTable();
+        }
+        ImGui::PopFont();
+    }
 }
 
 // One recording as a card (design v3, 2026-10-17; James: the library looked "slightly low quality"):
@@ -717,14 +1111,16 @@ void ReplayLibraryWidget::render_replace_confirmation() {
     ImGui::Spacing();
     if (Theme::button("Cancel", Theme::ButtonKind::Ghost, ImVec2(100.0f, 28.0f))) {
         pending_pack_ = -1;
+        pending_event_seek_ms_ = 0;  // event replay cancelled with the popup
         ImGui::CloseCurrentPopup();
     }
     ImGui::SameLine();
     if (Theme::button("Replace and replay", Theme::ButtonKind::Primary, ImVec2(170.0f, 28.0f), drawing::UiIcon::Play)) {
         if (pending_pack_ >= 0 && pending_pack_ < static_cast<int>(packs_.size())) {
-            play_pack(packs_[pending_pack_]);
+            play_pack(packs_[pending_pack_], pending_event_seek_ms_);
         }
         pending_pack_ = -1;
+        pending_event_seek_ms_ = 0;
         ImGui::CloseCurrentPopup();
     }
     ImGui::EndPopup();
@@ -774,6 +1170,10 @@ void ReplayLibraryWidget::render() {
     if (ImGui::IsItemHovered()) {
         Theme::tooltip("Manifest: %s", manifest_url_.c_str());
     }
+
+    // Event finder: only meaningful once a catalog context exists, but the
+    // feed derives purely from the manifest URL, so render it regardless.
+    render_event_finder();
     Theme::hairline(ImGui::GetContentRegionAvail().x, 8.0f);
 
     if (!notice_.empty() && ImGui::GetTime() < notice_until_) {

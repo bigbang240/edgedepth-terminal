@@ -213,8 +213,13 @@ public:
     // behavior client-side and drives this manager through the same
     // handle_ws_message / route_parsed entries the WS path uses; controls are
     // rerouted to the engine by send_control*. `symbol_hint` is display-only
-    // (the pack header is authoritative).
-    void request_pack_replay(const std::string& pack_url, const std::string& symbol_hint = "", float speed = 1.0f);
+    // (the pack header is authoritative). `seek_to_ms` optionally latches ONE
+    // deliberate seek applied once the session is live (the event finder's
+    // "open the recording just before the moment" deep path) - it must live
+    // here, not in a widget, because the requesting widget usually closes
+    // itself before the session primes.
+    void request_pack_replay(const std::string& pack_url, const std::string& symbol_hint = "", float speed = 1.0f,
+                             int64_t seek_to_ms = 0);
 
     // Per-frame pack engine driver - call from the main loop alongside
     // flush_pending_skip (no-op outside pack mode).
@@ -334,6 +339,11 @@ public:
     // what holds the replay clock until real data is flowing - for ALL replays
     // (lessons AND the live terminal's "replay from here"), not just lessons.
     void tick_buffering_gate();
+
+    // Event-finder deep path: apply a latched pack start-at seek exactly once
+    // the session is live (Playing/Paused), mirroring the standalone ?packt=
+    // boot contract. A 40s watchdog drops a latch whose session never primed.
+    void apply_pending_pack_seek();
 
     // ─── Compare replay: who moved first ─────────────────────────────────
     // Live only while the session plays two or more markets (compare_symbols
@@ -532,6 +542,8 @@ private:
     // when the per-frame pushes stop (see seek_ceiling_active).
     static constexpr int64_t kSeekCeilingTTLMs = 500;
     int64_t pack_checkpoint_ms_ = 0;
+    int64_t pending_pack_seek_ms_ = 0;    // event finder: one deliberate seek once live
+    int64_t pending_pack_seek_at_ms_ = 0; // when the latch was armed (watchdog)
     int64_t seek_ceiling_ms_ = 0;
     int64_t seek_ceiling_set_wall_ms_ = 0;
     int64_t last_seek_time_ms_ = 0;    // Debounce seeks

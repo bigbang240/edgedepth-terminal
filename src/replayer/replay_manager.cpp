@@ -605,7 +605,8 @@ void ReplayManager::request_archive_replay(
 void ReplayManager::request_pack_replay(
     const std::string& pack_url,
     const std::string& symbol_hint,
-    float speed)
+    float speed,
+    int64_t seek_to_ms)
 {
     cancel_reconnect();
     if (is_active()) {
@@ -636,6 +637,28 @@ void ReplayManager::request_pack_replay(
     transition(State::Creating);
     pack_engine_ = std::make_unique<PackReplayEngine>(this);
     pack_engine_->begin(pack_url, speed);
+
+    // The event finder's start-at latch must survive the boot above (a fresh
+    // session primes into Playing a few seconds from now).
+    pending_pack_seek_ms_ = seek_to_ms > 0 ? seek_to_ms : 0;
+    pending_pack_seek_at_ms_ = now_ms();
+}
+
+void ReplayManager::apply_pending_pack_seek() {
+    if (pending_pack_seek_ms_ <= 0) return;
+    // Mirror maybe_apply_pack_start_at's gate: ONE deliberate seek once the
+    // session is live (Playing/Paused - joined AND past the buffering gate),
+    // so the chart's re-request cascade and the seeded book behave exactly
+    // like a user seek.
+    if (info_.state != State::Playing && info_.state != State::Paused) {
+        if (now_ms() - pending_pack_seek_at_ms_ > 40000) pending_pack_seek_ms_ = 0;
+        return;
+    }
+    const int64_t start = info_.start_time_ms;
+    const int64_t end = info_.end_time_ms;
+    if (end > start)
+        seek(std::clamp<int64_t>(pending_pack_seek_ms_, start, end), /*deliberate=*/true);
+    pending_pack_seek_ms_ = 0;
 }
 
 void ReplayManager::tick_pack_engine() {
@@ -1646,6 +1669,10 @@ void ReplayManager::set_depth_pending(bool pending) {
 }
 
 void ReplayManager::tick_buffering_gate() {
+    // The event finder's start-at latch lives here: tick_buffering_gate runs
+    // every frame for every replay, so the latch applies no matter which
+    // widget asked for it (the requester usually closed itself).
+    apply_pending_pack_seek();
     // Compare read: a few times a second on the wall clock is plenty (the
     // strip is read, not watched), and the correlation pass is O(lags x
     // window), not per-frame work.

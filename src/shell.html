@@ -129,9 +129,6 @@
         }, 1000);
     })();
     /* ── [SELF-HOST P1] tooling bridge ────────────────────────────────────
-     * window.__ed_snapshot() → Promise<{png, ts}>: full-frame PNG captured
-     * at the end of the next rendered frame (main.cpp readback; the request
-     * goes through the ed_request_snapshot KEEPALIVE export).
      * window.__ed_state → mirrored twice a second from the live chart
      * (symbol/venue/tf/bid/ask/ts; the app writes Module.edState).
      * __EDGEDEPTH_RT_ARCHIVE_MS__ raises the browser-local archive horizon

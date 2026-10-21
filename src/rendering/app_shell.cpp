@@ -761,14 +761,12 @@ namespace {
         // bucket instead of leaving the view; longer timeframes still leave.
         static constexpr int kRtSizes[] = {1, 5, 15, 30, 60, 300};
         const int rt_cur = chart ? chart->rt_candle_seconds() : 1;
-        std::vector<int> rt_visible;
-        if (realtime && compact) rt_visible = {rt_cur};
         std::span<const int> visible_favs = compact
             ? std::span<const int>(&current_tf, 1) : std::span<const int>(g_tf_favs);
-        if (realtime)
-            visible_favs = compact
-                ? std::span<const int>(rt_visible.data(), rt_visible.size())
-                : std::span<const int>(kRtSizes, 6);
+        // Real-time owns the row: the full 1s..5m bucket grid stays visible at
+        // every width — collapsing it to the current chip alone read as "the
+        // timeframes are gone" on narrow viewports.
+        if (realtime) visible_favs = std::span<const int>(kRtSizes, 6);
         ImDrawList* dl = ImGui::GetWindowDrawList();
         ImGui::PushFont(Fonts::ui());
         const float h = 30.0f, padx = 11.0f, caretw = 30.0f;

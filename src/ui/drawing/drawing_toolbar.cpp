@@ -214,6 +214,34 @@ void render_tool_menu_rows(DrawingManager& mgr) {
             if (row.clicked) mgr.arm(active ? Tool::Cursor : t);
         }
     }
+
+    // ── Templates (Phase 3): named, reusable sets of this chart's drawings ──
+    // Save captures the current symbol's drawings under a name; clicking a
+    // template re-places it on the current chart (fresh ids, times re-based to
+    // now), right-click deletes it. Store is global across symbols.
+    Theme::menu_separator();
+    if (Theme::begin_menu_group("Templates")) {
+        static char name_buf[40] = "";
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 72.0f);
+        ImGui::InputText("##tpl_name", name_buf, sizeof(name_buf));
+        if (ImGui::IsItemHovered())
+            Theme::tooltip("Name the set, then Save: it stores this chart's drawings\nso you can place the same levels on any other chart.");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Save")) {
+            if (mgr.save_template(name_buf)) name_buf[0] = '\0';
+        }
+        if (ImGui::IsItemHovered()) Theme::tooltip("Save this chart's drawings as a reusable template.");
+        const auto& tpls = mgr.templates();
+        if (tpls.empty()) ImGui::TextWrapped("No templates yet.");
+        for (const auto& t : tpls) {
+            const Theme::MenuRow row = Theme::menu_row(t.name.c_str(), nullptr, true, false, 0.0f);
+            if (row.hovered)
+                Theme::tooltip("Click: place these drawings on this chart (prices stay,\ntimes re-base to now).\nRight-click: delete the template.");
+            if (row.clicked) mgr.apply_template(t.name);
+            if (row.right_clicked) mgr.delete_template(t.name);
+        }
+        Theme::end_menu_group();
+    }
 }
 
 void render_topbar_button(DrawingManager& mgr) {

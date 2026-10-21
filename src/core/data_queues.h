@@ -72,14 +72,37 @@ public:
             if (gap_start_ms_ <= 0.0) gap_start_ms_ = last_drain_ms_ > 0.0 ? last_drain_ms_ : steady_ms();
         }
         queue_.push_back(std::move(dispatch));
-        counters_.set(BacklogQueue::PendingDispatch, queue_.size());
+        counters_.set(BacklogQueue::PendingDispatch, queue_.size() + priority_.size());
+    }
+
+    // Priority lane: rare, large, irreplaceable batches (historical candle /
+    // volume / stat catch-ups). They never take part in the overflow drop and
+    // they drain ahead of the live firehose: a dropped trade costs one tick,
+    // while a dropped history batch costs a full re-request round trip and
+    // leaves "Loading candles" on screen until it is re-served. Self-host
+    // note: with EDGEDEPTH_PTHREADS=OFF the inline main-thread parse also
+    // lands here, and a storm must not be allowed to erase the batch that
+    // unblocks the chart.
+    void push_priority(PendingDispatch&& dispatch) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        priority_.push_back(std::move(dispatch));
+        counters_.set(BacklogQueue::PendingDispatch, queue_.size() + priority_.size());
     }
 
     void drain(std::vector<PendingDispatch>& out) {
         std::lock_guard<std::mutex> lock(mutex_);
-        out.swap(queue_);
+        if (priority_.empty()) {
+            out.swap(queue_);
+        } else {
+            out = std::move(priority_);
+            priority_.clear();
+            out.insert(out.end(),
+                       std::make_move_iterator(queue_.begin()),
+                       std::make_move_iterator(queue_.end()));
+            queue_.clear();
+        }
         last_drain_ms_ = steady_ms();
-        counters_.set(BacklogQueue::PendingDispatch, queue_.size());
+        counters_.set(BacklogQueue::PendingDispatch, queue_.size() + priority_.size());
     }
 
     static double steady_ms() {
@@ -115,6 +138,7 @@ public:
 private:
     QueueBacklogCounters& counters_;
     mutable std::mutex mutex_;
+    std::vector<PendingDispatch> priority_;  // history batches, drain first
     std::vector<PendingDispatch> queue_;
     std::uint64_t dropped_ = 0;        // since the last take_drops
     std::uint64_t dropped_total_ = 0;  // lifetime, for the perf panel

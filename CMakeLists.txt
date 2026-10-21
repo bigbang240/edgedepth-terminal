@@ -532,6 +532,11 @@ set(PROJECT_SRC
         src/core/debug_manager.cpp
         src/core/paper_trading_manager.h
         src/core/paper_trading_manager.cpp
+        src/core/local_paper_engine.h
+        src/core/local_paper_engine.cpp
+        src/core/position_sizing.h
+        src/core/execution_bridge.h
+        src/core/execution_bridge.cpp
         src/core/ticker_manager.h
         src/core/ticker_manager.cpp
         src/core/analytics_manager.h
@@ -686,7 +691,6 @@ set(COMMON_COMPILE_FLAGS
 set(WASM_EXPORTED_FUNCTIONS
         _main
         _sync_pointer_modifiers
-        __ed_request_snapshot
         __education_on_lesson_fetch
         __edu_cmd_continue
         __edu_cmd_back

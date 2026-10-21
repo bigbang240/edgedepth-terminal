@@ -373,10 +373,37 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
                 rt_candles_ = !rt_candles_;
                 chart_type_ = rt_candles_ ? ChartType::Candles : ChartType::Line;
             }
+            if (rt_candles_) {
+                if (layer_row("Heikin-Ashi", rt_heikin_, false)) rt_heikin_ = !rt_heikin_;
+                if (ImGui::IsItemHovered())
+                    Theme::tooltip("Smoothed real-time candles: the open is the midpoint of the previous\nHA candle, the close is the raw OHLC4. Trend structure without wick noise.");
+            }
             render_realtime_cvd_layer();
+            if (layer_row("Est. liquidations", rt_liq_levels_enabled_, false)) rt_liq_levels_enabled_ = !rt_liq_levels_enabled_;
+            if (ImGui::IsItemHovered())
+                Theme::tooltip("Estimated liquidation clusters: open interest split over leverage tiers\nusing the recent tape. Red bands are forced sells (longs), green forced buys (shorts).\nAn estimate, not real orders.");
+            if (layer_row("Resting depth heat", rt_cum_depth_enabled_, false)) rt_cum_depth_enabled_ = !rt_cum_depth_enabled_;
+            if (ImGui::IsItemHovered())
+                Theme::tooltip("A second heat map: time-weighted resting depth per price (10-minute\nmemory). Gold rows are prices where orders have been sitting - shelves and\nwalls stand out from flicker. Hover a row for its size.");
             layer_section("ORDER BOOK SIGNALS");
             render_refill_layer_row();
             render_realtime_wall_layer();
+            layer_section("LAYER PRESETS");
+            {
+                static const char* kPresets[] = {"Scalp", "Swing", "Research"};
+                const int next = Theme::menu_choice_row("Layout", "rt_layer_preset", kPresets, 3,
+                    rt_layer_preset_ >= 0 && rt_layer_preset_ <= 2 ? rt_layer_preset_ : -1);
+                if (next >= 0 && next != rt_layer_preset_) {
+                    rt_layer_preset_ = next;
+                    apply_layer_preset(next);
+                }
+                if (ImGui::IsItemHovered())
+                    Theme::tooltip("One-click layer layouts for the real-time view:\n"
+                        "- Scalp: 1s hollow candles, walls + pulls, CVD, bubbles, fast alerts\n"
+                        "- Swing: 1m candles, estimated liquidations + resting depth, noise off\n"
+                        "- Research: everything on (walls table, peak-hold, trade line)\n"
+                        "Applies instantly; keep tuning afterwards, the workspace remembers it.");
+            }
             }
         } else if (!rt_mode_) {
             if (page == "Price levels") {

@@ -28,6 +28,9 @@
 #include "core/liqmap2_scorecard.h"
 #include "ui/realtime_navigation.h"
 #include "core/drawing_manager.h"
+#include "core/local_paper_engine.h"
+#include "core/position_sizing.h"
+#include "core/execution_bridge.h"
 #include "ui/price_profile_renderer.h"
 #include "ui/custom_implot.h"
 #include "core/footprint_manager.h"
@@ -235,10 +238,23 @@ static Terminal::Pair hl_census_pair_for(const Terminal::Pair& pair) {
 // (closed, hidden tab) drops out of the group without a teardown hook.
 namespace {
 struct TimeLink {
+    bool   enabled = false;    // user toggle ("Link charts", workspace link_charts)
+    // Candle-family owner: candle charts sync their full axis verbatim (or
+    // just the follow latch when the owner follows live, both landing on the
+    // same clock at the same timeframe).
     int    owner = 0;            // link_id_ of the chart that last drove the axis
     int    owner_frame = -1;
     double x_min = 0.0, x_max = 0.0;
     bool   follow = true;        // the owner's follow-live latch
+    // Real-time family owner: RT charts follow the live edge from the shared
+    // wall clock, so they sync the owner's zoom SPAN while live (each chart
+    // keeps its own right edge, honouring a paused view) and the full axis
+    // verbatim once the owner is scrolled back into history. The families
+    // never take each other's ranges; the crosshair mirror crosses both.
+    int    rt_owner = 0;
+    int    rt_owner_frame = -1;
+    double rt_x_min = 0.0, rt_x_max = 0.0;
+    bool   rt_follow = true;
     int    hover_owner = 0;      // link_id_ of the chart under the mouse
     int    hover_frame = -1;
     double hover_x = 0.0;
@@ -249,6 +265,10 @@ struct TimeLink {
 };
 TimeLink g_time_link;
 }  // namespace
+
+bool ChartWidget::link_charts_enabled() { return g_time_link.enabled; }
+void ChartWidget::set_link_charts_enabled(bool on) { g_time_link.enabled = on; }
+bool ChartWidget::link_active() const { return time_linked_ || g_time_link.enabled; }
 
 CandleManager& ChartWidget::candles() const {
     if (owned_candles_) return *owned_candles_;
@@ -452,6 +472,7 @@ void ChartWidget::subscribe_chart_streams() {
             .callback = [](void* ptr, const Terminal::Liquidation& l) {
                 auto* w = static_cast<ChartWidget*>(ptr);
                 w->ctx_.liq_heatmap_mgr().add_observed_event(w->pair_, l);
+                w->on_liquidation_observed(l);  // Phase 2 S1: cascade chains
             }
         };
         chart_stream_mgr_->subscribe_liquidations(liq_key, liq_handler);
@@ -475,6 +496,10 @@ void ChartWidget::unsubscribe_chart_streams() {
         chart_stream_mgr_->unsubscribe_liquidations(liq_key, this);
     }
     volume_subscribed_ = stats_subscribed_ = liq_events_subscribed_ = false;
+    cascade_detector_.reset();  // chains are per-symbol observed tails
+    alert_engine_.reset();      // S2: threshold queues are per-symbol too
+    liq_estimator_.reset();     // S3: the estimate is per-symbol as well
+    last_pull_alert_ms_ = 0;
     chart_stream_mgr_ = nullptr;
 }
 
@@ -539,6 +564,53 @@ void ChartWidget::apply_chart_type(ChartType type) {
         last_visible_range_.Y.Min = last_visible_range_.Y.Max = 0.0;
         renko_view_t0_ms_ = renko_view_t1_ms_ = 0;
     }
+}
+
+// Browser-side side effects shared by every crossing alert (Phase 3): a
+// desktop notification when permitted plus a short beep at the given tone.
+#ifdef __EMSCRIPTEN__
+static void alert_notify_beep(const char* msg, double freq) {
+    EM_ASM({
+        try {
+            var msg = UTF8ToString($0);
+            if (window.Notification && Notification.permission === 'granted')
+                new Notification('EdgeDepth alert', { body: msg });
+            var AC = window.AudioContext || window.webkitAudioContext;
+            if (AC) { var c = new AC(); var o = c.createOscillator();
+                var g = c.createGain(); o.frequency.value = $1;
+                o.connect(g); g.connect(c.destination); g.gain.value = 0.06;
+                o.start(); o.stop(c.currentTime + 0.18); }
+        } catch (e) {}
+    }, msg, freq);
+}
+#else
+static void alert_notify_beep(const char*, double) {}
+#endif
+
+// Phase 5: auto-open a local paper position on an alert crossing (price alert
+// or drawn-line crossing). Entry at the trigger price, stop = stop%% away,
+// TP1 = 1R / TP2 = 2R, quantity risk-based from position_sizing. Rejections
+// (cooldown, duplicate, sizing) fail silently - the toast only reports opens.
+void ChartWidget::maybe_paper_on_alert(bool long_side, double price,
+                                       const char* source) {
+    auto* eng = ctx_.local_paper;
+    if (!eng || !(price > 0.0)) return;
+    const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    const bool ok = eng->open(pair_.exchange.c_str(), pair_.symbol.c_str(),
+                              long_side, price,
+                              std::clamp(paper_auto_stop_pct_, 0.05, 20.0),
+                              source, now) != nullptr;
+    if (!ok) return;
+    char pbuf[32];
+    fmt_.format_price(pbuf, sizeof(pbuf), price);
+    std::string sym = pair_.symbol;
+    for (char& c : sym) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 32);
+    alert_toast_msg_ = std::string("Paper ") + (long_side ? "long" : "short") +
+                       " opened at " + pbuf;
+    alert_toast_until_ = ImGui::GetTime() + 5.0;
+    alert_notify_beep(alert_toast_msg_.c_str(), 600);
+    eng->tick(now);
 }
 
 void ChartWidget::update() {
@@ -657,20 +729,13 @@ void ChartWidget::update() {
                     for (char& c : sym) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 32);
                     alert_toast_msg_ = sym + " crossed " + pbuf;
                     alert_toast_until_ = ImGui::GetTime() + 6.0;
-#ifdef __EMSCRIPTEN__
-                    EM_ASM({
-                        try {
-                            var msg = UTF8ToString($0);
-                            if (window.Notification && Notification.permission === 'granted')
-                                new Notification('EdgeDepth alert', { body: msg });
-                            var AC = window.AudioContext || window.webkitAudioContext;
-                            if (AC) { var c = new AC(); var o = c.createOscillator();
-                                var g = c.createGain(); o.frequency.value = 880;
-                                o.connect(g); g.connect(c.destination); g.gain.value = 0.06;
-                                o.start(); o.stop(c.currentTime + 0.18); }
-                        } catch (e) {}
-                    }, alert_toast_msg_.c_str());
-#endif
+                    alert_notify_beep(alert_toast_msg_.c_str(), 880);
+                    if (paper_on_alerts_)
+                        maybe_paper_on_alert(a.arm_above, px, "alert");
+                    if (exec_bridge::settings().enabled)
+                        exec_bridge::notify("alert", pair_.exchange.c_str(),
+                            pair_.symbol.c_str(), a.arm_above ? "long" : "short",
+                            px, alert_toast_msg_.c_str());
                     alerts_.erase(alerts_.begin() + static_cast<long>(i));
                 } else {
                     ++i;
@@ -681,6 +746,78 @@ void ChartWidget::update() {
     } else {
         const double px = candles().last_close_price();
         if (px > 0.0) alert_last_price_ = px;
+    }
+
+    // ── Phase 3: drawn-shape crossing alerts ─────────────────────────────
+    // Every HLine/HRay acts as a horizontal level and every two-anchor line
+    // (Trendline/Ray/ExtendedLine/Arrow) as a projected level at the current
+    // time. Same edge + toast + beep machinery as the price alerts above;
+    // the level survives the fire so a drawn line keeps guarding until it is
+    // deleted or the toggle goes off.
+    {
+        double px = candles().last_close_price();
+        if (rt_mode_) {
+            const auto& tr = candles().realtime_trades().trades();
+            if (!tr.empty()) px = tr.back().price;
+            else if (rt_quote_.best_bid > 0.0 && rt_quote_.best_ask > 0.0)
+                px = 0.5 * (rt_quote_.best_bid + rt_quote_.best_ask);
+        }
+        const int64_t now_ms = rt_mode_ ? rt_clock_ms_
+            : std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+        // Phase 5: mark-to-market feed for the local paper engine - this chart's
+        // price path (RT tick / quote mid / candle close) drives every open
+        // position on this symbol, including stop/TP/trail exits.
+        if (px > 0.0 && ctx_.local_paper) {
+            ctx_.local_paper->on_price(pair_.exchange.c_str(), pair_.symbol.c_str(),
+                                       px, now_ms);
+            ctx_.local_paper->tick(now_ms);   // 1s persistence debounce
+        }
+        if (drawing_alerts_enabled_ && px > 0.0 && drawing_alert_last_price_ > 0.0 &&
+            !ctx_.drawing_mgr().hidden_all()) {
+            const double before = drawing_alert_last_price_;
+            for (const auto& d : ctx_.drawing_mgr().items()) {
+                if (d.hidden || d.anchors.empty()) continue;
+                double level = 0.0;
+                const drawing::Tool t = d.tool;
+                if (t == drawing::Tool::HLine || t == drawing::Tool::HRay)
+                    level = d.anchors[0].price;
+                else if ((t == drawing::Tool::Trendline || t == drawing::Tool::Ray ||
+                          t == drawing::Tool::ExtendedLine || t == drawing::Tool::Arrow) &&
+                    d.anchors.size() >= 2) {
+                    // Projected price at the current time (extrapolates past
+                    // the anchors, like a ray would continue).
+                    const int64_t span = d.anchors[1].t_ms - d.anchors[0].t_ms;
+                    const double f = span != 0
+                        ? double(now_ms - d.anchors[0].t_ms) / double(span) : 0.0;
+                    level = d.anchors[0].price + (d.anchors[1].price - d.anchors[0].price) * f;
+                } else {
+                    continue;
+                }
+                if (!(level > 0.0)) continue;
+                const double before_gap = before - level, now_gap = px - level;
+                if ((before_gap >= 0.0 && now_gap < 0.0) || (before_gap <= 0.0 && now_gap > 0.0)) {
+                    char pbuf[32];
+                    fmt_.format_price(pbuf, sizeof(pbuf), level);
+                    std::string sym = pair_.symbol;
+                    for (char& c : sym) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 32);
+                    const bool flat = t == drawing::Tool::HLine || t == drawing::Tool::HRay;
+                    alert_toast_msg_ = sym + " crossed your ";
+                    alert_toast_msg_ += flat ? "line" : "trendline";
+                    alert_toast_msg_ += " at ";
+                    alert_toast_msg_ += pbuf;
+                    alert_toast_until_ = ImGui::GetTime() + 6.0;
+                    alert_notify_beep(alert_toast_msg_.c_str(), 740);
+                    if (paper_on_alerts_)
+                        maybe_paper_on_alert(now_gap > 0.0, px, "drawing");
+                    if (exec_bridge::settings().enabled)
+                        exec_bridge::notify("alert", pair_.exchange.c_str(),
+                            pair_.symbol.c_str(), now_gap > 0.0 ? "long" : "short",
+                            px, alert_toast_msg_.c_str());
+                }
+            }
+        }
+        if (px > 0.0) drawing_alert_last_price_ = px;
     }
 
     update_volume_indicators();
@@ -835,7 +972,7 @@ void ChartWidget::change_timeframe(const int new_tf_seconds)
         ctx_.replay_mgr().set_timeframe_ms(static_cast<int64_t>(new_tf_seconds) * 1000);
     }
     // Linked charts read one time axis, so they read one timeframe too.
-    if (time_linked_) {
+    if (link_active() && !rt_mode_) {
         g_time_link.tf_seconds = new_tf_seconds;
         g_time_link.tf_frame = ImGui::GetFrameCount();
         g_time_link.tf_owner = link_id_;
@@ -1991,8 +2128,10 @@ void ChartWidget::render_chart() {
         x_axis_min_ = last_visible_range_.X.Min;
         x_axis_max_ = last_visible_range_.X.Max;
         // Linked charts: mirror the other chart's crosshair time, and publish
-        // this chart's axis + hover for the rest of the group.
-        if (time_linked_ && !rt_mode_ && chart_type_ != ChartType::TPO) {
+        // this chart's axis + hover for the rest of the group. Works for the
+        // compare link and the user "Link charts" toggle, in both real-time
+        // and candle mode (TPO has its own axis semantics and stays out).
+        if (link_active() && chart_type_ != ChartType::TPO) {
             time_link_draw_mirror();
             time_link_publish();
         }
@@ -2014,9 +2153,30 @@ void ChartWidget::render_chart() {
 // last owner keeps publishing, so a follower keeps tracking it. Ownership
 // is a frame stamp: an owner that stopped rendering releases the group.
 void ChartWidget::time_link_apply(double& x_min, double& x_max, bool& force_always) {
-    if (!time_linked_ || rt_mode_ || chart_type_ == ChartType::TPO) return;
+    if (!link_active() || chart_type_ == ChartType::TPO) return;
     const int frame = ImGui::GetFrameCount();
     const TimeLink& l = g_time_link;
+    if (rt_mode_) {
+        if (l.rt_owner == 0 || l.rt_owner == link_id_ || l.rt_owner_frame < frame - 2) return;
+        const double span = l.rt_x_max - l.rt_x_min;
+        if (l.rt_follow) {
+            // Both ride the same wall clock: match the owner's zoom span and
+            // let each chart keep its own right edge (a paused view stays put).
+            if (span > 0) rt_span_ms_ = std::clamp(span, 5000.0, 1800000.0 / 0.88);
+            if (!candles().follow_live()) candles().set_follow_live(true);
+            return;
+        }
+        // Owner is parked in history: take its axis verbatim, like candles.
+        if (candles().follow_live()) candles().set_follow_live(false);
+        if (span > 0) {
+            x_min = l.rt_x_min;
+            x_max = l.rt_x_max;
+            last_visible_range_.X.Min = l.rt_x_min;
+            last_visible_range_.X.Max = l.rt_x_max;
+            force_always = true;
+        }
+        return;
+    }
     if (l.owner == 0 || l.owner == link_id_ || l.owner_frame < frame - 2) return;
     if (l.follow) {
         // Both follow the same clock at the same timeframe: the chart's own
@@ -2035,18 +2195,31 @@ void ChartWidget::time_link_apply(double& x_min, double& x_max, bool& force_alwa
 }
 
 // Owner side, after the plot: the hovered chart takes ownership; the current
-// owner re-stamps every frame it renders so followers keep tracking.
+// owner re-stamps every frame it renders so followers keep tracking. Each
+// family (candle / real-time) keeps its own owner so a mixed desktop syncs
+// within both without either stealing the other's axis.
 void ChartWidget::time_link_publish() {
     const int frame = ImGui::GetFrameCount();
     TimeLink& l = g_time_link;
     const bool hovered = ImPlot::IsPlotHovered() || ImPlot::IsAxisHovered(ImAxis_X1);
-    const bool owner_gone = l.owner == 0 || l.owner_frame < frame - 2;
-    if (hovered || owner_gone || l.owner == link_id_) {
-        l.owner = link_id_;
-        l.owner_frame = frame;
-        l.x_min = last_visible_range_.X.Min;
-        l.x_max = last_visible_range_.X.Max;
-        l.follow = candles().follow_live();
+    if (rt_mode_) {
+        const bool owner_gone = l.rt_owner == 0 || l.rt_owner_frame < frame - 2;
+        if (hovered || owner_gone || l.rt_owner == link_id_) {
+            l.rt_owner = link_id_;
+            l.rt_owner_frame = frame;
+            l.rt_x_min = last_visible_range_.X.Min;
+            l.rt_x_max = last_visible_range_.X.Max;
+            l.rt_follow = candles().follow_live();
+        }
+    } else {
+        const bool owner_gone = l.owner == 0 || l.owner_frame < frame - 2;
+        if (hovered || owner_gone || l.owner == link_id_) {
+            l.owner = link_id_;
+            l.owner_frame = frame;
+            l.x_min = last_visible_range_.X.Min;
+            l.x_max = last_visible_range_.X.Max;
+            l.follow = candles().follow_live();
+        }
     }
     if (hovered) {
         l.hover_owner = link_id_;
@@ -2077,7 +2250,7 @@ void ChartWidget::time_link_draw_mirror() {
 
 // Per frame (update): adopt a timeframe another linked chart switched to.
 void ChartWidget::time_link_adopt_timeframe() {
-    if (!time_linked_) return;
+    if (!link_active() || rt_mode_) return;  // RT buckets are per-chart by design
     const TimeLink& l = g_time_link;
     if (l.tf_seconds <= 0 || l.tf_owner == link_id_ || l.tf_frame <= link_tf_seen_frame_) return;
     link_tf_seen_frame_ = l.tf_frame;

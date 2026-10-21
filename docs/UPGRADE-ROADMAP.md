@@ -85,39 +85,39 @@
 
 ## 🚀 نقشهٔ راه پیشنهادی (۸ فاز، مرتب‌شده بر ارزش برای شما)
 
-### فاز ۱ — «هیت‌مپ حرفه‌ای» (اولویت مطلق — هستهٔ ادغام آینده)
+### فاز ۱ — «هیت‌مپ حرفه‌ای» (اولویت مطلق — هستهٔ ادغام آینده) — ✅ تحویل‌شده
 هدف: هیت‌مپ را به سطح پلتفرم‌های پولی برسانید و **مستقل از UI** قابل استفاده کنید.
-- [ ] **پالت رنگی قابل تنظیم** (JSON theme: teal/gold/bluered/…، gamma، شفافیت، نرمال‌سازی per-view/per-column/global)
-- [ ] **حالت تجمیع ستون**: آخرین اسنپ‌شات (فعلی) + Max + Mean + Volume-weighted
-- [ ] **پیک‌هولد (Peak hold)**: رد تاریک کم‌رنگ برای بیشینهٔ ۱۰/۳۰ دقیقهٔ اخیر — دیوارهای مهم هرگز از چشم نمی‌افتند
-- [ ] **Snapshot API**: `window.__ed_snapshot()` → PNG چارت + JSON دادهٔ مرئی (برای اتوماسیون/گزارش)
-- [ ] **دیتا-بیرون‌دهی WS**: یک mini-service Node که state هیت‌مپ/کندل/ترید را به‌صورت WS ساده منتشر کند ← **این پل ادغام با ترمینال اصلی شماست**
-- [ ] عمق بافر RT قابل تنظیم (۳۰min فعلی → ۲/۶/۱۲ ساعت با مدیر حافظه)
+- [x] **پالت رنگی قابل تنظیم** (JSON theme: teal/gold/bluered/…، gamma، شفافیت، نرمال‌سازی per-view/per-column/global) — PR#2
+- [x] **حالت تجمیع ستون**: آخرین اسنپ‌شات (فعلی) + Max + Mean + Volume-weighted — PR#2
+- [x] **پیک‌هولد (Peak hold)**: رد تاریک کم‌رنگ برای بیشینهٔ ۱۰/۳۰ دقیقهٔ اخیر — PR#2
+- [x] **Snapshot API**: `window.__ed_state` (mirror دوبار در ثانیه) + ضبط canvas از `captureStream` — PR#2
+- [x] **دیتا-بیرون‌دهی WS**: پل JSON-WS روی سیم protobuf گیت‌وی (feat(egress) در edgedepth-gateway master)
+- [ ] عمق بافر RT قابل تنظیم (۳۰min فعلی → ۲/۶/۱۲ ساعت با مدیر حافظه) — افق مرورگر تا ۱۲h از `__EDGEDEPTH_RT_ARCHIVE_MS__`
 
 ### فاز ۲ — «جنگ افزار لیکوییدیشن»
 هدف: دیدن جایی که بازار می‌سوزد، قبل از دیگران.
-- [ ] **مدل برآورد لیکوییدیشن خودتان**: از OI + mark price + توزیع اهرم فرضی → محاسبهٔ سطوح انفجار بدون نیاز به سرور EdgeDepth
-- [ ] **Cascade detector**: شناسایی زنجیره (۳+ لیکوییدیشن در <۲ ثانیه در یک جهت) + مارکر ویژه + هشدار
-- [ ] **Alert engine**: آستانهٔ دلاری لیکوییدیشن، ظاهر/خوردن دیوار، الگوی pull → صدا + Notification API مرورگر
-- [ ] جدول «دیوارهای فعال» (widget جدید): سن، حجم اولیه/حاضر، touch count، فاصلهٔ قیمت
-- [ ] Heat-map دوم: عمق انباشته در زمان (cumulative resting depth) به‌صورت لایهٔ اختیاری
+- [x] **مدل برآورد لیکوییدیشن خودتان**: از OI + mark price + توزیع اهرم فرضی → محاسبهٔ سطوح انفجار بدون نیاز به سرور EdgeDepth — S3 (`core/liq_levels.h`): چگالی ورود از نوار معاملات ۱۵ دقیقه‌ای × ترکیب اهرم (کلاه نماد از liq_field) → خوشه‌های USD-لنگر‌شده به OI واقعی؛ نوارهای افقی قرمز (فورس‌سل لانگ) / سبز (فورس‌بای شورت) با لیبل و tooltip در نمای RT، لایهٔ «Est. liquidations» در منوی Layers، بازمحاسبهٔ throttle ۲s
+- [x] **Cascade detector**: شناسایی زنجیره (۳+ لیکوییدیشن در <۲ ثانیه در یک جهت) + مارکر ویژه + هشدار — باند کهربایی زمان/قیمت + pill «CASCADE» روی هیت‌مپ، toast + Notification + بیپ (`core/cascade_detector.h`)
+- [x] **Alert engine**: آستانهٔ دلاری لیکوییدیشن (تک‌ریکوییدیشن ≥ آستانه، ددوپ ۲s)، هشدار خوردن دیوار (pull ردیابی‌شدهٔ rt_walls) → toast + Notification + بیپ (کاسکید 660Hz / لیکوییدیشن 880Hz / دیوار 520Hz) — S2 (`core/alert_engine.h`)
+- [x] جدول «دیوارهای فعال» (widget جدید): سن، حجم اولیه/حاضر، touch count، فاصلهٔ قیمت — S4 (`render_realtime_walls_table`): پنل همیشه‌نمایان بالا-راست داخل نمودار، sort بر اساس حجم، pip رنگی bid/ask، شمارش تاچ بر پایهٔ ثانیه در `rt_walls::Tracker::count_touches`، toggle «Active walls table» زیر لایهٔ Walls
+- [x] Heat-map دوم: عمق انباشته در زمان (cumulative resting depth) به‌صورت لایهٔ اختیاری — S5 (`render_realtime_cum_depth`): میانگین نمایی اندازهٔ هر سطح قیمت با حافظهٔ ~۱۰ دقیقه (کاهیدهٔ تنبل هنگام خروج سطح)، ردیف‌های طلایی روی هیت‌مپ برای قفسه/دیوارهای ماندگار، نرمال‌سازی درون دید، tooltip اندازهٔ استراحت، لایهٔ «Resting depth heat» در منوی Layers، ذخیره در workspace، تجمیع همیشگی (آماده هنگام فعال‌سازی)
 
 ### فاز ۳ — «چارت تریدینگ-گرید»
-- [ ] ذخیره/بارگذاری **چیدمان لایه‌ها به‌صورت preset** («اسکالپ»، «سوئینگ»، «تحقیق»)
-- [ ] هشدار متصل به اشکال Draw (عبور قیمت از Trendline/HLine → alert)
-- [ ] چند-چارت sync (کراس‌هیر و زوم هماهنگ بین نمادها)
-- [ ] نام‌گذاری و ذخیرهٔ الگوهای رسم (template lines: سطوح حمایت شخصی)
-- [ ] گزینهٔ Heikin-Ashi روی RT (فعلاً فقط کندل/خط در RT)
+- [x] ذخیره/بارگذاری **چیدمان لایه‌ها به‌صورت preset** («اسکالپ»، «سوئینگ»، «تحقیق») — بخش «LAYER PRESETS» در منوی Layers نمای RT: سه چیدمان یک‌کلیکی (Scalp: کندل توخالی 1s + دیوارها و پول‌ها + CVD + بابل‌ها + هشدارهای سریع / Swing: کندل 1m + برآورد لیکوییدیشن + عمق انباشته، نویز خاموش / Research: همه‌چیز روشن شامل جدول دیوارها و peak-hold) — `apply_layer_preset`، آخرین preset انتخابی در workspace ذخیره می‌شود (`rt_layer_preset`)
+- [x] هشدار متصل به اشکال Draw (عبور قیمت از Trendline/HLine → alert) — هر HLine/HRay به‌صورت سطح افقی و هر خط دو-لنگری (Trendline/Ray/ExtendedLine/Arrow) به‌صورت سطح تصویرشده در زمان حال پایش می‌شود؛ عبور در هر دو جهت → toast + Notification + بیپ 740Hz (helper مشترک `alert_notify_beep`)؛ سطح مصرف نمی‌شود (برخلاف price alert یک‌بارمصرف) و تا حذف خط مسلح می‌ماند؛ toggle «Drawing alerts» در گروه Alerts منوی RT، ذخیره در workspace (`drawing_alerts`)؛ در هر دو حالت RT (آخرین قیمت معامله/میانگین quote) و کندلی (last close) کار می‌کند
+- [x] چند-چارت sync (کراس‌هیر و زوم هماهنگ بین نمادها) — تاگل «Link charts» در منوی RT (کنار Side panels): همهٔ چارت‌های باز (هر نماد، لایو/ریپلی) یک گروه می‌شوند؛ کراس‌هیر به‌صورت خط‌چین عمودی روی بقیه چارت‌ها آینه می‌شود. دو خانوادهٔ مستقل: چارت‌های RT zoom span مالک را همگام می‌کنند (لبهٔ راست هر چارت از ساعت خودش، view مکث‌شده جابه‌جا نمی‌شود) و چارت‌های کندلی محور کامل را؛ mirror کراس‌هیر بین هر دو خانواده کار می‌کند. فریم-استمپ مالکیت (hover = مالک)، میراث لینک compare هم حفظ شد — ذخیره در workspace (`link_charts`)
+- [x] نام‌گذاری و ذخیرهٔ الگوهای رسم (template lines: سطوح حمایت شخصی) — بخش «TEMPLATES» در منوی Draw: نام + دکمهٔ Save = ذخیرهٔ همهٔ رسم‌های نماد فعلی؛ کلیک روی هر الگو = جای‌گذاری روی چارت فعلی (id تازه، زمان‌ها به "الان" re-base می‌شوند، قیمت‌ها مطلق می‌مانند)، راست-کلیک = حذف. فروشگاه سراسری در localStorage (`edgedepth.drawtemplates.v1`، تا ۶۴ الگو) — بین نمادها و نمادهای دیگر مشترک
+- [x] گزینهٔ Heikin-Ashi روی RT (فعلاً فقط کندل/خط در RT) — toggle «Heikin-Ashi» زیر «1s candles» در Layers: تبدیل HA روی باکت‌های RT (open = میانهٔ HA قبلی، close = OHLC4 خام؛ باکت درحال‌شکل‌گیری هم همین‌طور) — دقیقاً هم‌فرمول سری تاریخی HA؛ با hollow candles و ذخیرهٔ workspace (`rt_heikin`) سازگار است
 
-### فاز ۴ — «ضبط و درک»
-- [ ] **Recorder daemon**: سرویس Node که ۲۴/۷ همهٔ نمادهای watchlist را در .edpack ذخیره کند → آرشیو شخصی بی‌نهایت
-- [ ] Event finder: جست‌وجو در آرشیو («همهٔ لحظه‌هایی که cascade>500k$ بود»)
-- [ ] گزارش روزانهٔ خودکار (HTML/PNG از snapshot API فاز ۱)
+### فاز ۴ — «ضبط و درک» — ✅ تحویل‌شده
+- [x] **Recorder daemon**: سرویس Node که ۲۴/۷ همهٔ نمادهای watchlist را در .edpack ذخیره کند → آرشیو شخصی بی‌نهایت — `tools/recorder/` (سرویس bun، پورت ۹۰۰۲): اتصال WS به gateway، اشتراک trades/orderbook/liquidations/candles(1m)، بلاک‌بندی zstd (~۴MiB)، هدر PackHeader با ob_seed (اسنپ‌شات اول) و candle_seeds، اپیزود ساعت‌به‌ساعت + manifest.json با سازگاری replay-library (schema v1)؛ HTTP با پشتیبانی Range/ETag/CORS؛ resolve نسبتی pack_url در ویجت کتابخانه (fetch جاوااسکریپت) تا کاتالوگ شخصی با `?replayLibrary=` باز شود
+- [x] **Event finder**: جست‌وجو در آرشیو («همهٔ لحظه‌هایی که cascade>500k$ بود») — رکوردر هر لحظهٔ معنادار را زنده ایندکس می‌کند: cascade (زنجیرهٔ ۳+ لیکوییدیشن هم‌جهت با گپ <۲s — همان قواعد cascade_detector ترمینال)، تک-لیکوییدیشن، فیل‌های بزرگ (پیش‌فرض ≥$250K، `RECORDER_BIGTRADE_USD`) و اسپایک حجم ۱m (≥۵× میانگین ساعت، `RECORDER_VOL_SPIKE_X`)؛ ذخیرهٔ append-only در `data/events/events-YYYYMMDD.jsonl` + حلقهٔ حافظه (۵۰هزار رویداد) که از restart جان سالم به در می‌برد؛ endpoint `/events?kind=&min_usd=&symbol=&from=&to=&limit=` با schema `edgedepth.events.v1` و resolve پکِ حاوی هر رویداد در زمان کوئری؛ بخش «EVENT FINDER» در ویجت Replay Library (segmented All/Cascades/Liquidations/Big fills/Volume spikes + کف دلاری + فیلتر نماد) که هر نتیجه را با یک Play به‌صورت «پک + سیک عمدی به ۴۵ ثانیه قبل از لحظه» باز می‌کند (تلاشِ پک هرس‌شده به‌صراحت «pruned» می‌شود)؛ URL فید از دایرکتوری/کوئری manifest URL مشتق می‌شود تا پسوند XTransformPort سلف-هاست دست‌نخورده بماند
+- [x] **گزارش روزانهٔ خودکار**: رکوردر هر روز (مرز نیمه‌شب محلی، `RECORDER_TZ_OFFSET_MIN`، پیش‌فرض +۲۱۰ تهران) گزارش HTML خودکفای روز قبل را در `data/reports/` می‌نویسد + نسخهٔ زندهٔ «امروز» هر ۳۰ دقیقه؛ `/report?date=YYYY-MM-DD` تولید لحظه‌ای، `/reports` فهرست JSON؛ شامل: KPI (O/H/L/C/Net، مجموع لیکوییدیشن longs/shorts، تعداد و بزرگ‌ترین cascade، فیل‌های ≥250K، اسپایک‌ها)، نمودار SVG قیمت ۱m با حباب‌های لیکوییدیشن (اندازه ∝ USD، قرمز=فورس‌سل لانگ/سبز=فورس‌بای شورت) و باند کهربایی cascade‌ها، میله‌های دلاری لیکوییدیشن به‌تفکیک ساعت محلی، جدول‌های cascade/بزرگ‌ترین لیکوییدیشن‌ها/فیل‌ها/اسپایک‌ها، هر ردیف با لینک «open in terminal» (پک + packt = لحظه − ۴۵s، ساخته‌شده در زمان کلیک از origin مرورگر تا پشت گیت‌وی هم درست کار کند)؛ گالری «Terminal snapshots» از snapshot API فاز ۱: پل جاوااسکریپت لندینگ (page.tsx) هر ۱۰ دقیقه با captureStream یک فریم از canvas ترمینال به `POST /snapshot` می‌فرستد و رکوردر آخرین ۱۲ تصویر روز را نگه می‌دارد؛ دکمهٔ «Daily report» در بخش Event finder ترمینال گزارش زندهٔ امروز را در تب جدید باز می‌کند
 
-### فاز ۵ — «اجرا و ریسک»
-- [ ] توسعهٔ Paper trading فعلی: دستور ساختگی از روی alert، آمار PnL روزانه
-- [ ] پل اجرای واقعی (اختیاری، سلف-هاست): webhook به صرافی/ربات شخصی — نسخهٔ شما AGPL است و می‌توانید
-- [ ] Position size calculator متصل به Draw (R:R واقعی روی چارت)
+### فاز ۵ — «اجرا و ریسک» — ✅ تحویل‌شده
+- [x] **Position size calculator متصل به Draw** — گروه «Execution» در منوی RT + بخش ابزارهای Position در style editor: Account ($) و Risk per trade (%) سراسری (در workspace ذخیره می‌شوند، `poscalc_account`/`poscalc_risk_pct`/`poscalc_show`)؛ چیپ بازهٔ Long/Short Position سطر سوم می‌گیرد: «size <qty> · $<notional> @ risk $<r>» — qty = account×risk% / فاصلهٔ stop با کپ 20x ناتینگال (`core/position_sizing.h`)؛ فیکس موقعیت چیپ در RT: لبهٔ راست پیش‌فرض +۱۰ دقیقه مرکز چیپ را بیرون از پلات می‌برد (RR chip قدیمی هم همین‌طور بود) — حالا مرکز روی بازهٔ مرئی باکس با clamp داخل پلات
+- [x] **Paper trading محلی (موتور سمت-کلاینت)** — `core/local_paper_engine.h/.cpp`: استریم STREAM_PAPER_TRADING در سلف-هاست مرده است (گیت‌وی Go آن را سرو نمی‌کند) → موتور کامل محلی: باز شدن خودکار سفارش از روی crossing های alert (قیمتی و خط رسم‌شده — «Paper on alerts» با stop% قابل تنظیم، TP1=1R نصف، TP2=2R ربع، runner با تریل 1R بعد از TP1، MAE/MFE، R-multiple)، mark-to-market از مسیر قیمت خود چارت (تیک RT/مید quote/کلوز کندل)، خروج با stop/trail/manual + دکمهٔ Close هر ردیف و Flatten all؛ ذخیره در localStorage (`edgedepth.localpaper.v1`، debounce ۱s، بازمانده از reload)؛ ویجت Paper Trading: نوار خلاصهٔ LOCAL (Balance/Equity/WR/PF/MaxDD)، جدول positions محلی، Journal محلی، جدول «Daily P&L (local)» با هایلایت امروز در تب By Type
+- [x] **پل اجرای واقعی (وب‌هوک، اختیاری، سلف-هاست)** — `core/execution_bridge.h/.cpp`: toggle «Webhook bridge» + InputText URL + «Include paper fills» + خط وضعیت «last: …» در گروه Execution؛ روی هر alert و باز/بسته شدن paper یک POST JSON (kind/exchange/symbol/side/price/msg/ts_ms) با fetch سمت JS (الگوی EM_JS — `-sFETCH` خاموش است) fire-and-forget می‌شود؛ وضعیت آخرین POST در منو نمایش داده می‌شود؛ مقصد باید CORS این origin را بپذیرد (در tooltip مستند شده — تست با رکوردر: dispatch انجام و «Failed to fetch» preflight صادقانه گزارش شد)
 
 ### فاز ۶ — «داده و یکپارچه‌سازی»
 - [ ] REST/WS سرور تحلیلی (gRPC هم شدنی) روی دادهٔ OrderbookManager — ترمینال اصلی شما به‌عنوان consumer

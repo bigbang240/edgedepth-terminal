@@ -83,6 +83,9 @@ void ChartWidget::render_realtime_wall_layer() {
     if (Theme::menu_toggle("Pulled walls", rt_pulls_enabled_)) rt_pulls_enabled_ = !rt_pulls_enabled_;
     if (ImGui::IsItemHovered())
         Theme::tooltip("A wall that stood, then mostly vanished within a second near price\nwithout trading there. Larger squares mean more removed depth.\nSignificant and recent pulls stay visible, up to 30 minutes or 256 retained events.");
+    if (Theme::menu_toggle("Active walls table", rt_walls_table_enabled_)) rt_walls_table_enabled_ = !rt_walls_table_enabled_;
+    if (ImGui::IsItemHovered())
+        Theme::tooltip("A compact table of the walls being tracked, top-right inside the plot:\nprice, size, multiple, age, distance from mid and how often the price traded into them.");
     Theme::end_menu_detail();
 }
 
@@ -302,6 +305,26 @@ void ChartWidget::render_realtime_hover() {
 
     // Pull squares and visible wall edge marks only, largest first.
     const double native = rt_dom_frame_.native_tick > 0 ? rt_dom_frame_.native_tick : tick_size_;
+    // Estimated liquidation bands (S3): the first band under the pointer.
+    if (!ImGui::GetIO().KeyAlt && rt_liq_levels_enabled_) {
+        for (const auto& c : liq_estimator_.clusters()) {
+            if (c.price < limits.Y.Min || c.price > limits.Y.Max) continue;
+            const float strength = float(std::min(1.0, c.share * 4.0));
+            const float half = 2.5f + 9.0f * strength;
+            const float y = ImPlot::PlotToPixels(0, c.price).y;
+            if (std::abs(mouse.y - y) > half + 2) continue;
+            char usd[24], price[48];
+            format_usd(c.usd, usd, sizeof(usd));
+            fmt_.format_price(price, sizeof(price), c.price);
+            Theme::begin_tooltip();
+            ImGui::TextColored(c.longs ? Theme::Tokens::DOWN : Theme::Tokens::UP, "Estimated %s liquidations ~%s",
+                c.longs ? "long" : "short", usd);
+            ImGui::TextDisabled("near %s \xc2\xb7 %.0fx dominant \xc2\xb7 %.1f%% of OI", price, double(c.tier), 100.0 * c.share);
+            ImGui::TextDisabled("An estimate from open interest + the recent tape, not real orders.");
+            Theme::end_tooltip();
+            return;
+        }
+    }
     if (!ImGui::GetIO().KeyAlt && rt_walls_enabled_ && !rt_wall_marks_.empty()) {
         const RtWallMark* hit = nullptr;
         for (const auto& m : rt_wall_marks_) {
@@ -482,4 +505,382 @@ void ChartWidget::render_realtime_cvd_lane() {
         ImPlot::EndPlot();
     }
     ImGui::PopID();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Liquidation cascades (Phase 2 S1). The observed @forceOrder tail feeds the
+// incremental detector; finished same-side chains (3+ liquidations within 2s
+// gaps) draw as amber time/price bands with a CASCADE pill over the heat and,
+// when "Cascade alerts" is on, fire the same toast + browser notification +
+// beep plumbing the price alerts use.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Shared S1/S2 alert path: in-app toast (alert_toast_msg_/alert_toast_until_)
+// plus the browser Notification API and a short beep. `freq` separates the
+// sources by ear: cascade 660Hz, big liquidation 880Hz, wall pull 520Hz.
+static void rt_fire_alert(const char* title, const std::string& msg, const float freq) {
+#ifdef __EMSCRIPTEN__
+    EM_ASM({
+        try {
+            var msg = UTF8ToString($0);
+            if (window.Notification && Notification.permission === 'granted')
+                new Notification(UTF8ToString($1), { body: msg });
+            var AC = window.AudioContext || window.webkitAudioContext;
+            if (AC) { var c = new AC(); var o = c.createOscillator();
+                var g = c.createGain(); o.frequency.value = $2;
+                o.connect(g); g.connect(c.destination); g.gain.value = 0.06;
+                o.start(); o.stop(c.currentTime + 0.24); }
+        } catch (e) {}
+    }, msg.c_str(), title, freq);
+#else
+    (void)title; (void)freq;
+#endif
+}
+
+static std::string rt_fmt_usd(const double v) {
+    char b[24];
+    if (v >= 1e9) snprintf(b, sizeof(b), "$%.2fB", v / 1e9);
+    else if (v >= 1e6) snprintf(b, sizeof(b), "$%.2fM", v / 1e6);
+    else if (v >= 1e3) snprintf(b, sizeof(b), "$%.0fk", v / 1e3);
+    else snprintf(b, sizeof(b), "$%.0f", v);
+    return b;
+}
+
+static std::string rt_upper_symbol(const Terminal::Pair& pair) {
+    std::string sym = pair.symbol;
+    for (char& c : sym) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 32);
+    return sym;
+}
+
+void ChartWidget::on_liquidation_observed(const Terminal::Liquidation& l) {
+    cascade_detector_.observe(l.timestamp_ms, l.price, l.is_buy);
+    if (liq_alerts_enabled_) {
+        const double usd = l.qty > 0.0 && l.price > 0.0 ? l.qty * l.price : 0.0;
+        if (usd >= liq_alert_usd_)
+            alert_engine_.observe_liquidation(l.timestamp_ms, l.price, usd, l.is_buy);
+    }
+    pump_cascade_alerts();
+}
+
+void ChartWidget::pump_cascade_alerts() {
+    CascadeChain chain;
+    while (cascade_detector_.take_finished(chain)) {
+        if (!cascade_alerts_enabled_ || chain.alerted) continue;
+        chain.alerted = true;
+        char span[24];
+        snprintf(span, sizeof(span), "%.1fs", chain.span_s());
+        alert_toast_msg_ = rt_upper_symbol(pair_) + " cascade: " +
+                           std::to_string(chain.count) + " liquidations in " + span;
+        alert_toast_until_ = ImGui::GetTime() + 6.0;
+        rt_fire_alert("EdgeDepth cascade", alert_toast_msg_, 660.0f);
+    }
+}
+
+// Phase 2 S2: drain the threshold queues. Big liquidation -> 880Hz, wall pull
+// -> 520Hz, both through the same toast + notification + beep path as S1.
+void ChartWidget::pump_rt_alerts() {
+    LiqAlertEvent l;
+    while (alert_engine_.take_liq_alert(l)) {
+        if (!liq_alerts_enabled_) continue;
+        char px[24];
+        snprintf(px, sizeof(px), "%.0f", l.price);
+        alert_toast_msg_ = rt_upper_symbol(pair_) + " liq " + rt_fmt_usd(l.usd) +
+                           (l.buy ? " SHORTS" : " LONGS") + " @ " + px;
+        alert_toast_until_ = ImGui::GetTime() + 6.0;
+        rt_fire_alert("EdgeDepth liquidation", alert_toast_msg_, 880.0f);
+    }
+    WallAlertEvent w;
+    while (alert_engine_.take_wall_alert(w)) {
+        if (!wall_alerts_enabled_) continue;
+        char px[24];
+        snprintf(px, sizeof(px), "%.0f", w.price);
+        alert_toast_msg_ = rt_upper_symbol(pair_) +
+                           (w.bid ? " bid wall pulled " : " ask wall pulled ") +
+                           rt_fmt_usd(w.vanished * w.price) + " @ " + px;
+        alert_toast_until_ = ImGui::GetTime() + 6.0;
+        rt_fire_alert("EdgeDepth wall", alert_toast_msg_, 520.0f);
+    }
+}
+
+// Feed every pull the tracker has classified since the last scan exactly once
+// (newest first; the watermark stops the walk). First scan after enable/reset
+// fast-forwards to the newest pull so pre-toggle pulls never burst as stale.
+void ChartWidget::scan_new_wall_pulls() {
+    if (!wall_alerts_enabled_) return;
+    if (last_pull_alert_ms_ == 0) {
+        rt_walls_.for_each_pull_newest([&](const rt_walls::Pull& p) {
+            last_pull_alert_ms_ = p.wall.end_ms;  // arm: skip pre-toggle pulls
+            return false;                          // only the newest matters
+        });
+        return;
+    }
+    int64_t newest = last_pull_alert_ms_;
+    rt_walls_.for_each_pull_newest([&](const rt_walls::Pull& p) {
+        if (p.wall.end_ms <= last_pull_alert_ms_) return false;  // seen already
+        alert_engine_.observe_wall_pull(p.wall.end_ms, p.wall.price, p.vanished, p.wall.bid);
+        if (p.wall.end_ms > newest) newest = p.wall.end_ms;
+        return true;
+    });
+    last_pull_alert_ms_ = newest;
+}
+
+void ChartWidget::render_realtime_cascades(ImDrawList* dl, const ImPlotRect& limits) {
+    cascade_detector_.sweep(int64_t(rt_clock_ms_));
+    pump_cascade_alerts();  // chains closed by the quiet-gap sweep alert here
+    scan_new_wall_pulls();  // S2: newly classified pulls enter the alert queue
+    pump_rt_alerts();       // S2: drain big-liq + wall-pull queues to the toast
+    const ImU32 band = Theme::u32(Theme::Tokens::WARN, 0.10f);
+    const ImU32 edge = Theme::u32(Theme::Tokens::WARN, 0.55f);
+    const ImU32 pill = Theme::u32(Theme::Tokens::WARN, 0.85f);
+    const ImU32 text = Theme::u32(Theme::Tokens::BASE);
+    const auto draw_one = [&](const CascadeChain& c) {
+        const ImVec2 t0 = ImPlot::PlotToPixels(double(c.start_ms), limits.Y.Max);
+        const ImVec2 t1 = ImPlot::PlotToPixels(double(c.end_ms), limits.Y.Min);
+        dl->AddRectFilled(ImVec2(t0.x, t0.y), ImVec2(t1.x, t1.y), band);
+        dl->AddLine(ImVec2(t0.x, t0.y), ImVec2(t0.x, t1.y), edge, 1.0f);
+        dl->AddLine(ImVec2(t1.x, t0.y), ImVec2(t1.x, t1.y), edge, 1.0f);
+        if (c.hi_price > c.lo_price) {
+            const ImVec2 p0 = ImPlot::PlotToPixels(limits.X.Min, c.hi_price);
+            const ImVec2 p1 = ImPlot::PlotToPixels(limits.X.Max, c.lo_price);
+            dl->AddRectFilled(ImVec2(p0.x, p0.y), ImVec2(p1.x, p1.y), band);
+        }
+        char label[32];
+        snprintf(label, sizeof(label), "CASCADE ×%d", c.count);
+        const ImVec2 ts = ImGui::CalcTextSize(label);
+        const ImVec2 plot_pos = ImPlot::GetPlotPos();
+        const ImVec2 base(std::max(t0.x, plot_pos.x) + 4.0f,
+                          std::max(t0.y, plot_pos.y) + 4.0f);
+        dl->AddRectFilled(ImVec2(base.x, base.y),
+                          ImVec2(base.x + ts.x + 10.0f, base.y + ts.y + 6.0f), pill, 3.0f);
+        dl->AddText(ImVec2(base.x + 5.0f, base.y + 3.0f), text, label);
+    };
+    if (const CascadeChain* oc = cascade_detector_.open_chain();
+        oc && oc->count >= CascadeDetector::kMinEvents) draw_one(*oc);
+    for (const auto& c : cascade_detector_.chains()) draw_one(c);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Phase 2 S3: estimated liquidation clusters (core/liq_levels.h) as horizontal
+// bands. Each band sits at the cluster price and spans the view; its thickness
+// and tint follow the share of open interest the estimate puts there. Longs
+// liquidate below the mark (forced sells, red); shorts above (forced buys,
+// green). Clusters outside the price window become left-edge markers (the
+// default price fit hugs the mark, and the nearest clusters sit 0.4%+ away).
+// The model is fed the live tape tail and recomputes at most every 2s.
+// ═══════════════════════════════════════════════════════════════════════════════
+void ChartWidget::render_realtime_liq_levels(ImDrawList* dl, const ImPlotRect& limits) {
+    if (!rt_liq_levels_enabled_ || !rt_archive_ || !rt_mode_) return;
+    const auto& trades = rt_paused_ ? rt_paused_trades_ : candles().realtime_trades().trades();
+    const double cap = liq_field::max_leverage(pair_.exchange, pair_.symbol);
+    liq_estimator_.update(rt_clock_ms_, liq_mark_price_, liq_oi_contracts_, trades, cap);
+    if (liq_estimator_.clusters().empty()) return;
+    ProfileScope profile("RT liq levels");
+    const ImVec2 pos = ImPlot::GetPlotPos(), size = ImPlot::GetPlotSize();
+    if (size.x <= 0 || size.y <= 0) return;
+    const float right = pos.x + size.x;
+    const float line = ImGui::GetTextLineHeight();
+    // Closest to the mark first: the edge slots go to the most relevant
+    // clusters when several sit outside the price window.
+    std::array<const liq_levels::Cluster*, 8> ordered{};
+    size_t n = 0;
+    for (const auto& c : liq_estimator_.clusters())
+        if (n < ordered.size()) ordered[n++] = &c;
+    const double mark = liq_mark_price_;
+    std::sort(ordered.begin(), ordered.begin() + std::ptrdiff_t(n),
+        [mark](const liq_levels::Cluster* a, const liq_levels::Cluster* b) {
+            return std::abs(a->price / mark - 1.0) < std::abs(b->price / mark - 1.0);
+        });
+    ImGui::PushFont(Theme::Fonts::mono_sm());
+    float last_y = -1000.0f;
+    int top_used = 0, bottom_used = 0;
+    for (size_t i = 0; i < n; ++i) {
+        const auto& c = *ordered[i];
+        const float strength = float(std::min(1.0, c.share * 4.0));
+        const ImVec4& tint = c.longs ? Theme::Tokens::DOWN : Theme::Tokens::UP;
+        const float half = 2.5f + 9.0f * strength;
+        char usd[24], price[48], label[96];
+        format_usd(c.usd, usd, sizeof(usd));
+        fmt_.format_price(price, sizeof(price), c.price);
+        const float plot_y = ImPlot::PlotToPixels(0, c.price).y;
+        const bool band = c.price >= limits.Y.Min && c.price <= limits.Y.Max &&
+                          plot_y >= pos.y + 1 && plot_y <= pos.y + size.y - 1;
+        float y = plot_y;
+        if (!band) {
+            // Off-screen: a left-edge marker below the status chip (two per
+            // edge), pointing at where the cluster sits relative to the mark.
+            const bool above = c.price > limits.Y.Max;
+            int& used = above ? top_used : bottom_used;
+            if (used >= 2 || !(mark > 0)) continue;
+            std::snprintf(label, sizeof(label), "Liq %s %+.2f%%", usd, 100.0 * (c.price / mark - 1.0));
+            const ImVec2 ts = ImGui::CalcTextSize(label);
+            const float x = pos.x + 10.0f;
+            const float chip_h = ctx_.replay_mgr().is_active() ? 62.0f : 34.0f;  // below the status chip
+            y = above ? pos.y + chip_h + float(used) * (ts.y + 6.0f)
+                      : pos.y + size.y - 8.0f - ts.y - float(used) * (ts.y + 6.0f);
+            ++used;
+            dl->AddRectFilled(ImVec2(x - 5.0f, y - 2.0f), ImVec2(x + ts.x + 5.0f, y + ts.y + 2.0f),
+                Theme::u32(Theme::Tokens::PANEL, 0.85f), Theme::Radius::R1);
+            dl->AddText(ImVec2(x, y), Theme::u32(tint, 0.95f), label);
+            dl->AddTriangleFilled(ImVec2(x + ts.x + 9.0f, y + ts.y * 0.5f - 3.0f),
+                                  ImVec2(x + ts.x + 9.0f, y + ts.y * 0.5f + 3.0f),
+                                  ImVec2(x + ts.x + 14.0f, y + ts.y * 0.5f), Theme::u32(tint, 0.9f));
+            continue;
+        }
+        if (std::abs(y - last_y) < line) continue;
+        last_y = y;
+        dl->AddRectFilled(ImVec2(pos.x, y - half), ImVec2(right, y + half),
+            Theme::u32(tint, 0.07f + 0.13f * strength));
+        dl->AddLine(ImVec2(pos.x, y), ImVec2(right, y), Theme::u32(tint, 0.28f + 0.30f * strength), 1.0f);
+        std::snprintf(label, sizeof(label), "Liq %s \xc2\xb7 %s", usd, price);
+        const ImVec2 ts = ImGui::CalcTextSize(label);
+        const ImVec2 a(right - ts.x - 12.0f,
+            std::clamp(y - ts.y * 0.5f, pos.y + 2.0f, pos.y + size.y - ts.y - 2.0f));
+        dl->AddRectFilled(ImVec2(a.x - 5.0f, a.y - 2.0f), ImVec2(a.x + ts.x + 5.0f, a.y + ts.y + 2.0f),
+            Theme::u32(Theme::Tokens::PANEL, 0.85f), Theme::Radius::R1);
+        dl->AddText(a, Theme::u32(tint), label);
+    }
+    ImGui::PopFont();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Phase 2 S5: cumulative resting depth - the second heat map. One intensity row
+// per price where depth has been resting: brightness follows the time-weighted
+// size the level holds (10-minute memory, lazily decayed once a level leaves),
+// so persistent shelves and walls stand out from flicker. Gold ramp: distinct
+// from the teal main heat, the red/green quotes and the S3 estimate bands.
+// ═══════════════════════════════════════════════════════════════════════════════
+void ChartWidget::render_realtime_cum_depth(ImDrawList* dl, const ImPlotRect& limits) {
+    if (!rt_cum_depth_enabled_ || rt_cum_levels_.empty() || !(tick_size_ > 0) || !rt_mode_) return;
+    ProfileScope profile("RT resting depth");
+    const ImVec2 pos = ImPlot::GetPlotPos(), size = ImPlot::GetPlotSize();
+    if (size.x <= 0 || size.y <= 0) return;
+    // The layer normalizes within the view, like the depth heat itself.
+    double visible_max = 0;
+    for (const auto& entry : rt_cum_levels_) {
+        const double price = double(entry.first) * tick_size_;
+        if (price < limits.Y.Min || price > limits.Y.Max) continue;
+        visible_max = std::max(visible_max,
+            double(entry.second.first) * std::exp(-double(rt_clock_ms_ - entry.second.second) / kCumTauMs));
+    }
+    if (!(visible_max > 0)) return;
+    const double mid = rt_book_valid_ && rt_latest_ ? 0.5 * (rt_latest_->bid + rt_latest_->ask) : 0.0;
+    const float row_h = std::max(1.0f, size.y / 720.0f);
+    int drawn = 0;
+    // Hover: map the mouse straight to the nearest tracked price bucket, so
+    // the readout works at any zoom (rows are sub-pixel when zoomed out).
+    double hover_price = 0, hover_rest = 0;
+    bool hover_bid = false;
+    if (ImPlot::IsPlotHovered()) {
+        const double at = ImPlot::PixelsToPlot(ImGui::GetIO().MousePos).y;
+        const auto it = rt_cum_levels_.find(std::llround(at / tick_size_));
+        if (it != rt_cum_levels_.end()) {
+            const double rested = double(it->second.first) *
+                std::exp(-double(rt_clock_ms_ - it->second.second) / kCumTauMs);
+            if (rested / visible_max >= 0.03) {
+                hover_price = double(it->first) * tick_size_;
+                hover_rest = rested;
+                hover_bid = mid > 0 && hover_price < mid;
+            }
+        }
+    }
+    for (const auto& entry : rt_cum_levels_) {
+        if (drawn > 600) break;
+        const double price = double(entry.first) * tick_size_;
+        if (price < limits.Y.Min || price > limits.Y.Max) continue;
+        const double rested = double(entry.second.first) *
+            std::exp(-double(rt_clock_ms_ - entry.second.second) / kCumTauMs);
+        const float intensity = float(rested / visible_max);
+        if (intensity < 0.03f) continue;
+        const float y = ImPlot::PlotToPixels(0, price + tick_size_ * 0.5).y;
+        dl->AddRectFilled(ImVec2(pos.x, y), ImVec2(pos.x + size.x, y + row_h),
+            ImGui::GetColorU32(ImVec4(0.94f, 0.70f, 0.31f, 0.05f + 0.30f * intensity)));
+        ++drawn;
+    }
+    if (!(hover_price > 0)) return;
+    ImGui::PushFont(Theme::Fonts::mono_sm());
+    char price[48], amount[24];
+    fmt_.format_price(price, sizeof(price), hover_price);
+    format_base(hover_rest, amount, sizeof(amount));
+    ImGui::PopFont();
+    Theme::begin_tooltip();
+    ImGui::TextUnformatted("Resting depth (cumulative)");
+    ImGui::Text("%s · %s %s resting on average over the last minutes",
+        price, amount, hover_bid ? "bid" : "ask");
+    ImGui::TextUnformatted("Time-weighted from the delivered book samples; flicker fades,\norders that sit keep glowing.");
+    Theme::end_tooltip();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Phase 2 S4: the tracked active walls as an always-visible compact table,
+// top-right inside the plot. Hand-drawn over the clip exactly like the status
+// chip - no layout change, no input grab; the per-wall interactivity stays
+// with the edge marks and their hover outlines.
+// ═══════════════════════════════════════════════════════════════════════════════
+void ChartWidget::render_realtime_walls_table(ImDrawList* dl) {
+    if (!rt_walls_table_enabled_ || !rt_walls_enabled_) return;
+    const auto limits = ImPlot::GetPlotLimits();
+    const ImVec2 pos = ImPlot::GetPlotPos(), size = ImPlot::GetPlotSize();
+    if (size.x < 340.0f || size.y < 180.0f) return;
+    std::array<const rt_walls::Wall*, 16> rows{};
+    size_t count = 0;
+    rt_walls_.for_each_live([&](const rt_walls::Wall& w) {
+        if (!w.stood(int64_t(rt_clock_ms_)) || w.price < limits.Y.Min || w.price > limits.Y.Max) return;
+        if (count < rows.size()) { rows[count++] = &w; return; }
+        size_t smallest = 0;
+        for (size_t i = 1; i < count; ++i)
+            if (rows[i]->size < rows[smallest]->size) smallest = i;
+        if (w.size > rows[smallest]->size) rows[smallest] = &w;
+    });
+    if (!count) return;
+    std::sort(rows.begin(), rows.begin() + std::ptrdiff_t(count),
+        [](const rt_walls::Wall* a, const rt_walls::Wall* b) { return a->size > b->size; });
+    if (count > 8) count = 8;
+    const double mid = rt_book_valid_ ? 0.5 * (rt_dom_frame_.bid() + rt_dom_frame_.ask()) : 0.0;
+
+    ImGui::PushFont(Theme::Fonts::mono_sm());
+    const float lh = ImGui::GetTextLineHeight();
+    const float row_h = lh + 4.0f;
+    const float width = 274.0f;
+    const float height = 6.0f + lh + 3.0f + lh + 3.0f + count * row_h + 5.0f;
+    const ImVec2 a(pos.x + size.x - width - 8.0f, pos.y + 8.0f);
+    const ImVec2 b(a.x + width, a.y + height);
+    dl->AddRectFilled(a, b, Theme::u32(Theme::Tokens::PANEL, 0.90f), Theme::Radius::R2);
+    dl->AddRect(a, b, Theme::u32(Theme::Tokens::BD2), Theme::Radius::R2, 0, 1.0f);
+    float y = a.y + 5.0f;
+    char title[48];
+    std::snprintf(title, sizeof(title), "ACTIVE WALLS \xc2\xb7 %s", realtime_base_asset());
+    dl->AddText(ImVec2(a.x + 8.0f, y), Theme::u32(Theme::Tokens::TX2), title);
+    y += lh + 3.0f;
+    const ImU32 head = Theme::u32(Theme::Tokens::TX3);
+    dl->AddText(ImVec2(a.x + 18.0f, y), head, "PRICE");
+    dl->AddText(ImVec2(a.x + 86.0f, y), head, "SIZE");
+    dl->AddText(ImVec2(a.x + 138.0f, y), head, "\xc3\x97");
+    dl->AddText(ImVec2(a.x + 162.0f, y), head, "AGE");
+    dl->AddText(ImVec2(a.x + 198.0f, y), head, "DIST");
+    dl->AddText(ImVec2(a.x + 240.0f, y), head, "TCH");
+    y += lh + 3.0f;
+    for (size_t i = 0; i < count; ++i) {
+        const auto& wall = *rows[i];
+        char price[48], sz[24], mult[16], age[24], dist[24], tch[16];
+        fmt_.format_price(price, sizeof(price), wall.price);
+        format_base(wall.size, sz, sizeof(sz));
+        std::snprintf(mult, sizeof(mult), "%.0f", wall.multiple);
+        const int64_t secs = std::max<int64_t>(0, (int64_t(rt_clock_ms_) - wall.start_ms) / 1000);
+        if (secs >= 60) std::snprintf(age, sizeof(age), "%lld:%02lld", (long long)(secs / 60), (long long)(secs % 60));
+        else std::snprintf(age, sizeof(age), "%llds", (long long)secs);
+        if (mid > 0) std::snprintf(dist, sizeof(dist), "%+.2f%%", 100.0 * (wall.price / mid - 1.0));
+        else std::snprintf(dist, sizeof(dist), "-");
+        std::snprintf(tch, sizeof(tch), "%d", wall.touches);
+        const ImU32 ink = Theme::u32(wall.bid ? Theme::Tokens::UP : Theme::Tokens::DOWN);
+        dl->AddRectFilled(ImVec2(a.x + 8.0f, y + 3.0f), ImVec2(a.x + 12.0f, y + row_h - 1.0f), ink);
+        dl->AddText(ImVec2(a.x + 18.0f, y), ink, price);
+        dl->AddText(ImVec2(a.x + 86.0f, y), Theme::u32(Theme::Tokens::TX1), sz);
+        dl->AddText(ImVec2(a.x + 138.0f, y), Theme::u32(Theme::Tokens::TX2), mult);
+        dl->AddText(ImVec2(a.x + 162.0f, y), Theme::u32(Theme::Tokens::TX2), age);
+        dl->AddText(ImVec2(a.x + 198.0f, y),
+            Theme::u32(mid > 0 && wall.price < mid ? Theme::Tokens::DOWN : Theme::Tokens::UP), dist);
+        dl->AddText(ImVec2(a.x + 240.0f, y), wall.touches > 0 ? Theme::u32(Theme::Tokens::WARN) : head, tch);
+        y += row_h;
+    }
+    ImGui::PopFont();
 }

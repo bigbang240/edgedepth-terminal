@@ -60,6 +60,7 @@
 #include "core/indicator_series.h"
 #include "core/analytics_manager.h"
 #include "core/paper_trading_manager.h"
+#include "core/local_paper_engine.h"
 #include "core/ticker_manager.h"
 #include "core/scanner_manager.h"
 #include "core/drawing_manager.h"
@@ -124,7 +125,13 @@ struct AppState {
     std::unique_ptr<IndicatorSeriesManager> series_mgr;  // Indicators V1 SeriesCache
     std::unique_ptr<AnalyticsManager> analytics_mgr;     // Positioning/Contagion state
     std::unique_ptr<DrawingManager> drawing_mgr;         // Chart drawing tools (annotations)
+    std::unique_ptr<LocalPaperEngine> local_paper_mgr;   // Client-side paper engine (Phase 5)
     std::unique_ptr<DataThread> data_thread;
+    // pthread-free builds (EDGEDEPTH_PTHREADS=OFF): pthread_create fails, the
+    // WS bytes parse inline on the main thread, and the dispatch queue would
+    // never be drained - it must be dropped everywhere (stream manager +
+    // message context) so StreamManager applies widget state directly.
+    bool inline_dispatch = false;
     // Message context (rebuilt on connect)
     MessageContext msg_ctx{};
     // App context - single dependency injection point for widgets/menus
@@ -144,7 +151,7 @@ struct AppState {
             paper_trading_mgr.get(),
             &TickerManager::instance(),
             &ScannerManager::instance(),
-            data_thread ? &data_thread->dispatch_queue() : nullptr
+            data_thread && !inline_dispatch ? &data_thread->dispatch_queue() : nullptr
         };
         msg_ctx.series = series_mgr.get();
         msg_ctx.analytics = analytics_mgr.get();
@@ -165,7 +172,8 @@ struct AppState {
             &TickerManager::instance(),
             series_mgr.get(),
             analytics_mgr.get(),
-            drawing_mgr.get()
+            drawing_mgr.get(),
+            local_paper_mgr.get()
         };
     }
 };
@@ -1085,7 +1093,11 @@ void drain_data_dispatches(double budget_ms, bool profile) {
     // thread. TIME-BUDGETED: ingest storms (replay catch-up, reconnect bursts)
     // used to execute unbounded in one frame - the classic 90-FPS dip. The
     // remainder stays queued in order and resumes next frame.
-    if (g_app.data_thread && g_app.data_thread->is_running()) {
+    // Unconditional on the data thread object: the pthread-free build parses
+    // inline, but a queue could still hold early-boot dispatches (the queue is
+    // only dropped after start() has failed) and the drain must not skip it.
+    if (g_app.data_thread) {
+        if (!g_app.data_thread->is_running()) budget_ms = std::max(budget_ms, 6.0);
         if (profile) g_profiler.begin("Dispatch");
         const size_t n = g_app.data_thread->drain_dispatches(*g_app.stream_mgr,
                                                              budget_ms);
@@ -2333,15 +2345,26 @@ int main(int, char**) {
     g_app.analytics_mgr = std::make_unique<AnalyticsManager>();
     g_app.drawing_mgr = std::make_unique<DrawingManager>();
     g_app.drawing_mgr->init(g_initial_route.exchange, g_initial_route.symbol);
+    g_app.local_paper_mgr = std::make_unique<LocalPaperEngine>();
 
     // Create and start data thread BEFORE build_message_context so it can
-    // set the dispatch_queue pointer in the context
+    // set the dispatch_queue pointer in the context. The queue is installed
+    // optimistically: the worker's copy of the context needs it for the
+    // cross-thread hand-off. If the thread could not start (self-host
+    // pthreads-free builds), drop the queue again - otherwise every widget
+    // dispatch would sit in a queue nothing drains (no tape, no CVD, history
+    // batches never applied).
     g_app.data_thread = std::make_unique<DataThread>();
     g_app.stream_mgr->set_dispatch_queue(&g_app.data_thread->dispatch_queue());
     g_app.build_message_context();
 
     // Start data thread with the fully-built context
     g_app.data_thread->start(g_app.msg_ctx);
+    if (!g_app.data_thread->is_running()) {
+        g_app.inline_dispatch = true;
+        g_app.stream_mgr->set_dispatch_queue(nullptr);
+        g_app.build_message_context();
+    }
 
     // Pack mode: NO WebSocket at all - the pack + symbol metadata are the only
     // network I/O, so N viewers cost the box zero streaming sessions.
@@ -2413,10 +2436,24 @@ int main(int, char**) {
 
             // Reset chart widget overlay state so subscriptions are re-established
             // on the replay StreamManager, and stale heatmap data is cleared.
+            // A chart parked in real-time mode also leaves it here: replays are
+            // historical views, and when the replay pair EQUALS the chart's pair
+            // the widget is reused rather than rebuilt, so its live RT latch
+            // would otherwise survive the swap. An RT chart over a replay keeps
+            // the replay's readiness gate unsatisfied (the replay candle context
+            // is never consumed) and the session stalls in Buffering until the
+            // 20s watchdog fires - seen launching a recorder pack for the same
+            // symbol the live RT chart was showing. Candle mode on replay is
+            // what a rebuilt chart would do anyway.
             for (auto& w : g_app.widgets) {
                 if (w && w->type() == WidgetType::Chart) {
                     auto* chart = static_cast<ChartWidget*>(w.get());
                     chart->reset_overlay_subscriptions();
+                    // Standalone only: self-hosted packs are the only replays
+                    // this swap serves there, and none of them carry the live
+                    // RT stream. Hosted research replays keep their RT option.
+                    if (chart->rt_mode() && !Entitlements::hosted())
+                        chart->set_rt_mode(false);
                 }
             }
 

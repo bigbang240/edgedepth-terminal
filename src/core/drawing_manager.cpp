@@ -1,6 +1,7 @@
 #include "core/drawing_manager.h"
 
 #include <algorithm>
+#include <limits>
 #include <unordered_map>
 
 #include <nlohmann/json.hpp>
@@ -447,4 +448,199 @@ void DrawingManager::pull() {
     if (selected_ != 0 && !find(selected_)) selected_ = 0;
     remember_flushed(items_);
 #endif
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Drawing templates (Phase 3) - named, reusable sets of drawings kept globally
+// (not per symbol) so a saved level set can be re-placed on any chart.
+//
+// Store: localStorage "edgedepth.drawtemplates.v1" =
+//   {"v":1,"t":[{"name":"<name>","items":[<item>,...]},...]}
+// Items use the per-symbol item schema (serialize_item) with id/m stripped and
+// anchor times NORMALIZED to offsets from the set's earliest anchor; applying
+// re-bases the set so its latest anchor lands at "now" (prices stay absolute).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+namespace {
+constexpr char kTemplatesKey[] = "edgedepth.drawtemplates.v1";
+constexpr size_t kMaxTemplates = 64;
+
+int64_t template_now_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+std::vector<drawing::Drawing> parse_template_items(const nlohmann::json& arr) {
+    std::vector<drawing::Drawing> out;
+    for (const auto& ji : arr) {
+        if (out.size() >= drawing::kMaxDrawings) break;
+        if (!ji.is_object()) continue;
+        const drawing::Tool tool =
+            drawing::tool_from_key(ji.value("tool", std::string()));
+        if (tool == drawing::Tool::COUNT) continue;  // unknown / never-stored
+        const auto anchors = ji.find("anchors");
+        if (anchors == ji.end() || !anchors->is_array() || anchors->empty())
+            continue;
+
+        drawing::Drawing d;
+        d.tool = tool;
+        const size_t cap = tool == drawing::Tool::Brush ? drawing::kMaxBrushPoints
+                         : tool == drawing::Tool::Polyline
+                             ? drawing::kMaxPolylinePoints
+                             : 8;
+        for (const auto& ja : *anchors) {
+            if (d.anchors.size() >= cap) break;
+            if (!ja.is_array() || ja.size() < 2) continue;
+            d.anchors.push_back(drawing::Anchor{
+                ja[0].get<int64_t>(), ja[1].get<double>()});
+        }
+        if (d.anchors.empty()) continue;
+        d.style.color = ji.value("color", drawing::kDefaultColor);
+        d.style.width = ji.value("width", 1.5f);
+        const int pat = ji.value("pattern", 0);
+        d.style.pattern = pat >= 0 && pat <= 2
+                              ? static_cast<drawing::LinePattern>(pat)
+                              : drawing::LinePattern::Solid;
+        d.style.fill = ji.value("fill", 0u);
+        d.locked = ji.value("locked", false);
+        d.hidden = ji.value("hidden", false);
+        d.text = ji.value("text", std::string());
+        d.font_size = ji.value("font_size", 14.0f);
+        d.fib_mask = ji.value("fib_mask", drawing::kFibDefaultMask);
+        d.stop = ji.value("stop", 0.0);
+        d.target = ji.value("target", 0.0);
+        d.chan_off = ji.value("chan_off", 0.0);
+        out.push_back(std::move(d));
+    }
+    return out;
+}
+}  // namespace
+
+void DrawingManager::load_templates() const {
+    templates_loaded_ = true;
+    templates_.clear();
+#ifdef __EMSCRIPTEN__
+    char* raw = eddraw_read_blob(kTemplatesKey);
+    if (!raw) return;
+    // Exceptions are disabled: non-throwing parse + is_discarded.
+    const nlohmann::json j = nlohmann::json::parse(raw, nullptr, false);
+    free(raw);
+    if (j.is_discarded() || !j.is_object() || j.value("v", 0) != 1) return;
+    const auto t = j.find("t");
+    if (t == j.end() || !t->is_array()) return;
+    for (const auto& jt : *t) {
+        if (!jt.is_object() || templates_.size() >= kMaxTemplates) continue;
+        DrawingTemplate tpl;
+        tpl.name = jt.value("name", std::string());
+        if (tpl.name.empty()) continue;
+        const auto items = jt.find("items");
+        if (items != jt.end() && items->is_array())
+            tpl.items = parse_template_items(*items);
+        if (!tpl.items.empty()) templates_.push_back(std::move(tpl));
+    }
+#endif
+}
+
+void DrawingManager::store_templates() const {
+#ifdef __EMSCRIPTEN__
+    nlohmann::json t = nlohmann::json::array();
+    for (const auto& tpl : templates_) {
+        if (tpl.name.empty() || tpl.items.empty()) continue;
+        nlohmann::json items = nlohmann::json::array();
+        for (const drawing::Drawing& d : tpl.items) {
+            drawing::Drawing stripped = d;
+            stripped.id = 0;
+            stripped.modified_ms = 0;
+            const std::string s = serialize_item(stripped, false);
+            if (s.empty()) continue;
+            nlohmann::json ji = nlohmann::json::parse(s.c_str(), nullptr, false);
+            if (!ji.is_discarded()) items.push_back(std::move(ji));
+        }
+        if (items.empty()) continue;
+        t.push_back(nlohmann::json{{"name", tpl.name}, {"items", std::move(items)}});
+    }
+    const std::string blob =
+        nlohmann::json({{"v", 1}, {"t", std::move(t)}}).dump();
+    eddraw_write_blob(kTemplatesKey, blob.c_str());
+#endif
+}
+
+const std::vector<DrawingManager::DrawingTemplate>& DrawingManager::templates() {
+    if (!templates_loaded_) load_templates();
+    return templates_;
+}
+
+bool DrawingManager::save_template(const std::string& name) {
+    // Trim to printable, non-empty, 32 chars: the store is a tiny hand-managed
+    // JSON, and blank/oversized names only invite confusion.
+    std::string clean;
+    for (char c : name) {
+        const unsigned char u = static_cast<unsigned char>(c);
+        if (u > 0x20 && u != 0x7f) clean.push_back(c);
+        if (clean.size() >= 32) break;
+    }
+    if (clean.empty() || items_.empty()) return false;
+
+    // Normalize anchor times to offsets from the earliest anchor (>= 0).
+    int64_t t0 = std::numeric_limits<int64_t>::max();
+    for (const drawing::Drawing& d : items_)
+        for (const drawing::Anchor& a : d.anchors) t0 = std::min(t0, a.t_ms);
+    if (t0 == std::numeric_limits<int64_t>::max()) return false;
+
+    DrawingTemplate tpl;
+    tpl.name = clean;
+    tpl.items.reserve(items_.size());
+    for (const drawing::Drawing& d : items_) {
+        drawing::Drawing c = d;
+        for (drawing::Anchor& a : c.anchors) a.t_ms -= t0;
+        tpl.items.push_back(std::move(c));
+    }
+
+    for (DrawingTemplate& t : templates_) {
+        if (t.name != clean) continue;
+        t = std::move(tpl);  // upsert under the same name
+        store_templates();
+        return true;
+    }
+    if (templates_.size() >= kMaxTemplates) templates_.erase(templates_.begin());
+    templates_.push_back(std::move(tpl));
+    store_templates();
+    return true;
+}
+
+int DrawingManager::apply_template(const std::string& name) {
+    if (!templates_loaded_) load_templates();
+    const DrawingTemplate* tpl = nullptr;
+    for (const DrawingTemplate& t : templates_)
+        if (t.name == name) { tpl = &t; break; }
+    if (!tpl || tpl->items.empty()) return 0;
+
+    // Re-base: the stored offsets end at the template's latest anchor; place
+    // that end at "now" so the drawn shape lands where the user is looking.
+    int64_t t_end = 0;
+    for (const drawing::Drawing& d : tpl->items)
+        for (const drawing::Anchor& a : d.anchors) t_end = std::max(t_end, a.t_ms);
+    const int64_t shift = template_now_ms() - t_end;
+
+    int added = 0;
+    for (const drawing::Drawing& d : tpl->items) {
+        if (items_.size() >= drawing::kMaxDrawings) break;
+        drawing::Drawing c = d;
+        for (drawing::Anchor& a : c.anchors) a.t_ms += shift;
+        c.id = 0;  // add() assigns a fresh id and pushes a Create undo op
+        if (add(std::move(c)) != 0) ++added;
+    }
+    if (added) mark_dirty();
+    return added;
+}
+
+bool DrawingManager::delete_template(const std::string& name) {
+    if (!templates_loaded_) load_templates();
+    for (auto it = templates_.begin(); it != templates_.end(); ++it) {
+        if (it->name != name) continue;
+        templates_.erase(it);
+        store_templates();
+        return true;
+    }
+    return false;
 }

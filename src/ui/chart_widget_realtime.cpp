@@ -1,5 +1,7 @@
 #include "ui/chart_widget.h"
 #include "core/ui_test_marks.h"
+#include "core/position_sizing.h"
+#include "core/execution_bridge.h"
 #include "ui/drawing/drawing_icons.h"
 #include "core/candle_bubble_display.h"
 #include "ui/realtime_navigation.h"
@@ -15,6 +17,7 @@
 #include "core/education_boot.h"
 #include "ui/upsell_modal.h"
 #include "rendering/theme.h"
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <emscripten.h>
@@ -172,6 +175,36 @@ void ChartWidget::set_rt_mode(bool on) {
 
 // Navigation and panel visibility only. Overlay switches belong in Layers;
 // recording diagnostics stay available without filling the everyday menu.
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 3: one-click layer layouts for the real-time view. Toggles only —
+// the workspace autosave keeps whatever the user changes afterwards.
+//   Scalp    - raw microstructure: 1s hollow candles, walls + pulls, CVD,
+//              bubbles, fast alerts, estimates off (they are minutes-scale)
+//   Swing    - structure: 1m solid candles, estimated liquidations + resting
+//              depth on, noise layers off
+//   Research - everything on, including the walls table and peak-hold ghosts
+// ═══════════════════════════════════════════════════════════════════════════
+void ChartWidget::apply_layer_preset(int preset) {
+    rt_depth_enabled_ = true;
+    rt_bubbles_ = preset != 1;
+    rt_trade_line_ = preset == 2;
+    rt_candles_ = true;
+    chart_type_ = ChartType::Candles;
+    rt_candles_hollow_ = preset != 1;
+    rt_heikin_ = false;
+    rt_cvd_enabled_ = preset != 1;
+    rt_liq_levels_enabled_ = preset != 0;
+    rt_cum_depth_enabled_ = preset != 0;
+    rt_walls_enabled_ = true;
+    rt_pulls_enabled_ = preset != 1;
+    rt_walls_table_enabled_ = preset == 2;
+    rt_peak_hold_ = preset == 2;
+    cascade_alerts_enabled_ = true;
+    liq_alerts_enabled_ = preset != 1;
+    wall_alerts_enabled_ = preset == 2;
+    set_rt_candle_seconds(preset == 0 ? 1 : preset == 1 ? 60 : 5);
+}
+
 void ChartWidget::render_realtime_settings() {
     using drawing::UiIcon;
     if (!ctx_.replay_mgr().is_active() && Theme::menu_toggle("Pause display", rt_paused_)) {
@@ -199,11 +232,104 @@ void ChartWidget::render_realtime_settings() {
         candles().set_follow_live(true);
     }
     ui_test::mark("rt.whole");
+    ImGui::TextDisabled("Heat window");
+    if (ImGui::IsItemHovered())
+        Theme::tooltip("How much live session the heat and candles show behind the live edge.");
+    for (const int mins : {1, 5, 15, 30}) {
+        if (mins != 1) ImGui::SameLine();
+        ImGui::PushID(mins + 1000);  // distinct from the Candle-size row IDs
+        const double want = double(mins) * 60000.0 / 0.88;
+        char lbl[8];
+        snprintf(lbl, sizeof(lbl), "%dm", mins);
+        const bool on = rt_span_ms_ > want - 1500.0 && rt_span_ms_ < want + 1500.0;
+        if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonHovered));
+        if (ImGui::SmallButton(lbl)) {
+            rt_span_ms_ = want;
+            candles().set_follow_live(true);
+        }
+        if (on) ImGui::PopStyleColor();
+        ImGui::PopID();
+    }
     Theme::menu_separator();
     if (Theme::menu_toggle("Depth ladder", rt_dom_shown_)) rt_dom_shown_ = !rt_dom_shown_;
     ui_test::mark("rt.ladder");
     if (Theme::menu_toggle("Side panels", rt_show_standalone_)) rt_show_standalone_ = !rt_show_standalone_;
     if (ImGui::IsItemHovered()) Theme::tooltip("Show the separate DOM and trade panels beside this view.");
+    if (Theme::menu_toggle("Link charts", link_charts_enabled())) set_link_charts_enabled(!link_charts_enabled());
+    if (ImGui::IsItemHovered())
+        Theme::tooltip("Sync crosshair and zoom across every open chart, any symbols.\nThe chart under the mouse drives the group; real-time views share\nthe zoom span, candle charts share the full axis.");
+    if (rt_candles_) {
+        ImGui::TextDisabled("Candle size");
+        if (ImGui::IsItemHovered())
+            Theme::tooltip("Aggregate the live trade flow into buckets of this length, 1s to 5m.");
+        for (const int sec : {1, 5, 15, 30, 60, 300}) {
+            if (sec != 1) ImGui::SameLine();
+            ImGui::PushID(sec);  // "1m"/"5m" also exist in the Heat window row
+            const bool on = rt_candle_seconds_ == sec;
+            char lbl[8];
+            if (sec >= 60) snprintf(lbl, sizeof(lbl), "%dm", sec / 60);
+            else snprintf(lbl, sizeof(lbl), "%ds", sec);
+            if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonHovered));
+            if (ImGui::SmallButton(lbl)) set_rt_candle_seconds(sec);
+            if (on) ImGui::PopStyleColor();
+            ImGui::PopID();
+        }
+        if (Theme::menu_toggle("Hollow candles", rt_candles_hollow_)) rt_candles_hollow_ = !rt_candles_hollow_;
+        if (ImGui::IsItemHovered()) Theme::tooltip("Outline candle bodies so the depth heatmap stays visible behind them.");
+    }
+    ImGui::TextDisabled("Alerts");
+    if (Theme::menu_toggle("Cascade alerts", cascade_alerts_enabled_)) cascade_alerts_enabled_ = !cascade_alerts_enabled_;
+    if (ImGui::IsItemHovered()) Theme::tooltip("Notify when 3+ same-side liquidations fire within 2 seconds (cascade chain).");
+    if (Theme::menu_toggle("Big liquidations", liq_alerts_enabled_)) liq_alerts_enabled_ = !liq_alerts_enabled_;
+    if (ImGui::IsItemHovered())
+        Theme::tooltip("Notify on a single liquidation at or above the dollar threshold below.");
+    if (liq_alerts_enabled_) {
+        ImGui::SetNextItemWidth(170.0f);
+        if (ImGui::InputDouble("Threshold ($)", &liq_alert_usd_, 50000.0, 250000.0, "$%.0f"))
+            liq_alert_usd_ = liq_alert_usd_ < 10000.0 ? 10000.0 : liq_alert_usd_;
+    }
+    if (Theme::menu_toggle("Wall pulls", wall_alerts_enabled_)) wall_alerts_enabled_ = !wall_alerts_enabled_;
+    if (ImGui::IsItemHovered())
+        Theme::tooltip("Notify when a tracked depth wall near price is pulled (eaten or cancelled).");
+    if (Theme::menu_toggle("Drawing alerts", drawing_alerts_enabled_)) drawing_alerts_enabled_ = !drawing_alerts_enabled_;
+    if (ImGui::IsItemHovered())
+        Theme::tooltip("Notify when the price crosses a drawn line: horizontal lines and rays fire at\ntheir level, trendlines and rays project to the current time. The line stays armed.");
+
+    // ── Phase 5: execution & risk ──────────────────────────────────────────
+    Theme::menu_separator();
+    ImGui::TextDisabled("Execution");
+    if (Theme::menu_toggle("Paper on alerts", paper_on_alerts_)) paper_on_alerts_ = !paper_on_alerts_;
+    if (ImGui::IsItemHovered())
+        Theme::tooltip("Open a local paper position whenever a price or drawing alert fires.\nEntry at the alert price, stop at the % below, TP1 = 1R, TP2 = 2R, then a\ntrailing runner. Quantity is risk-based (account x risk% / stop distance).\nSee the Paper Trading widget for the open positions and daily stats.");
+    {
+        auto& ps = position_sizing::settings();
+        ImGui::SetNextItemWidth(170.0f);
+        if (ImGui::InputDouble("Account ($)", &ps.account_usd, 1000.0, 5000.0, "$%.0f"))
+            position_sizing::clamp_settings(ps);
+        if (ImGui::IsItemHovered()) Theme::tooltip("Account equity used by the size calculator on position drawings\nand by the alert paper orders.");
+        ImGui::SetNextItemWidth(170.0f);
+        if (ImGui::InputDouble("Risk per trade (%)", &ps.risk_pct, 0.1, 0.5, "%.2f%%"))
+            position_sizing::clamp_settings(ps);
+        if (ImGui::IsItemHovered()) Theme::tooltip("Risk per trade as a percentage of the account.");
+    }
+    if (paper_on_alerts_) {
+        ImGui::SetNextItemWidth(170.0f);
+        if (ImGui::InputDouble("Paper stop (%)", &paper_auto_stop_pct_, 0.1, 0.5, "%.2f%%"))
+            paper_auto_stop_pct_ = std::clamp(paper_auto_stop_pct_, 0.05, 20.0);
+    }
+    {
+        auto& wb = exec_bridge::settings();
+        if (Theme::menu_toggle("Webhook bridge", wb.enabled)) wb.enabled = !wb.enabled;
+        if (ImGui::IsItemHovered())
+            Theme::tooltip("POST a JSON message to your own bot for every alert\n(and paper opens/closes when enabled below). The target must\nallow CORS from this origin - self-hosted users point it at\ntheir own box or a proxy.");
+        if (wb.enabled) {
+            ImGui::SetNextItemWidth(170.0f);
+            ImGui::InputText("##webhook_url", wb.url, sizeof(wb.url));
+            if (ImGui::IsItemHovered()) Theme::tooltip("Webhook endpoint URL, e.g. http://your-box:8080/edgedepth");
+            if (Theme::menu_toggle("Include paper fills", wb.paper_fills)) wb.paper_fills = !wb.paper_fills;
+            ImGui::TextDisabled("last: %s", exec_bridge::last_status().c_str());
+        }
+    }
 
     if (!rt_archive_) return;
     const auto& a = *rt_archive_;
@@ -238,6 +364,10 @@ void ChartWidget::render_realtime_settings() {
 
 void ChartWidget::on_rewind(int64_t) {
     liq_obs_size_reference_ = {};
+    cascade_detector_.reset();  // the observed tail the chains were built from is gone
+    alert_engine_.reset();      // S2: the queues belong to the same tails
+    liq_estimator_.reset();     // S3: the tape the estimate was built from is gone
+    last_pull_alert_ms_ = 0;
     // The replay owner restores/replays depth separately. Never keep future
     // samples or GPU cells from the preceding traversal.
     rt_dom_frame_ = {};
@@ -263,6 +393,9 @@ void ChartWidget::on_rewind(int64_t) {
     // [SELF-HOST P1] peak-hold ghosts belong to the discarded traversal too.
     rt_peak_levels_.clear();
     rt_peak_pruned_at_ms_ = 0;
+    // [Phase 2 S5] the resting-depth accumulator belongs to it as well.
+    rt_cum_levels_.clear();
+    rt_cum_pruned_at_ms_ = 0;
     reset_realtime_extras();
     // Candle-mode large prints belong to the traversal being discarded too.
     candle_bubble_history_.reset();
@@ -333,6 +466,26 @@ void ChartWidget::update_realtime() {
                 for (auto it = rt_peak_levels_.begin(); it != rt_peak_levels_.end();)
                     it = it->second.second < cutoff ? rt_peak_levels_.erase(it) : std::next(it);
                 rt_peak_pruned_at_ms_ = clock;
+            }
+        }
+        // ── [Phase 2 S5] Cumulative resting-depth accumulation ────────────
+        // An exponential average of the size each level holds (≈10-minute
+        // memory): depth that sits - shelves, walls - keeps its value while
+        // flicker fades. Always accumulated; the decay of levels absent from
+        // a sample happens lazily at draw time from the last-seen stamp.
+        if (tick_size_ > 0) {
+            for (const auto& level : sample->levels) {
+                const int64_t key = std::llround(level.price / tick_size_);
+                auto& entry = rt_cum_levels_[key];
+                const double dt = std::clamp(double(sample->timestamp_ms - entry.second), 1.0, 5000.0);
+                entry.first += (float(level.size) - entry.first) * float(1.0 - std::exp(-dt / kCumTauMs));
+                entry.second = sample->timestamp_ms;
+            }
+            if (clock - rt_cum_pruned_at_ms_ > 5000) {
+                const int64_t cutoff = clock - kCumRetentionMs;
+                for (auto it = rt_cum_levels_.begin(); it != rt_cum_levels_.end();)
+                    it = it->second.second < cutoff ? rt_cum_levels_.erase(it) : std::next(it);
+                rt_cum_pruned_at_ms_ = clock;
             }
         }
         if (!rt_history_view_ || realtime_live_edge()) rt_renderer_->finalize_column(sample->timestamp_ms, rt_prices_, sample->segment_start, (sample->bid + sample->ask) * 0.5, sample->source_bucket_ticks);
@@ -531,6 +684,9 @@ void ChartWidget::render_realtime() {
         }
     }
 
+    // ── [Phase 2 S5] Cumulative resting depth — the second heat layer ────
+    render_realtime_cum_depth(dl, limits);
+
     // ── [SELF-HOST P1] lightweight state bridge for tooling ─────────────
     // window.__ed_state mirrors the live chart twice a second; the snapshot
     // API and the egress bridge read it without touching the render loop.
@@ -600,21 +756,42 @@ void ChartWidget::render_realtime() {
         // OHLC from retained trade records only, aggregated into the selected
         // real-time bucket (1s by default; the toolbar offers 5s..5m). Empty
         // buckets stay absent; a paused frame uses its frozen records and the
-        // same as-of clock.
+        // same as-of clock. Heikin-Ashi (Phase 3) transforms each finished
+        // bucket: open = midpoint of the previous HA candle, close = the raw
+        // OHLC4 — the forming bucket gets the same treatment, so the last
+        // candle eases into place exactly like the historical HA series.
         const int64_t bucket_ms = int64_t(std::max(1, rt_candle_seconds_)) * 1000;
         const double mid = 0.5 * double(bucket_ms), body = 0.35 * double(bucket_ms);
         Terminal::Candle candle{};
         bool have = false;
+        double ha_open_prev = 0.0, ha_close_prev = 0.0;
+        bool have_prev_ha = false;
         auto flush = [&]() {
             if (!have) return;
-            const ImVec2 hi = ImPlot::PlotToPixels(double(candle.timestamp_ms) + mid, candle.high);
-            const ImVec2 lo = ImPlot::PlotToPixels(double(candle.timestamp_ms) + mid, candle.low);
-            const ImVec2 open = ImPlot::PlotToPixels(double(candle.timestamp_ms) + mid - body, candle.open);
-            const ImVec2 close = ImPlot::PlotToPixels(double(candle.timestamp_ms) + mid + body, candle.close);
-            const ImU32 color = Theme::u32(candle.close >= candle.open ? Theme::Tokens::UP : Theme::Tokens::DOWN);
+            double o = candle.open, h = candle.high, l = candle.low, c = candle.close;
+            if (rt_heikin_) {
+                const double close = (candle.open + candle.high + candle.low + candle.close) * 0.25;
+                const double open = have_prev_ha ? 0.5 * (ha_open_prev + ha_close_prev)
+                                                 : 0.5 * (candle.open + candle.close);
+                o = open; c = close;
+                h = std::max(candle.high, std::max(open, close));
+                l = std::min(candle.low, std::min(open, close));
+                ha_open_prev = open; ha_close_prev = close; have_prev_ha = true;
+            }
+            const ImVec2 hi = ImPlot::PlotToPixels(double(candle.timestamp_ms) + mid, h);
+            const ImVec2 lo = ImPlot::PlotToPixels(double(candle.timestamp_ms) + mid, l);
+            const ImVec2 open = ImPlot::PlotToPixels(double(candle.timestamp_ms) + mid - body, o);
+            const ImVec2 close = ImPlot::PlotToPixels(double(candle.timestamp_ms) + mid + body, c);
+            const ImU32 color = Theme::u32(c >= o ? Theme::Tokens::UP : Theme::Tokens::DOWN);
             dl->AddLine(hi, lo, color);
-            dl->AddRectFilled(ImVec2(open.x, std::min(open.y, close.y)),
-                ImVec2(close.x, std::max(open.y + 1, close.y)), color);
+            if (rt_candles_hollow_) {
+                // Outline only: the depth heatmap stays visible behind the body.
+                dl->AddRect(ImVec2(open.x, std::min(open.y, close.y)),
+                    ImVec2(close.x, std::max(open.y + 1, close.y)), color, 0.0f, 0, 1.25f);
+            } else {
+                dl->AddRectFilled(ImVec2(open.x, std::min(open.y, close.y)),
+                    ImVec2(close.x, std::max(open.y + 1, close.y)), color);
+            }
         };
         for (const auto& trade : trades) {
             if (trade.timestamp_ms < limits.X.Min - double(bucket_ms)) continue;
@@ -656,7 +833,11 @@ void ChartWidget::render_realtime() {
                         ImVec2(center.x - radius, center.y - radius), ImVec2(center.x + radius, center.y + radius));
             });
     }
-    // The signals over the trades: wall marks and pulls, then refill marks on top of everything but the quotes.
+    // The signals over the trades: cascade bands, estimated liquidation
+    // clusters (S3), wall marks and pulls, then refill marks on top of
+    // everything but the quotes.
+    render_realtime_cascades(dl, limits);
+    render_realtime_liq_levels(dl, limits);
     render_realtime_walls(dl);
     render_refill_levels(dl, limits);
     if (fresh && limits.X.Max > rt_clock_ms_) {
@@ -747,6 +928,7 @@ void ChartWidget::render_realtime() {
             }
         }
     }
+    render_realtime_walls_table(dl);  // Phase 2 S4: top-right overlay panel
     // Replay priming. Embedded replays (events, lessons, /demo) cover the whole canvas with their own scrim and
     // spinner (main.cpp render_lesson_loading_overlay); a second one here showed through it, off centre.
     if (ctx_.replay_mgr().is_loading()) {

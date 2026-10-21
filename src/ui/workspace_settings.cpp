@@ -1,4 +1,7 @@
 #include "ui/chart_widget.h"
+#include "core/position_sizing.h"
+#include "core/execution_bridge.h"
+#include <cstdio>
 #include "ui/dom_widget.h"
 #include "ui/trades_widget.h"
 #include "ui/orderbook_widget.h"
@@ -126,8 +129,36 @@ Json ChartWidget::save_settings() const {
     j["candle_bubble_min"] = candle_bubble_min_;
     j["rt_trade_line"] = rt_trade_line_;
     j["rt_dom"] = rt_dom_shown_;
+    j["rt_hollow_candles"] = rt_candles_hollow_;
+    j["rt_heikin"] = rt_heikin_;
+    j["rt_layer_preset"] = rt_layer_preset_;
+    j["drawing_alerts"] = drawing_alerts_enabled_;
+    j["cascade_alerts"] = cascade_alerts_enabled_;
+    // Phase 5: execution & risk (globals persisted via every chart row)
+    {
+        auto& ps = position_sizing::settings();
+        j["poscalc_account"] = ps.account_usd;
+        j["poscalc_risk_pct"] = ps.risk_pct;
+        j["poscalc_show"] = ps.show_on_chart;
+    }
+    {
+        auto& wb = exec_bridge::settings();
+        j["webhook_enabled"] = wb.enabled;
+        j["webhook_paper"] = wb.paper_fills;
+        j["webhook_url"] = std::string(wb.url);
+    }
+    j["paper_on_alerts"] = paper_on_alerts_;
+    j["paper_auto_stop_pct"] = paper_auto_stop_pct_;
+    j["rt_candle_seconds"] = rt_candle_seconds_;
+    j["rt_liq_levels"] = rt_liq_levels_enabled_;
+    j["rt_cum_depth"] = rt_cum_depth_enabled_;
+    j["rt_walls_table"] = rt_walls_table_enabled_;
+    j["liq_alerts"] = liq_alerts_enabled_;
+    j["liq_alert_usd"] = liq_alert_usd_;
+    j["wall_alerts"] = wall_alerts_enabled_;
     j["rt_extend_depth"] = rt_extend_depth_;
     j["rt_bridge_gaps"] = rt_bridge_gaps_;
+    j["link_charts"] = link_charts_enabled();   // global link-group toggle, same value from every chart
     j["rt_depth"] = rt_depth_enabled_;
     j["liquidity_response"] = liquidity_response_enabled_;
     j["rt_refill"] = rt_refill_enabled_;
@@ -279,8 +310,44 @@ void ChartWidget::load_settings(const Json& j) {
     workspace::read(j, "candle_bubble_min", candle_bubble_min_, 0, 1000000000000.0);
     workspace::read(j, "rt_trade_line", rt_trade_line_);
     workspace::read(j, "rt_dom", rt_dom_shown_);
+    workspace::read(j, "rt_hollow_candles", rt_candles_hollow_);
+    workspace::read(j, "rt_heikin", rt_heikin_);             // absent in older saves: keeps the default (off)
+    workspace::read(j, "rt_layer_preset", rt_layer_preset_, -1, 2);
+    workspace::read(j, "drawing_alerts", drawing_alerts_enabled_); // absent in older saves: keeps the default (on)
+    workspace::read(j, "cascade_alerts", cascade_alerts_enabled_);
+    // Phase 5: execution & risk (globals; every chart row carries the same values)
+    {
+        auto& ps = position_sizing::settings();
+        workspace::read(j, "poscalc_account", ps.account_usd, 10.0, 1000000000.0);
+        workspace::read(j, "poscalc_risk_pct", ps.risk_pct, 0.05, 100.0);
+        workspace::read(j, "poscalc_show", ps.show_on_chart);
+    }
+    {
+        auto& wb = exec_bridge::settings();
+        workspace::read(j, "webhook_enabled", wb.enabled);
+        workspace::read(j, "webhook_paper", wb.paper_fills);
+        auto it = j.find("webhook_url");
+        if (it != j.end() && it->is_string()) {
+            const std::string u = it->get<std::string>();
+            std::snprintf(wb.url, sizeof(wb.url), "%s", u.c_str());
+        }
+    }
+    workspace::read(j, "paper_on_alerts", paper_on_alerts_);      // absent in older saves: keeps the default (off)
+    workspace::read(j, "paper_auto_stop_pct", paper_auto_stop_pct_, 0.05, 20.0);
+    workspace::read(j, "rt_candle_seconds", rt_candle_seconds_, 1, 300);
+    workspace::read(j, "rt_liq_levels", rt_liq_levels_enabled_);   // absent in older saves: keeps the default (on)
+    workspace::read(j, "rt_cum_depth", rt_cum_depth_enabled_);     // absent in older saves: keeps the default (off)
+    workspace::read(j, "rt_walls_table", rt_walls_table_enabled_); // absent in older saves: keeps the default (off)
+    workspace::read(j, "liq_alerts", liq_alerts_enabled_);
+    workspace::read(j, "liq_alert_usd", liq_alert_usd_, 10000.0, 100000000.0);
+    workspace::read(j, "wall_alerts", wall_alerts_enabled_);
     workspace::read(j, "rt_extend_depth", rt_extend_depth_);
     workspace::read(j, "rt_bridge_gaps", rt_bridge_gaps_);
+    {
+        bool link = link_charts_enabled();
+        workspace::read(j, "link_charts", link);  // absent in older saves: keeps the current global
+        set_link_charts_enabled(link);
+    }
     workspace::read(j, "rt_depth", rt_depth_enabled_);
     workspace::read(j, "liquidity_response", liquidity_response_enabled_);
     workspace::read(j, "rt_refill", rt_refill_enabled_);  // absent in older saves: keeps the default (on)

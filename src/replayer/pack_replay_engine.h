@@ -205,6 +205,9 @@ private:
     // Hold the target clock until all seed-to-target depth has been applied,
     // including a budgeted delivery backlog and the final in-flight block.
     bool seek_priming_ = false;
+    // Dead lead-in guard latched: the clock snapped past the pack's opening
+    // data hole and now runs (the hold must not re-arm over the same hole).
+    bool lead_in_skipped_ = false;
 
     // v2 lazy seeds: raw bytes parsed once into caches; state machines drive
     // the on-demand fetch. Absent on v1 packs → matching requests drop.

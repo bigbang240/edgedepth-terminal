@@ -25,6 +25,7 @@ class VolumeProfileManager;
 class TPOManager;
 class FootprintManager;
 class PaperTradingManager;
+class LocalPaperEngine;
 class TickerManager;
 class IndicatorSeriesManager;
 class AnalyticsManager;
@@ -50,6 +51,9 @@ struct AppContext {
     // Chart drawing tools (user annotations). Owned by AppState, NOT DataContext:
     // drawings survive live<->replay context swaps untouched.
     DrawingManager*              drawings    = nullptr;
+    // Client-side paper engine (self-hosted; the hosted STREAM_PAPER_TRADING
+    // backend does not exist behind the Go gateway). Owned by AppState.
+    LocalPaperEngine*            local_paper = nullptr;
 
     // Convenience accessors with assert-style safety
     [[nodiscard]] StreamManager&             stream_mgr()    const { return *streams; }
@@ -67,4 +71,5 @@ struct AppContext {
     [[nodiscard]] IndicatorSeriesManager&    series_mgr()  const { return *series; }
     [[nodiscard]] AnalyticsManager&          analytics_mgr() const { return *analytics; }
     [[nodiscard]] DrawingManager&            drawing_mgr() const { return *drawings; }
+    [[nodiscard]] LocalPaperEngine&          local_paper_mgr() const { return *local_paper; }
 };
