@@ -34,13 +34,12 @@ void OrderbookManager::apply_book_update_from_pb(
         db.realtime.interrupt("Depth transport changed", update_pb.timestamp_ms());
         db.epoch = realtime_epoch_.load();
     }
-    db.realtime.check_delta(orderbook.last_update_id, update_pb.first_update_id(),
-        last_update_id, prev_last_update_id, update_pb.timestamp_ms());
     // During replay, skip strict LastUpdateId continuity checks entirely.
     // DB-backed replay delivers depth updates from 5-second batches where
     // multiple rows per timestamp can arrive in non-deterministic order.
     // The OB self-heals within seconds as deltas overwrite stale price levels.
     // For live trading, strict continuity remains enforced.
+    bool gate_invalidated = false;
     if (orderbook.replay_grace_remaining > 0) {
         // Grace period: either permanent (replay) or countdown (other)
         if (orderbook.replay_grace_remaining != INT32_MAX) {
@@ -53,15 +52,27 @@ void OrderbookManager::apply_book_update_from_pb(
                 // Small forward skip - tolerate (redelivery/minor gaps)
             } else if (diff > 20000) {
                 orderbook.snapshot = false;
-                return;
+                gate_invalidated = true;
             } else if (diff < 0 && diff >= -20000) {
+                // Silently-dropped duplicate / out-of-order redelivery (OKX
+                // folded deltas): the gate drops the event, so the display
+                // bridge must NOT treat it as a gap. check_delta used to run
+                // BEFORE this verdict and interrupted the bridge on every such
+                // drop - the intermittent 5s "Recovering depth" flap of phase
+                // 6 while the book itself stayed correct and self-healed.
                 return;
             } else {
                 orderbook.snapshot = false;
-                return;
+                gate_invalidated = true;
             }
         }
     }
+    // The realtime history bridge learns the verdict AFTER the strict gate:
+    // events the gate applies (contiguous or tolerated skip) and events it
+    // invalidates on report here; events it silently drops do not.
+    db.realtime.check_delta(orderbook.last_update_id, update_pb.first_update_id(),
+        last_update_id, prev_last_update_id, update_pb.timestamp_ms());
+    if (gate_invalidated) return;
 
     for (const auto& level : update_pb.asks()) {
         if (level.size() == 0.0) {
