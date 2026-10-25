@@ -123,8 +123,13 @@ void test_canonical_venue_path() {
     expect_route("/terminal/bybit/btcusdt", "?exchange=hl", "bybit", "btcusdt",
                  "a path venue wins over a leftover query venue");
     // A first segment that is NOT a known venue is a symbol, as it always was.
-    expect_route("/terminal/okx/btcusdt", "", "binancef", "okx",
+    expect_route("/terminal/xyz/btcusdt", "", "binancef", "xyz",
                  "an unknown first segment is the legacy symbol, not a venue");
+    // okx became a hub venue in phase 6; instIds keep native case there.
+    expect_route("/terminal/okx/btcusdt", "", "okx", "btcusdt",
+                 "okx is a canonical venue path now");
+    expect_route("/terminal/okx/BTC-USDT-SWAP", "", "okx", "BTC-USDT-SWAP",
+                 "okx symbols keep native case (no fold)");
     expect_route("/terminal/hl", "", "binancef", "hl",
                  "a lone venue-looking segment is a symbol (nothing follows it)");
     // A venue segment with an empty symbol carries no symbol.
@@ -226,9 +231,10 @@ void test_symbol_case_helper() {
     expect_eq(normalize_symbol_case("binancef", "BTCUSDT"), "btcusdt", "binancef folds");
     expect_eq(normalize_symbol_case("bybit", "BTCUSDT"), "btcusdt", "bybit folds");
     expect_eq(normalize_symbol_case("hl", "kPEPE"), "kPEPE", "hyperliquid keeps case");
-    expect_true(is_known_exchange("binancef") && is_known_exchange("bybit") && is_known_exchange("hl"),
-                "the three hub venues are known");
-    expect_true(!is_known_exchange("okx") && !is_known_exchange("") && !is_known_exchange("HL"),
+    expect_true(is_known_exchange("binancef") && is_known_exchange("bybit")
+                    && is_known_exchange("hl") && is_known_exchange("okx"),
+                "the four hub venues are known");
+    expect_true(!is_known_exchange("") && !is_known_exchange("HL"),
                 "anything else, including a non-folded id, is not a venue");
 }
 

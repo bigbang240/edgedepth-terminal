@@ -8,8 +8,11 @@
 - فعال‌سازی GitHub Actions روی fork (build.yml و release.yml از upstream، اجرا روی هر push به master)
 - `workflow_dispatch` برای اجرای دستی CI
 - `VERSION` + این CHANGELOG + هم‌ترازسازی نسخهٔ پروژهٔ CMake با SemVer
+### Fixed
+- `url_router_test` هم‌تراز با فاز ۶: okx چهارمین venue هاب است (نمادهای instId حالت بومی می‌مانند)
+- `drawing_manager`: `[[maybe_unused]]` برای عبور از `-Werror` gcc در بیلد native تست‌ها
+- `version.json` + اعلان به‌روزرسانی خودکار مرورگر (بنر کهربایی، بررسی هنگام بارگذاری + هر ۵ دقیقه، reload با کلیک) — پیاده‌سازی در لایهٔ deploy سلف-هاست
 ### Planned
-- `version.json` + اعلان به‌روزرسانی خودکار مرورگر
 - بهینه‌سازی WASM (بررسی SIMD، کاهش حجم، کش مرورگر هش‌دار)
 
 ## [0.7.0] — 2026-10-25 — فاز ۷ «تجربهٔ کاربری فارسی»
