@@ -1,3 +1,4 @@
+#include "core/i18n.h"
 // ═══════════════════════════════════════════════════════════════════════════════
 // watchlist_widget.cpp - watchlist rail (design v3, 2026-10-11; see the header).
 // Colours resolve to Theme::Tokens, numerals to PriceFormatter, rows are
@@ -195,7 +196,7 @@ void WatchlistWidget::render() {
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
     place_new_window();
-    const bool visible = ImGui::Begin("Watchlist", &is_open,
+    const bool visible = ImGui::Begin(i18n::tr("Watchlist", i18n::fa_watchlist), &is_open,
         ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar |
         ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::PopStyleVar();
@@ -297,7 +298,7 @@ void WatchlistWidget::render_title_bar() {
     const bool focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
     dl->AddRectFilled(p0, ImVec2(p0.x + w, p0.y + h), Theme::u32(Theme::Tokens::BASE));
     char cnt[24]; snprintf(cnt, sizeof(cnt), "%d", all_count_);
-    const char* label = "Watchlist";
+    const char* label = i18n::tr("Watchlist", i18n::fa_watchlist);
     const float glyph = std::min(16.0f, h - 4.0f);
     const float lw = ImGui::CalcTextSize(label).x, cw = ImGui::CalcTextSize(cnt).x;
     const float tab_w = std::round(pad + glyph + 8.0f + lw + 8.0f + cw + pad + 2.0f);
@@ -333,7 +334,7 @@ void WatchlistWidget::render_filter_bar() {
     ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
     ImGui::PushStyleColor(ImGuiCol_TextDisabled, Theme::Tokens::TX3);
     ImGui::SetNextItemWidth(ww - pad * 2);
-    ImGui::InputTextWithHint("##wl_search", "Search pairs", search_buf_, sizeof(search_buf_));
+    ImGui::InputTextWithHint("##wl_search", i18n::tr("Search pairs", i18n::fa_search_pairs), search_buf_, sizeof(search_buf_));
     const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
     drawing::draw_ui_icon(ImGui::GetWindowDrawList(), drawing::UiIcon::Search, ImVec2(a.x + 16 * WK, (a.y + b.y) * 0.5f),
                           6 * WK, Theme::u32(ImGui::IsItemActive() ? Theme::Tokens::TX1 : Theme::Tokens::TX3), 1.4f);
@@ -361,7 +362,7 @@ void WatchlistWidget::render_category_selector() {
     // Category: grid glyph, name, count.
     if (dropdown_button("##wl_cat", p0, ImVec2(category_w, h), ImGui::IsPopupOpen("##wl_cat_pop"))) ImGui::OpenPopup("##wl_cat_pop");
     const bool category_valid = selected_category_ >= 0 && selected_category_ < static_cast<int>(categories_.size());
-    const char* name = category_valid ? categories_[selected_category_].c_str() : "All pairs";
+    const char* name = category_valid ? categories_[selected_category_].c_str() : i18n::tr("All pairs", i18n::fa_all_pairs);
     const int ct = category_valid && selected_category_ < static_cast<int>(category_counts_.size())
                    ? category_counts_[selected_category_] : scoped_count_;
     drawing::draw_ui_icon(dl, drawing::UiIcon::Grid, ImVec2(p0.x + 16 * WK, p0.y + h * 0.5f), 5.5f * WK, Theme::u32(Theme::Tokens::TX2), 1.4f);
@@ -396,7 +397,7 @@ void WatchlistWidget::render_category_selector() {
     const float vtx = venue_p.x + 10 * WK + logo + 8 * WK;
     dl->PushClipRect(ImVec2(vtx, venue_p.y), ImVec2(venue_p.x + venue_w - 24 * WK, venue_p.y + h), true);
     dl->AddText(ImVec2(vtx, venue_p.y + (h - ImGui::GetFontSize()) * 0.5f), Theme::u32(Theme::Tokens::TX1),
-                selected_venue ? selected_venue->compact_label : "All venues");
+                selected_venue ? selected_venue->compact_label : i18n::tr("All venues", i18n::fa_all_venues));
     dl->PopClipRect();
     ImGui::PopFont();
 
@@ -473,8 +474,8 @@ void WatchlistWidget::render_category_selector() {
             ImGui::PopID();
             col ^= 1;
         };
-        if (!cat_search_[0] || contains_ci(std::string("All pairs"), cat_search_))
-            chip("All pairs", scoped_count_, selected_category_ < 0, -1);
+        if (!cat_search_[0] || contains_ci(std::string(i18n::tr("All pairs", i18n::fa_all_pairs)), cat_search_))
+            chip(i18n::tr("All pairs", i18n::fa_all_pairs), scoped_count_, selected_category_ < 0, -1);
         for (int i = 0; i < static_cast<int>(categories_.size()); ++i) {
             if (cat_search_[0] && !contains_ci(categories_[i], cat_search_)) continue;
             chip(categories_[i].c_str(), category_counts_[i], selected_category_ == i, i);
@@ -495,7 +496,7 @@ void WatchlistWidget::render_category_selector() {
             build_category_counts();
             ImGui::CloseCurrentPopup();
         };
-        if (option("##venue_all", "All venues", all_count_, selected_exchange_.empty(), rw, nullptr)) pick("");
+        if (option("##venue_all", i18n::tr("All venues", i18n::fa_all_venues), all_count_, selected_exchange_.empty(), rw, nullptr)) pick("");
         for (size_t i = 0; i < exchange_counts_.size(); ++i) {
             ImGui::PushID(static_cast<int>(i));
             if (option("##venue", kWatchlistVenues[i].label, exchange_counts_[i], selected_exchange_ == kWatchlistVenues[i].id, rw, kWatchlistVenues[i].id))
@@ -541,10 +542,10 @@ void WatchlistWidget::render_sort_header() {
         }
         return cw;
     };
-    const float pair_w = cell("Pair", Sort::Symbol, bp.x + g.sym_x, false);
-    cell("Volume", Sort::Volume, bp.x + g.sym_x + pair_w + 16 * WK, false);
-    const float chg_w = cell("24h", Sort::Change, bp.x + g.pill_right, true);
-    cell("Price", Sort::Price, g.stacked ? bp.x + g.pill_right - chg_w - 18 * WK : bp.x + g.price_right, true);
+    const float pair_w = cell(i18n::tr("Pair", i18n::fa_pair), Sort::Symbol, bp.x + g.sym_x, false);
+    cell(i18n::tr("Volume", i18n::fa_volume), Sort::Volume, bp.x + g.sym_x + pair_w + 16 * WK, false);
+    const float chg_w = cell(i18n::tr("24h", i18n::fa_h24), Sort::Change, bp.x + g.pill_right, true);
+    cell(i18n::tr("Price", i18n::fa_price), Sort::Price, g.stacked ? bp.x + g.pill_right - chg_w - 18 * WK : bp.x + g.price_right, true);
     ImGui::PopFont();
     ImGui::SetCursorScreenPos(bp);
     ImGui::Dummy(ImVec2(w, hh));

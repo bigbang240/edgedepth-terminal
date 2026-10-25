@@ -46,6 +46,7 @@
 #include "core/usage_emit.h"
 #include "core/session_usage.h"
 #include "core/entitlements.h"
+#include "core/i18n.h"
 #include "core/display_time_zone.h"
 #include "core/recorder_glue.h"
 #include "education/lesson_runtime.h"
@@ -2728,6 +2729,7 @@ int main(int, char**) {
     Theme::apply_dark_theme();
     Theme::apply_trading_colors();
     Theme::load_preferences();
+    i18n::load();  // Phase 7: session language + Persian-numerals toggle
     if (!Theme::load_fonts()) {
     }
     ImGui_ImplSDL3_InitForOpenGL(g_app.window, g_app.gl_context);

@@ -534,6 +534,9 @@ set(PROJECT_SRC
         src/core/paper_trading_manager.cpp
         src/core/local_paper_engine.h
         src/core/local_paper_engine.cpp
+        src/core/i18n.h
+        src/core/i18n.cpp
+        src/core/i18n_fa.h
         src/core/position_sizing.h
         src/core/execution_bridge.h
         src/core/execution_bridge.cpp

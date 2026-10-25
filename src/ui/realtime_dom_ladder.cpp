@@ -1,3 +1,4 @@
+#include "core/i18n.h"
 #include "ui/realtime_dom_ladder.h"
 #include "core/trade_at_price.h"
 #include "core/refill_levels.h"
@@ -155,7 +156,7 @@ void RealtimeDomLadder::render(const RealtimeDOMFrame& frame, const PriceFormatt
         org.x + flow_w + depth_w * 2 + price_w, right};
     {
         push_font(Fonts::ui(), kHeaderPx);
-        static const char* const names[] = {"Sold", "Bids", "Price", "Asks", "Bought"};
+        const char* const names[] = {i18n::tr("Sold", i18n::fa_sold), i18n::tr("Bids", i18n::fa_bids), i18n::tr("Price", i18n::fa_price), i18n::tr("Asks", i18n::fa_asks), i18n::tr("Bought", i18n::fa_bought)};
         for (int c = 0; c < 5; ++c) {
             const float tw = ImGui::CalcTextSize(names[c]).x;
             // Each heading sits where its numbers do: at the edge nearest the price.

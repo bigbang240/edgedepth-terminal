@@ -89,10 +89,16 @@ namespace Theme {
             {0x000000, 0x030303, 0x0b0b0b, 0x0a0a0a, 0x1a1a1a, 0x262626,
              0x1c1c1c, 0x2a2a2a, 0x383838, 0x101010, 0x080808, 0x0d0d0d,
              0x3d3d3d, 0x5f5f5f, 0xa6a6a6, 0xffffff, 0xdedede, 0xbdbdbd, 0xa8a8a8, 0.70f, 0.70f, 0.90f},
+            // Daylight (Phase 7): the light preset. Paper-grey surfaces, dark ink,
+            // hairlines dropped to grey-blue; heat ramps and signed market colors
+            // keep their hues (they read fine over light chrome at full alpha).
+            {0xf2f3f5, 0xf7f8fa, 0xffffff, 0xf0f1f4, 0xe8eaee, 0xdde0e6,
+             0xeceef2, 0xe2e5ea, 0xd6dae1, 0xe6e8ec, 0xfbfcfd, 0xffffff,
+             0xd8dbe2, 0xc3c8d2, 0x6b7280, 0x1a1d23, 0x3d434e, 0x5b626e, 0x6b7280, 0.60f, 0.75f, 0.85f},
         };
-        constexpr const char* kChromeNames[] = {"EdgeDepth", "Graphite", "Midnight", "High contrast"};
+        constexpr const char* kChromeNames[] = {"EdgeDepth", "Graphite", "Midnight", "High contrast", "Daylight"};
         static_assert(std::size(kChrome) == std::size(kChromeNames) &&
-                      std::size(kChrome) == size_t(Chrome::HighContrast) + 1, "one row and label per Chrome value");
+                      std::size(kChrome) == size_t(Chrome::Daylight) + 1, "one row and label per Chrome value");
     }
 
     void set_chrome(Chrome c) {
@@ -1371,6 +1377,15 @@ namespace Theme {
             0x2E80, 0x9FFF,  // CJK radicals through unified ideographs
             0,
         };
+        // Persian blocks for the Vazirmatn merge: base Arabic (letters, ۰-۹),
+        // ZWNJ, and both presentation-form planes the pre-shaped i18n strings
+        // are baked into. Mirrors cjk_ranges' merge-only role.
+        static const ImWchar fa_ranges[] = {
+            0x0600, 0x06FF,  // Arabic (Persian letters + Persian digits)
+            0x200C, 0x200C,  // ZWNJ
+            0xFB50, 0xFEFF,  // Presentation Forms-A + B
+            0,
+        };
         ImFontConfig cjk_cfg = cfg;
         cjk_cfg.MergeMode = true;
 
@@ -1380,6 +1395,12 @@ namespace Theme {
             if (f) {
                 io.Fonts->AddFontFromFileTTF("/fonts/NotoSansCJK-Subset.ttf", px,
                                              &cjk_cfg, cjk_ranges);
+                // Persian (Phase 7): Vazirmatn subset merged the same way as the
+                // CJK fallback, on every face — chrome labels render Persian from
+                // i18n_fa.h's pre-shaped strings, and the mono faces need the
+                // ۰-۹ digits for the optional Persian-numerals ticks.
+                io.Fonts->AddFontFromFileTTF("/fonts/Vazirmatn-Regular-Subset.ttf", px,
+                                             &cjk_cfg, fa_ranges);
             }
             return f;
         };

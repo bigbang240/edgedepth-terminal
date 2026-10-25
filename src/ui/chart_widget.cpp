@@ -1,4 +1,5 @@
 #include "core/liq_field_tiers.h"
+#include "core/i18n.h"
 #include "ui/compression_overlay.h"
 #include "ui/touch_odds_overlay.h"
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -3371,7 +3372,7 @@ void ChartWidget::render_controls() {
 
     auto chart_type_label = [](ChartType type) -> const char* {
         switch (type) {
-            case ChartType::Candles:          return "Candles";
+            case ChartType::Candles:          return i18n::tr("Candles", i18n::fa_candles);
             case ChartType::HeikinAshi:       return "Heikin Ashi";
             case ChartType::Line:             return "Line";
             case ChartType::FootprintCluster: return "Footprint cluster";
@@ -3454,10 +3455,11 @@ void ChartWidget::render_controls() {
     // Keep the paired ladder discoverable after its close button hides it.
     if (rt_mode_) {
         ImGui::PushFont(Theme::Fonts::ui());
-        const float w = ImGui::CalcTextSize("DOM").x + 20.0f;
+        const char* dom_label = i18n::tr("DOM", i18n::fa_dom);
+        const float w = ImGui::CalcTextSize(dom_label).x + 20.0f;
         wrap_control(w);
         ImGui::SetCursorScreenPos(ImVec2(cx, ctrl_y));
-        if (Theme::choice_button("DOM##rt_dom", rt_dom_shown_, ImVec2(w, 28.0f)))
+        if (Theme::choice_button((std::string(dom_label) + "##rt_dom").c_str(), rt_dom_shown_, ImVec2(w, 28.0f)))
             rt_dom_shown_ = !rt_dom_shown_;
         ui_test::mark("rt.dom.toolbar");
         if (ImGui::IsItemHovered())
@@ -3516,15 +3518,15 @@ void ChartWidget::render_controls() {
         anchor = ImVec2(cx, ctrl_y + 28.0f);
         cx += w + 12.0f;
     };
-    overlay_button("Liquidations", "liquidations_popup", "chart.liquidations", liquidations_on, liq_anchor, liquidation_menu_detail_);
-    overlay_button("Layers", "layers_popup", "chart.layers", chart_layers_on, ly_anchor, layers_menu_detail_);
+    overlay_button(i18n::tr("Liquidations", i18n::fa_liquidations), "liquidations_popup", "chart.liquidations", liquidations_on, liq_anchor, liquidation_menu_detail_);
+    overlay_button(i18n::tr("Layers", i18n::fa_layers), "layers_popup", "chart.layers", chart_layers_on, ly_anchor, layers_menu_detail_);
 
     // "+ widget" button (beside the layers control). This is the ONLY widget-
     // creation entry now (the old topbar "+" was removed): living in the chart
     // toolbar means it renders in EVERY chrome, including the embedded /demo +
     // event replays where the native topbar is suppressed.
     {
-        const char* label = compact_tools ? "Tools" : "+ Widget";
+        const char* label = compact_tools ? i18n::tr("Tools", i18n::fa_tools) : i18n::tr("+ Widget", i18n::fa_add_widget);
         const float tw = ImGui::CalcTextSize(label).x;
         const float w = 10.0f + tw + 10.0f;
         wrap_control(w);

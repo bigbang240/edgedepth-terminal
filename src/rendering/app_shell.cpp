@@ -24,6 +24,7 @@
 #include "ui/positions_panel.h"
 #include "ui/chart_widget.h"
 #include "ui/upsell_modal.h"
+#include "core/i18n.h"
 #include "core/entitlements.h"
 #include "core/realtime_preview.h"
 #include "core/heatmap_colormap.h"
@@ -1013,10 +1014,13 @@ namespace {
         const float icy   = top_y + (Layout::TOPBAR_H - 30.0f) * 0.5f;
         const float ico   = 30.0f, igap = 5.0f, dvw = 13.0f;
         ImGui::PushFont(Fonts::ui_semibold());
+        const char* ws_label = i18n::tr("Workspace", i18n::fa_workspace);
+        const char* live_label = i18n::tr("Live", i18n::fa_live);
+        const char* replay_label = i18n::tr("Replay", i18n::fa_replay);
         const float courses_w = ImGui::CalcTextSize("Courses").x + 20.0f;
-        const float default_w = ImGui::CalcTextSize("Workspace").x + 22.0f;
-        const float live_w    = ImGui::CalcTextSize("Live").x   + 22.0f;  // padx 11*2
-        const float replay_w  = ImGui::CalcTextSize("Replay").x + 22.0f;
+        const float default_w = ImGui::CalcTextSize(ws_label).x + 22.0f;
+        const float live_w    = ImGui::CalcTextSize(live_label).x   + 22.0f;  // padx 11*2
+        const float replay_w  = ImGui::CalcTextSize(replay_label).x + 22.0f;
         ImGui::PopFont();
         const float seg_w = live_w + replay_w;
         const bool  replaying = ctx.replayer && ctx.replayer->is_active();
@@ -1093,14 +1097,14 @@ namespace {
 
         // Default (layout) menu
         rx -= default_w; ImGui::SetCursorScreenPos(ImVec2(rx, icy));
-        if (tb_button("Workspace", default_w)) ImGui::OpenPopup("##tb_layout");
+        if (tb_button(ws_label, default_w)) ImGui::OpenPopup("##tb_layout");
 
         vdiv();
 
         // Live <-> Replay toggle (functional)
         rx -= seg_w;
         ImGui::SetCursorScreenPos(ImVec2(rx, top_y + (Layout::TOPBAR_H - 26.0f) * 0.5f));
-        static const char* const VIEW_LBL[] = {"Live", "Replay"};
+        const char* const VIEW_LBL[] = {i18n::tr("Live", i18n::fa_live), i18n::tr("Replay", i18n::fa_replay)};
         const int view_clicked = seg_control("viewseg", VIEW_LBL, 2, replaying ? 1 : 0);
         ui_test::mark("topbar.replay");   // the last segment drawn
         if (view_clicked == 0 && replaying && ctx.replayer) {
@@ -1248,12 +1252,25 @@ namespace {
             if (notional > 0) fmt_compact_usd(oi, sizeof(oi), notional);
         }
         const float y = vp->Pos.y + Layout::topbar_h() + 9;
+        // Phase 7: optional Persian numerals on the header readings (۰-۹). The
+        // buffers re-format in place before the metric lambda measures/draws.
+        const auto fa_fix = [](char* b, size_t cap) {
+            if (b[0] && i18n::g_fa_digits) {
+                const std::string s = i18n::digits(b);
+                snprintf(b, cap, "%s", s.c_str());
+            }
+        };
+        fa_fix(last, sizeof(last)); fa_fix(change, sizeof(change));
+        fa_fix(oi, sizeof(oi)); fa_fix(funding, sizeof(funding));
+        fa_fix(volume, sizeof(volume)); fa_fix(mark, sizeof(mark));
         float x = vp->Pos.x + 14;
         // Data and Market details at the right: the chrome's text buttons (no idle tile, hover shows the hit
         // area), sized to their labels as the chart toolbar's Indicators.
-        const char* details_label = vp->Size.x < 700 ? "Details" : "Market details";
+        const char* details_label = vp->Size.x < 700 ? i18n::tr("Details", i18n::fa_details)
+                                                     : i18n::tr("Market details", i18n::fa_market_details);
         ImGui::PushFont(Fonts::ui());
-        const float data_w = 10.0f + 12.0f + 7.0f + ImGui::CalcTextSize("Data").x + 11.0f;
+        const char* data_label = i18n::tr("Data", i18n::fa_data);
+        const float data_w = 10.0f + 12.0f + 7.0f + ImGui::CalcTextSize(data_label).x + 11.0f;
         const float details_w = 11.0f + ImGui::CalcTextSize(details_label).x + 7.0f + 8.0f + 10.0f;
         ImGui::PopFont();
         const float actions_x = vp->Pos.x + vp->Size.x - 12 - details_w - 4 - data_w;
@@ -1278,22 +1295,22 @@ namespace {
             x += ImGui::CalcTextSize(value).x + 28;
             ImGui::PopFont();
         };
-        metric("Last", last, Tokens::TX1);
-        metric("24h", change, tick ? (tick->change_pct_24h >= 0 ? Tokens::UP : Tokens::DOWN) : Tokens::TX3);
+        metric(i18n::tr("Last", i18n::fa_last), last, Tokens::TX1);
+        metric(i18n::tr("24h", i18n::fa_h24), change, tick ? (tick->change_pct_24h >= 0 ? Tokens::UP : Tokens::DOWN) : Tokens::TX3);
         // Funding is signed data (design system: up/down are for signed data): positive green (longs pay shorts),
         // negative red, zero and unavailable neutral (James 2026-10-11).
         const ImVec4& funding_col = !g_stats.has_data || g_stats.funding == 0.0 ? Tokens::TX2
                                   : g_stats.funding > 0.0 ? Tokens::UP : Tokens::DOWN;
-        if (vp->Size.x >= 850) metric("Funding", funding, funding_col);
+        if (vp->Size.x >= 850) metric(i18n::tr("Funding", i18n::fa_funding), funding, funding_col);
         if (vp->Size.x >= 1150) {
-            const float left=x; metric("Open interest", oi, Tokens::TX2);
+            const float left=x; metric(i18n::tr("Open interest", i18n::fa_open_interest), oi, Tokens::TX2);
             if (x>left) {
                 ImGui::SetCursorScreenPos(ImVec2(left,y-5));
                 if (ImGui::InvisibleButton("oi_history",ImVec2(x-left-16,28))) Menu::request_market_data(g_pair);
                 if (ImGui::IsItemHovered()) Theme::tooltip("Open Data: price, open interest, account history and current research.");
             }
         }
-        if (vp->Size.x >= 1500) metric("Volume 24h", volume, Tokens::TX2);
+        if (vp->Size.x >= 1500) metric(i18n::tr("Volume 24h", i18n::fa_volume_24h), volume, Tokens::TX2);
         // The Market details popover names a missing reading in words.
         for (char* b : {last, change, oi, funding, volume}) if (!b[0]) std::snprintf(b, 32, "Unavailable");
         // Data is a primary destination, reachable without opening a popup: brighter label, a chart glyph.
@@ -1323,7 +1340,7 @@ namespace {
             return clicked;
         };
         dl->AddLine(ImVec2(actions_x - 10.0f, y - 1), ImVec2(actions_x - 10.0f, y + 17), u32(Tokens::BD1), 1.0f);
-        if (header_button("##market_data", "Data", drawing::UiIcon::Bars, true, actions_x, data_w, false))
+        if (header_button("##market_data", data_label, drawing::UiIcon::Bars, true, actions_x, data_w, false))
             Menu::request_market_data(g_pair);
         if (ImGui::IsItemHovered()) Theme::tooltip("Open market history and current research");
         if (header_button("##market_details_btn", details_label, drawing::UiIcon::ChevronDown, false, actions_x + data_w + 4,
@@ -1507,6 +1524,70 @@ namespace {
 
             Theme::render_appearance_controls();
 
+            // ── Phase 7 - Persian UX: session language + Persian numerals ────
+            section("LANGUAGE / زبان");
+            {
+                auto lang_btn = [&](const char* label, i18n::Lang l, float w) {
+                    const bool on = (i18n::g_lang == l);
+                    ImGui::PushStyleColor(ImGuiCol_Button, on ? Tokens::BRAND_SOFT : Tokens::INPUT);
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, on ? Tokens::BRAND_SOFT : Tokens::HOVER);
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, Tokens::ACTIVE);
+                    ImGui::PushStyleColor(ImGuiCol_Text, on ? Tokens::BRAND : Tokens::TX2);
+                    if (ImGui::Button(label, ImVec2(w, 0))) {
+                        if (i18n::g_lang != l) { i18n::g_lang = l; i18n::save(); }
+                    }
+                    ImGui::PopStyleColor(4);
+                };
+                const float half = (ImGui::GetContentRegionAvail().x - 6.0f) * 0.5f;
+                lang_btn("English", i18n::Lang::En, half);
+                ImGui::SameLine(0.0f, 6.0f);
+                lang_btn(i18n::tr("Farsi", i18n::fa_farsi), i18n::Lang::Fa, half);
+                bool fd = i18n::g_fa_digits;
+                if (ImGui::Checkbox(i18n::tr("Persian digits", i18n::fa_fa_digits), &fd)) {
+                    i18n::g_fa_digits = fd;
+                    i18n::save();
+                }
+                if (ImGui::IsItemHovered()) Theme::tooltip("Persian numerals on header readings (Beta: header strip)");
+            }
+
+            // ── Phase 7 - theme JSON snapshot: copy out, paste in ────────────
+            // Save snapshots the live appearance.v2 JSON into the named slot
+            // AND into the text box (copy it anywhere). Load parses the text
+            // box (paste a saved JSON), rewrites appearance.v2 and re-applies.
+            section("THEME / پوسته");
+            {
+                static char theme_json[4096] = "";
+#ifdef __EMSCRIPTEN__
+                const auto storage_read = [](char* out, size_t cap, const char* key) {
+                    EM_ASM({
+                        try {
+                            const raw = localStorage.getItem(UTF8ToString($1)) || "";
+                            const len = Math.min(raw.length, $2 - 1);
+                            stringToUTF8(raw.substring(0, len), $0, $2);
+                        } catch (e) { stringToUTF8("", $0, $2); }
+                    }, out, key, cap);
+                };
+                const auto storage_write = [](const char* key, const char* val) {
+                    EM_ASM({ try { localStorage.setItem(UTF8ToString($0), UTF8ToString($1)); } catch (e) {} },
+                           key, val);
+                };
+                if (ImGui::Button(i18n::tr("Save theme (JSON)", i18n::fa_save_theme))) {
+                    storage_read(theme_json, sizeof(theme_json), "edgedepth.appearance.v2");
+                    storage_write("edgedepth.theme.v1", theme_json);
+                }
+                ImGui::SameLine(0.0f, 6.0f);
+                if (ImGui::Button(i18n::tr("Load theme (JSON)", i18n::fa_load_theme)) && theme_json[0]) {
+                    storage_write("edgedepth.appearance.v2", theme_json);
+                    Theme::load_preferences();  // re-applies chrome/accent/candles/maps
+                }
+                ImGui::InputTextMultiline("##theme_json", theme_json, sizeof(theme_json),
+                                          ImVec2(-1.0f, 88.0f));
+                if (ImGui::IsItemHovered()) Theme::tooltip(
+                    "Save: current theme JSON (auto-copied to the box).\n"
+                    "Load: applies the JSON in the box (paste a saved one).");
+#endif
+            }
+
             // Density → Theme::set_density (clamps 3..10, re-derives row height)
             section("DENSITY");
             int d = density();
@@ -1600,13 +1681,16 @@ namespace {
         if (local_pack) snprintf(status, sizeof(status), "LOCAL REPLAY");
         else if (transport) transport->format_connection_status(status, sizeof(status));
         const char* mode = ctx.replay_mgr().transport_interrupted() ? "Replay interrupted" :
-            ctx.replay_mgr().is_active() ? "Replay" :
-            ctx.stream_mgr().live_subscriptions_paused() ? "Paused" : "Live";
+            ctx.replay_mgr().is_active() ? i18n::tr("Replay", i18n::fa_replay) :
+            ctx.stream_mgr().live_subscriptions_paused() ? i18n::tr("Paused", i18n::fa_paused) : i18n::tr("Live", i18n::fa_live);
         char left[192];
         // The pair as the tabs name it (W/USDT), from the symbol this bar is given: embedded mounts never initialise
         // the header's own pair, so its name could belong to another market.
         const std::string pair_name = widget_symbol_label(symbol_lc);
-        snprintf(left, sizeof(left), "%s  ·  %s  ·  %s", pair_name.c_str(), mode, local_pack ? "Local recording" : ws_ok ? "Connected" : "Disconnected");
+        snprintf(left, sizeof(left), "%s  ·  %s  ·  %s", pair_name.c_str(), mode,
+                 local_pack ? i18n::tr("LOCAL REPLAY", i18n::fa_local_replay)
+                            : ws_ok ? i18n::tr("Connected", i18n::fa_connected)
+                                    : "Disconnected");
         const float dot_x = vp->Pos.x + 14.0f;
         // coin logo at the far left (monogram fallback while loading / if missing)
         const float sb_logo = 13.0f;

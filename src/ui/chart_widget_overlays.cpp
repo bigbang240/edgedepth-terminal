@@ -1,3 +1,4 @@
+#include "core/i18n.h"
 #include "ui/chart_widget.h"
 #include "ui/compression_overlay.h"
 #include "core/liq_field_venue_caps.h"
@@ -37,10 +38,10 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
     auto layer_section = [&](const char* label) { if (page.empty()) Theme::menu_section(label); };
     auto layer_row = [&](const char* label, bool on, bool locked, const char* tag = nullptr) {
         const bool has_settings = page.empty() && !locked &&
-            (std::string_view(label) == "Liquidation map" || std::string_view(label) == "Hyperliquid positions" ||
-             std::string_view(label) == "Reported liquidations" || std::string_view(label) == "Trade bubbles (large prints)" ||
-             std::string_view(label) == "Trade bubbles" || std::string_view(label) == "Order book depth" || std::string_view(label) == "Volume profile (VPVR)" ||
-             std::string_view(label) == "Absorption bands");
+            (std::string_view(label) == i18n::tr("Liquidation map", i18n::fa_l_liq_map) || std::string_view(label) == i18n::tr("Hyperliquid positions", i18n::fa_l_hl_positions) ||
+             std::string_view(label) == i18n::tr("Reported liquidations", i18n::fa_l_reported) || std::string_view(label) == i18n::tr("Trade bubbles (large prints)", i18n::fa_l_bubbles_large) ||
+             std::string_view(label) == i18n::tr("Trade bubbles", i18n::fa_l_bubbles) || std::string_view(label) == i18n::tr("Order book depth", i18n::fa_l_depth) || std::string_view(label) == "Volume profile (VPVR)" ||
+             std::string_view(label) == i18n::tr("Absorption bands", i18n::fa_l_absorption));
         bool open = false;
         const bool clicked = Theme::menu_layer(label, on, locked, tag, has_settings ? &open : nullptr);
         if (open) detail = label;
@@ -48,26 +49,26 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
     };
     const auto options = [](const char*, auto&& body) { Theme::begin_menu_detail(); body(); Theme::end_menu_detail(); };
     const auto absorption_row = [&] {
-        if (!absorption_supported || !wants("Absorption bands")) return;
+        if (!absorption_supported || !wants(i18n::tr("Absorption bands", i18n::fa_l_absorption))) return;
         const bool locked = absorption_locked();
-        if (layer_row("Absorption bands", liquidity_response_enabled_ && !locked, locked, locked ? nullptr : "pilot")) {
+        if (layer_row(i18n::tr("Absorption bands", i18n::fa_l_absorption), liquidity_response_enabled_ && !locked, locked, locked ? nullptr : "pilot")) {
             if (locked) open_absorption_upsell();
             else { liquidity_response_enabled_ = !liquidity_response_enabled_; liquidity_response_history_.reset(); }
         }
         if (ImGui::IsItemHovered()) Theme::tooltip("Bids and asks that keep refilling. Binance BTC and SOL pilot.");
-        if (page == "Absorption bands" && !locked) options("", [&] { render_liquidity_response_settings(); });
+        if (page == i18n::tr("Absorption bands", i18n::fa_l_absorption) && !locked) options("", [&] { render_liquidity_response_settings(); });
     };
     if (liquidations) {
         if (rt_mode_) {
 
-            if (layer_row("Reported liquidations", reported_liquidations_enabled(), false)) {
+            if (layer_row(i18n::tr("Reported liquidations", i18n::fa_l_reported), reported_liquidations_enabled(), false)) {
                 reported_liquidations_enabled() = !reported_liquidations_enabled();
                 if (reported_liquidations_enabled()) { rt_liq_strip_=true; rt_liq_markers_=true; }
             }
             if (ImGui::IsItemHovered())
                 Theme::tooltip("Liquidations the exchange published, as they happen.\n%s.",
                                observed_liquidations::feed_line(pair_.exchange));
-            if (page == "Reported liquidations") {
+            if (page == i18n::tr("Reported liquidations", i18n::fa_l_reported)) {
                 Theme::begin_menu_detail();
                 if (Theme::menu_toggle("Diamonds on the tape", rt_liq_markers_)) rt_liq_markers_ = !rt_liq_markers_;
                 if (ImGui::IsItemHovered())
@@ -79,7 +80,7 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
             }
         } else {
             layer_section("POSITION LEVELS");
-            if (wants("Hyperliquid positions")) {
+            if (wants(i18n::tr("Hyperliquid positions", i18n::fa_l_hl_positions))) {
         // Hyperliquid positions = observed position levels from the HL census (Pro, P2e) - ground truth,
         // never folded into the modelled map above. Keyed by underlying, so it's offered on any venue's
         // chart, tagged "not on HL" (inert) when the underlying has no HL market. The ticker24h hl feed is
@@ -91,7 +92,7 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
             const bool hl_ok = hl_rails_allowed();
             const bool census_on = hl_ok && liq_census_enabled_ && !hl_missing;
             const char* hl_tag = hl_missing ? "not on HL" : hl_rails_free() && !pro ? "free here" : nullptr;
-            if (layer_row("Hyperliquid positions", census_on, !hl_ok, hl_tag)) {
+            if (layer_row(i18n::tr("Hyperliquid positions", i18n::fa_l_hl_positions), census_on, !hl_ok, hl_tag)) {
                 if (!hl_ok) ui::UpsellModal::instance().open(ui::UpsellModal::Trigger::Layer,
                                                             nullptr, "hl_liq_levels");
                 else if (!hl_missing) toggle_liq_census();
@@ -101,7 +102,7 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
                                "significant levels, the few that hold most of the dollars.\n"
                                "Positions that exist now, read from our Hyperliquid node: not a forecast.\n"
                                "Free on BTC, Pro on every coin.");
-            if (hl_ok && !hl_missing && page == "Hyperliquid positions") {
+            if (hl_ok && !hl_missing && page == i18n::tr("Hyperliquid positions", i18n::fa_l_hl_positions)) {
                 // Under the row while it is on: the real leverage shown (the census's own figures, not the scenario
                 // map's assumed tiers), which layer leads when the V2 rails draw too, and the profile. Its own ID
                 // scope: the V2 row's settings carry a "Profile at right edge" too.
@@ -149,7 +150,7 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
             }
         }
             }
-            if (wants("Liquidation map")) {
+            if (wants(i18n::tr("Liquidation map", i18n::fa_l_liq_map))) {
         // One liquidation map row, one switch (liq_dense_field_; a saved V1 "on" reads as map on). Live, the
         // map is V2's milestone rails wherever the viewer has V2 (admin preview, free BTC, Pro) and a locked
         // PRO row into the upsell where V2 is Pro; the scenario map (V1) no longer draws on live charts.
@@ -168,7 +169,7 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
             if (ImGui::IsItemHovered()) Theme::tooltip("The map's public scorecard for this market, day by day.");
         };
         if (live && v2_access == liqmap2::Access::locked) {
-            if (layer_row("Liquidation map", false, true))
+            if (layer_row(i18n::tr("Liquidation map", i18n::fa_l_liq_map), false, true))
                 ui::UpsellModal::instance().open(ui::UpsellModal::Trigger::Layer, nullptr, "liqmap2");
             if (ImGui::IsItemHovered())
                 Theme::tooltip("Liquidation rails: where positions would be forced out, in $.\nFree on BTC, Pro on every market.\n%s.",
@@ -177,13 +178,13 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
         } else if (live && v2_access != liqmap2::Access::hidden) {
             const char* tag = v2_access == liqmap2::Access::preview ? "admin"
                             : v2_access == liqmap2::Access::free_taste ? "free here" : nullptr;
-            if (layer_row("Liquidation map", v2_on, false, tag)) liq_dense_field_ = !liq_dense_field_;
+            if (layer_row(i18n::tr("Liquidation map", i18n::fa_l_liq_map), v2_on, false, tag)) liq_dense_field_ = !liq_dense_field_;
             if (ImGui::IsItemHovered())
                 Theme::tooltip("Liquidation rails: where positions would be forced out, in $, ended by the candle that\n"
                                "reaches them. %s%s.", v2_access == liqmap2::Access::free_taste ? "Free on BTC, Pro on every market.\n" : "",
                                liqmap2::kForwardTest);
         } else if (!live) {
-            if (layer_row("Liquidation map", scenario_on, false, "scenario")) {
+            if (layer_row(i18n::tr("Liquidation map", i18n::fa_l_liq_map), scenario_on, false, "scenario")) {
                 liq_dense_field_ = !liq_dense_field_;
                 liq_shelf_cache_ts_ = -1;
             }
@@ -191,7 +192,7 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
             // Right-click still opens the scenario map's style panel.
             if (scenario_on && ImGui::IsItemClicked(ImGuiMouseButton_Right)) open_liq_settings_ = true;
         }
-        if (page == "Liquidation map" && live && v2_access != liqmap2::Access::locked && v2_access != liqmap2::Access::hidden) {
+        if (page == i18n::tr("Liquidation map", i18n::fa_l_liq_map) && live && v2_access != liqmap2::Access::locked && v2_access != liqmap2::Access::hidden) {
             // The rails' colour and profile sit under the row while it is on: this coin's Bybit and Binance rails
             // together (render_liqmap2), coloured by the liquidations expected within a horizon (the visual rule's
             // horizons; 4 h by default, as 1 h understates in development) or by the dollars.
@@ -219,10 +220,10 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
             Theme::menu_note(liqmap2::kForwardTest);
             record_item();
             Theme::end_menu_detail();
-        } else if (!live && page == "Liquidation map") {
+        } else if (!live && page == i18n::tr("Liquidation map", i18n::fa_l_liq_map)) {
             options("Options##scenario", [&] {
                 // Scenario profile = price-marginal of the scenario map (free), not observed liquidations.
-                if (layer_row("Scenario profile", liq_profile_enabled_, false))
+                if (layer_row(i18n::tr("Scenario profile", i18n::fa_l_scenario), liq_profile_enabled_, false))
                     liq_profile_enabled_ = !liq_profile_enabled_;
                 // Assumed leverage tiers (Pro): the leverage mask the scenario map is built from.
                 {
@@ -288,10 +289,10 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
             });
         }
             }
-            if (wants("Reported liquidations")) {
+            if (wants(i18n::tr("Reported liquidations", i18n::fa_l_reported))) {
                 layer_section("REPORTED EVENTS");
         // Observed = real @forceOrder prints via the liquidations stream (Pro).
-        if (layer_row("Reported liquidations", pro && reported_liquidations_enabled(), !pro)) {
+        if (layer_row(i18n::tr("Reported liquidations", i18n::fa_l_reported), pro && reported_liquidations_enabled(), !pro)) {
             // Switching the source on brings its callouts with it, as the
             // real-time row does for its diamonds (James, 2026-10-17).
             if (pro) { reported_liquidations_enabled() = !reported_liquidations_enabled();
@@ -302,7 +303,7 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
         }
         if (pro && ImGui::IsItemHovered())
             Theme::tooltip("Liquidations the exchange published, totalled per candle.\n%s.", observed_liquidations::feed_line(pair_.exchange));
-        if (pro && page == "Reported liquidations") {
+        if (pro && page == i18n::tr("Reported liquidations", i18n::fa_l_reported)) {
             Theme::begin_menu_detail();
             render_liquidation_settings();
             Theme::end_menu_detail();
@@ -318,12 +319,12 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
     } else {
         if (rt_mode_ && page != "Research tools") {
             // Real-time mode has its own layer set: the candle-chart rows below
-            // draw nothing here, and "Order book depth" must mean the sampled
+            // draw nothing here, and i18n::tr("Order book depth", i18n::fa_l_depth) must mean the sampled
             // depth cells, not the candle heatmap. Overlay switches live here;
             // the Real-time menu owns navigation and panel visibility.
             layer_section("REAL-TIME VIEW");
-            if (wants("Order book depth")) {
-                const bool c = layer_row("Order book depth", rt_depth_enabled_, false);
+            if (wants(i18n::tr("Order book depth", i18n::fa_l_depth))) {
+                const bool c = layer_row(i18n::tr("Order book depth", i18n::fa_l_depth), rt_depth_enabled_, false);
                 if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
                     open_heatmap_settings_ = true;
                     ImGui::CloseCurrentPopup();
@@ -332,7 +333,7 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
                     Theme::tooltip("Sampled book behind the trades. Off leaves trades, quotes and liquidations on a clear background.");
                 if (c) rt_depth_enabled_ = !rt_depth_enabled_;
             }
-            if (page == "Order book depth") {
+            if (page == i18n::tr("Order book depth", i18n::fa_l_depth)) {
                 Theme::begin_menu_detail();
                 if (Theme::menu_item(UiIcon::Gear, "Depth settings\xe2\x80\xa6")) {
                     open_heatmap_settings_ = true;
@@ -340,8 +341,8 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
                 }
                 Theme::end_menu_detail();
             }
-            if (wants("Trade bubbles") && layer_row("Trade bubbles", rt_bubbles_, false)) rt_bubbles_ = !rt_bubbles_;
-            if (page == "Trade bubbles") {
+            if (wants(i18n::tr("Trade bubbles", i18n::fa_l_bubbles)) && layer_row(i18n::tr("Trade bubbles", i18n::fa_l_bubbles), rt_bubbles_, false)) rt_bubbles_ = !rt_bubbles_;
+            if (page == i18n::tr("Trade bubbles", i18n::fa_l_bubbles)) {
                 // Per-market reference, with a separate upper size cap for exceptional groups.
                 static const char* const kCaps[] = {"Compact", "Standard", "Large"};
                 static constexpr float kCapPx[] = {bubble_size::kCompact, bubble_size::kStandard, bubble_size::kLarge};
@@ -368,21 +369,21 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
                 Theme::end_menu_detail();
             }
             if (page.empty()) {
-            if (layer_row("Trade-price line", rt_trade_line_, false)) rt_trade_line_ = !rt_trade_line_;
-            if (layer_row("1s candles", rt_candles_, false)) {
+            if (layer_row(i18n::tr("Trade-price line", i18n::fa_l_trade_line), rt_trade_line_, false)) rt_trade_line_ = !rt_trade_line_;
+            if (layer_row(i18n::tr("1s candles", i18n::fa_l_1s_candles), rt_candles_, false)) {
                 rt_candles_ = !rt_candles_;
                 chart_type_ = rt_candles_ ? ChartType::Candles : ChartType::Line;
             }
             if (rt_candles_) {
-                if (layer_row("Heikin-Ashi", rt_heikin_, false)) rt_heikin_ = !rt_heikin_;
+                if (layer_row(i18n::tr("Heikin-Ashi", i18n::fa_l_heikin), rt_heikin_, false)) rt_heikin_ = !rt_heikin_;
                 if (ImGui::IsItemHovered())
                     Theme::tooltip("Smoothed real-time candles: the open is the midpoint of the previous\nHA candle, the close is the raw OHLC4. Trend structure without wick noise.");
             }
             render_realtime_cvd_layer();
-            if (layer_row("Est. liquidations", rt_liq_levels_enabled_, false)) rt_liq_levels_enabled_ = !rt_liq_levels_enabled_;
+            if (layer_row(i18n::tr("Est. liquidations", i18n::fa_l_est_liq), rt_liq_levels_enabled_, false)) rt_liq_levels_enabled_ = !rt_liq_levels_enabled_;
             if (ImGui::IsItemHovered())
                 Theme::tooltip("Estimated liquidation clusters: open interest split over leverage tiers\nusing the recent tape. Red bands are forced sells (longs), green forced buys (shorts).\nAn estimate, not real orders.");
-            if (layer_row("Resting depth heat", rt_cum_depth_enabled_, false)) rt_cum_depth_enabled_ = !rt_cum_depth_enabled_;
+            if (layer_row(i18n::tr("Resting depth heat", i18n::fa_l_resting), rt_cum_depth_enabled_, false)) rt_cum_depth_enabled_ = !rt_cum_depth_enabled_;
             if (ImGui::IsItemHovered())
                 Theme::tooltip("A second heat map: time-weighted resting depth per price (10-minute\nmemory). Gold rows are prices where orders have been sitting - shelves and\nwalls stand out from flicker. Hover a row for its size.");
             layer_section("ORDER BOOK SIGNALS");
@@ -408,16 +409,16 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
         } else if (!rt_mode_) {
             if (page == "Price levels") {
         layer_section("PRICE LEVELS");
-        if (layer_row("Daily VWAP (UTC)", session_vwap_, false)) {
+        if (layer_row(i18n::tr("Daily VWAP (UTC)", i18n::fa_l_vwap), session_vwap_, false)) {
             session_vwap_ = !session_vwap_; reference_update_time_ = -1;
         }
         if (ImGui::IsItemHovered())
             Theme::tooltip("Current UTC day only, starting at midnight UTC.\nUses completed candle HLC3 and base volume.\nRight-click an earlier candle to anchor a longer VWAP.");
-        if (layer_row("Previous day high / low / close", previous_day_, false)) {
+        if (layer_row(i18n::tr("Previous day high / low / close", i18n::fa_l_prev_day), previous_day_, false)) {
             previous_day_ = !previous_day_; reference_update_time_ = -1;
         }
         if (ImGui::IsItemHovered()) Theme::tooltip("Days start at midnight UTC.");
-        if (layer_row("Previous week high / low / close", previous_week_, false)) {
+        if (layer_row(i18n::tr("Previous week high / low / close", i18n::fa_l_prev_week), previous_week_, false)) {
             previous_week_ = !previous_week_; reference_update_time_ = -1;
         }
         if (ImGui::IsItemHovered()) Theme::tooltip("Weeks start Monday, midnight UTC.");
@@ -451,17 +452,17 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
                     ui_test::mark("overlay.price");
                     Theme::menu_separator();
                 }
-                if (wants("Order book depth")) {
+                if (wants(i18n::tr("Order book depth", i18n::fa_l_depth))) {
         // OB Depth = orderbook depth heatmap (free). Right-click opens its settings.
         {
-            const bool c = layer_row("Order book depth", heatmap_enabled_, false);
+            const bool c = layer_row(i18n::tr("Order book depth", i18n::fa_l_depth), heatmap_enabled_, false);
             if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
                 open_heatmap_settings_ = true;
                 ImGui::CloseCurrentPopup();
             }
             if (c) heatmap_enabled_ = !heatmap_enabled_;
         }
-        if (page == "Order book depth") {
+        if (page == i18n::tr("Order book depth", i18n::fa_l_depth)) {
             Theme::begin_menu_detail();
             if (Theme::menu_item(UiIcon::Gear, "Depth settings\xe2\x80\xa6")) {
                 open_heatmap_settings_ = true;
@@ -470,16 +471,16 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
             Theme::end_menu_detail();
         }
                 }
-                if (wants("Trade bubbles (large prints)")) {
+                if (wants(i18n::tr("Trade bubbles (large prints)", i18n::fa_l_bubbles_large))) {
         // Trade bubbles on candles (free): large prints as bubbles. Real-time mode
         // (the pill beside the timeframes) draws EVERY trade; this is the subset
         // that clears the market-size floor, on every plan.
-        if (layer_row("Trade bubbles (large prints)", candle_bubbles_, false))
+        if (layer_row(i18n::tr("Trade bubbles (large prints)", i18n::fa_l_bubbles_large), candle_bubbles_, false))
             candle_bubbles_ = !candle_bubbles_;
         if (ImGui::IsItemHovered())
             Theme::tooltip("Large trades drawn as bubbles on the candles: colored by taker buy/sell using your selected palette, sized on a compressed value scale.\n"
                            "Real-time mode (beside the timeframes) shows every trade with the order book behind it.");
-        if (page == "Trade bubbles (large prints)") options("Options##bubbles", [&] {
+        if (page == i18n::tr("Trade bubbles (large prints)", i18n::fa_l_bubbles_large)) options("Options##bubbles", [&] {
                 if (Theme::menu_field(candle_bubble_min_ > 0 ? "Minimum value" : "Minimum value (0 = auto)", &candle_bubble_min_))
                     if (!std::isfinite(candle_bubble_min_) || candle_bubble_min_ < 0) candle_bubble_min_ = 0;
                 if (ImGui::IsItemHovered()) {
