@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(c_based_trader_client VERSION 1.0.0 LANGUAGES CXX C)
+project(c_based_trader_client VERSION 0.7.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

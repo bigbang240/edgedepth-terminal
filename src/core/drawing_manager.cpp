@@ -470,7 +470,10 @@ int64_t template_now_ms() {
         std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
-std::vector<drawing::Drawing> parse_template_items(const nlohmann::json& arr) {
+// Only called from load_templates(), whose body is entirely inside
+// #ifdef __EMSCRIPTEN__; in native test builds gcc -Werror would flag
+// it as an unused anonymous-namespace function without this attribute.
+[[maybe_unused]] std::vector<drawing::Drawing> parse_template_items(const nlohmann::json& arr) {
     std::vector<drawing::Drawing> out;
     for (const auto& ji : arr) {
         if (out.size() >= drawing::kMaxDrawings) break;
