@@ -152,7 +152,10 @@ inline const char* const fa_table[fa_COUNT][2] = {
 for key, en, fa in TABLE:
     vis = shape(fa)
     esc = vis.replace("\\", "\\\\").replace('"', '\\"')
-    out.write(f'    /* fa_{key} */ {{"{en}", u8"{esc}"}},\n')
+    # NOTE: plain literals, NOT u8"" - C++20 char8_t breaks const char* tables.
+    # The source is UTF-8 and clang's execution charset is UTF-8, so these
+    # bytes land in the binary unchanged.
+    out.write(f'    /* fa_{key} */ {{"{en}", "{esc}"}},\n')
 out.write("""};
 
 }  // namespace i18n
