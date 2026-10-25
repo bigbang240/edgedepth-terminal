@@ -42,10 +42,54 @@ Requires [bun](https://bun.sh) ≥ 1.1 (uses `Bun.zstdCompressSync`,
 | `RECORDER_BIGTRADE_USD` | `250000`                 | Single-fill notional indexed as "trade"   |
 | `RECORDER_VOL_SPIKE_X` | `5`                        | 1m volume × hourly mean = a "vol" event   |
 | `RECORDER_TZ_OFFSET_MIN` | `210`                    | Local-day offset for reports (Asia/Tehran)|
+| `RECORDER_HISTORY_DB` | `./data/history/history.db` | SQLite history file (Phase 6)             |
+| `RECORDER_HISTORY_DAYS` | `3`                      | History retention (pruned hourly)         |
+| `RECORDER_DEPTH_BPS` | `25`                        | Default analytics depth window            |
+| `RECORDER_DEPTH_BUCKETS` | `10`                    | Default depth-histogram bins              |
+| `RECORDER_ANALYTICS_MS` | `1000`                    | WS analytics push cadence                 |
+| `RECORDER_BOOK_POLL_MS` | `5000`                    | Top-of-book history poll cadence          |
 
 Status: `curl localhost:9002/` — gateway connection, per-symbol episode state
 (frames, candles seeded, order-book seed), pack count/bytes, event index size,
-malformed frames.
+malformed frames, plus the analytics/history summary (Phase 6).
+
+## Analytical server (roadmap Phase 6 — your main terminal is the consumer)
+
+The recorder keeps the same normalized order-book state the terminal's
+OrderbookManager maintains (snapshot + delta semantics, venue-agnostic -
+verified on Binance futures and OKX), plus rolling trade flow and liquidation
+sums, and serves it over REST and WebSocket:
+
+- `GET /analytics?symbol=&depth_bps=25&buckets=10` — live snapshot, schema
+  `edgedepth.analytics.v1`: best bid/ask, mid, spread (abs + bps), bid/ask
+  notional inside the depth window, imbalance, per-bin depth histogram,
+  CVD (session + 5m), 60s trade/notional rates, 5m VWAP + buy ratio,
+  liquidation sums (5m/60m per side), latest 1m candle, feed ages.
+- `WS /analytics/ws` — 1s push of the same snapshots for the subscribed
+  symbols: `"{"method":"subscribe","data":{"symbols":["btcusdt"]}}"`
+  (empty/null = every configured symbol).
+
+```bash
+curl 'localhost:9002/analytics?symbol=btcusdt'
+# behind the site gateway: /analytics?XTransformPort=9002
+```
+
+## Normalized-stream history in SQLite (roadmap Phase 6)
+
+Every trade, every liquidation, completed 1m candles and a 5s top-of-book
+poll land in a WAL-mode SQLite DB (`bun:sqlite`, zero new dependencies).
+Writes are batched (2 s / 500 rows) inside transactions — the WS ingest path
+never blocks. Rows older than `RECORDER_HISTORY_DAYS` (default 3) are pruned
+hourly and the WAL is truncated.
+
+- `GET /history/trades?symbol=&from=&to=&limit=`
+- `GET /history/liquidations?...`
+- `GET /history/candles?...` (ascending)
+- `GET /history/book?...` (descending)
+- `GET /history` — row counts + time spans (schema `edgedepth.history.v1`)
+
+Timestamps are ms epochs. The raw wire stays in the .edpack packs (Phase 4);
+this store is the queryable, normalized view.
 
 ## Event finder (search the archive)
 

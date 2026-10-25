@@ -46,6 +46,8 @@ import {
   writeSync,
 } from "node:fs";
 import { basename, join } from "node:path";
+import { AnalyticsEngine, type AnalyticsSnapshot } from "./analytics.ts";
+import { HistoryStore } from "./history.ts";
 
 // ── Configuration ──────────────────────────────────────────────────────────────
 
@@ -62,6 +64,15 @@ const EVENTS_DIR = join(DATA_DIR, "events");
 const CANDLES_DIR = join(DATA_DIR, "candles");
 const REPORTS_DIR = join(DATA_DIR, "reports");
 const SNAPSHOTS_DIR = join(DATA_DIR, "snapshots");
+
+// Analytical server + SQLite history (roadmap Phase 6).
+const HISTORY_DIR = join(DATA_DIR, "history");
+const HISTORY_DB = process.env.RECORDER_HISTORY_DB || join(HISTORY_DIR, "history.db");
+const HISTORY_DAYS = Number(process.env.RECORDER_HISTORY_DAYS || 3); // retention
+const ANALYTICS_DEPTH_BPS = Number(process.env.RECORDER_DEPTH_BPS || 25);
+const ANALYTICS_BUCKETS = Number(process.env.RECORDER_DEPTH_BUCKETS || 10);
+const ANALYTICS_PUSH_MS = Number(process.env.RECORDER_ANALYTICS_MS || 1000); // WS cadence
+const BOOK_POLL_MS = Number(process.env.RECORDER_BOOK_POLL_MS || 5000); // history cadence
 const EPISODE_MS = Number(process.env.RECORDER_EPISODE_MS || 3_600_000); // hourly packs
 const BLOCK_TARGET = 4 * 1024 * 1024; // uncompressed bytes per zstd block (EDPACK target)
 const KEEP_PER_SYMBOL = Number(process.env.RECORDER_KEEP || 48); // 2 days of hourly packs
@@ -713,15 +724,20 @@ class Session {
     if (!this.episode) this.episode = new Episode(this.symbol, ts);
     const ep = this.episode;
     // Boot seeds are captured alongside the raw stream.
-    if (stream === STREAM_ORDERBOOK && ep.obSeed === null) {
+    if (stream === STREAM_ORDERBOOK) {
+      // Feed the analytics book on EVERY frame (snapshot + delta semantics
+      // mirror OrderbookManager) and keep the pack's boot seed as before.
       try {
         const bu = BookUpdate.decode(payload);
-        if (bu.snapshot) {
+        analytics
+          .for(this.symbol)
+          .applyBook({ snapshot: !!bu.snapshot, asks: bu.asks, bids: bu.bids, tsMs: ts });
+        if (!ep.obSeed && bu.snapshot) {
           ep.obSeed = payload; // verbatim marshalled BookUpdate{snapshot:true}
           ep.obSeedTs = ts;
         }
       } catch {
-        // not decodable - can't be a seed anyway
+        // not decodable - can't be a seed or analytics input anyway
       }
     } else if (stream === STREAM_CANDLES) {
       // The gateway broadcasts STREAM_CANDLES as a SINGULAR pb.Candle (its
@@ -742,6 +758,16 @@ class Session {
             v: c.volume,
           };
           candleStore.append(this.symbol, row);
+          analytics.for(this.symbol).applyCandle(row);
+          history.queueCandle([
+            row.t,
+            this.symbol,
+            row.o,
+            row.h,
+            row.l,
+            row.c,
+            row.v,
+          ]);
           feedCandleForEvents(this.symbol, {
             volume: c.volume,
             close: c.close,
@@ -771,6 +797,8 @@ class Session {
           };
           eventStore.push(event);
           feedCascade(this.symbol, event);
+          analytics.for(this.symbol).applyLiq({ ts, price, qty, isBuy: liq.is_buy });
+          history.queueLiq([ts, this.symbol, event.side, price, qty, usd]);
         }
       } catch {
         // liq decode issues never block recording
@@ -782,6 +810,10 @@ class Session {
         const price = t.price;
         const qty = t.qty;
         const usd = price * qty;
+        const tTs = toNum(t.timestampMs) || ts;
+        // Analytical flow + full-fidelity normalized history (retention-bound).
+        analytics.for(this.symbol).applyTrade({ ts: tTs, price, qty, isBuy: t.is_buy });
+        history.queueTrade([tTs, this.symbol, price, qty, t.is_buy ? 1 : 0, usd]);
         if (usd >= BIGTRADE_USD) {
           eventStore.push({
             ts: toNum(t.timestampMs) || ts,
@@ -809,6 +841,20 @@ class Session {
 
 const sessions = new Map<string, Session>();
 for (const s of SYMBOLS) sessions.set(s, new Session(s));
+
+// ── Analytical engine + SQLite history (roadmap Phase 6) ────────────────────
+
+// Live per-symbol analytics on the SAME normalized feed the packs record:
+// order book state (snapshot+delta semantics), trade flow (CVD/rates/VWAP),
+// liquidation sums, latest 1m candle. Served over REST /analytics and pushed
+// on WS /analytics/ws - the consumer terminal never touches raw wire data.
+const analytics = new AnalyticsEngine();
+for (const s of SYMBOLS) analytics.for(s).exchange = EXCHANGE;
+
+// Normalized-stream history in SQLite (WAL): every trade, every liquidation,
+// completed 1m candles and a periodic top-of-book poll, batched so the WS
+// ingest path never blocks. REST: /history/{trades,liquidations,candles,book}.
+const history = new HistoryStore(HISTORY_DB, HISTORY_DAYS);
 
 // ── Gateway WebSocket client (auto-reconnect, control plane is JSON text) ─────
 
@@ -919,6 +965,13 @@ setInterval(() => {
 setInterval(() => candleStore.flush(), 10_000);
 setInterval(() => candleStore.pruneOld(), 3600_000);
 
+// Phase 6 history plumbing: batched SQLite flush, top-of-book polls, prune.
+setInterval(() => history.flush(), 2_000);
+setInterval(() => {
+  for (const s of analytics.list()) history.queueBookPoll(s.bookPollRow());
+}, BOOK_POLL_MS);
+setInterval(() => history.prune(), 3600_000);
+
 let shuttingDown = false;
 async function shutdown() {
   if (shuttingDown) return;
@@ -933,6 +986,7 @@ async function shutdown() {
     pendingCascades.delete(key);
   }
   candleStore.flush();
+  history.close();
   for (const sess of sessions.values()) {
     if (sess.episode) await sess.episode.close();
   }
@@ -1455,9 +1509,93 @@ function reportsListResponse(): Response {
   });
 }
 
+// ── Analytical server (Phase 6): REST /analytics + WS /analytics/ws ──────────
+
+// WS clients; ws.data.symbols === null means "all configured symbols".
+const analyticsClients = new Set<{
+  data: { symbols: string[] | null };
+  send: (s: string) => void;
+}>();
+
+let analyticsCacheAt = 0;
+const analyticsCache = new Map<string, AnalyticsSnapshot>();
+
+function analyticsSnapshotCached(sym: string): AnalyticsSnapshot {
+  const now = Date.now();
+  if (now - analyticsCacheAt > 250 || !analyticsCache.has(sym)) {
+    analyticsCacheAt = now;
+    analyticsCache.set(sym, analytics.for(sym).snapshot(ANALYTICS_DEPTH_BPS, ANALYTICS_BUCKETS));
+  }
+  return analyticsCache.get(sym)!;
+}
+
+// One shared build per tick; each client gets its subscribed slice.
+setInterval(() => {
+  if (!analyticsClients.size) return;
+  const now = Date.now();
+  for (const ws of analyticsClients) {
+    try {
+      const wanted = ws.data.symbols && ws.data.symbols.length ? ws.data.symbols : SYMBOLS;
+      const data = wanted.map((s) => analyticsSnapshotCached(s.toLowerCase()));
+      ws.send(JSON.stringify({ type: "analytics", schema: "edgedepth.analytics.v1", ts_ms: now, data }));
+    } catch {
+      analyticsClients.delete(ws);
+    }
+  }
+}, ANALYTICS_PUSH_MS);
+
+function analyticsResponse(url: URL): Response {
+  const sym = (url.searchParams.get("symbol") || "").trim().toLowerCase();
+  const depthBps = Number(url.searchParams.get("depth_bps")) || ANALYTICS_DEPTH_BPS;
+  const buckets = Number(url.searchParams.get("buckets")) || ANALYTICS_BUCKETS;
+  const wanted = sym ? [sym] : SYMBOLS;
+  const body = JSON.stringify({
+    schema: "edgedepth.analytics.v1",
+    ts_ms: Date.now(),
+    exchange: EXCHANGE,
+    depth_bps: depthBps,
+    buckets,
+    data: wanted.map((s) => analytics.for(s).snapshot(depthBps, Math.min(buckets, 25))),
+    note: "Live analytical view of the normalized feed. WS stream: /analytics/ws (subscribe {\"method\":\"subscribe\",\"data\":{\"symbols\":[\"btcusdt\"]}} or null for all).",
+  });
+  return new Response(body, {
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "access-control-allow-origin": "*",
+    },
+  });
+}
+
+// ── History queries (Phase 6): REST /history/... over the SQLite store ────────
+
+function historyParams(url: URL): { symbol?: string; from?: number; to?: number; limit?: number } {
+  const num = (k: string) => {
+    const v = Number(url.searchParams.get(k));
+    return Number.isFinite(v) && v > 0 ? v : undefined;
+  };
+  const symbol = (url.searchParams.get("symbol") || "").trim().toLowerCase() || undefined;
+  return { symbol, from: num("from"), to: num("to"), limit: num("limit") };
+}
+
+function historyJson(kind: string, rows: unknown[], note?: string): Response {
+  const body = JSON.stringify({
+    schema: "edgedepth.history.v1",
+    kind,
+    count: rows.length,
+    ...(note ? { note } : {}),
+    data: rows,
+  });
+  return new Response(body, {
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "access-control-allow-origin": "*",
+    },
+  });
+}
+
 Bun.serve({
   port: PORT,
-  async fetch(req) {
+  async fetch(req, server) {
     const url = new URL(req.url);
     try {
       if (req.method === "OPTIONS") {
@@ -1472,6 +1610,18 @@ Bun.serve({
       }
       if (url.pathname === "/manifest.json") return manifestJson(url);
       if (url.pathname === "/events") return eventsResponse(url);
+      if (url.pathname === "/analytics") return analyticsResponse(url);
+      if (url.pathname === "/analytics/ws") {
+        const upgraded = server.upgrade(req, { data: { symbols: null as string[] | null } });
+        if (upgraded) return undefined; // handled by the websocket handler
+        return new Response("websocket upgrade failed", { status: 400 });
+      }
+      if (url.pathname === "/history")
+        return historyJson("info", [history.stats()], "Query /history/trades|liquidations|candles|book?symbol=&from=&to=&limit= (ms epochs).");
+      if (url.pathname === "/history/trades") return historyJson("trades", history.trades(historyParams(url)));
+      if (url.pathname === "/history/liquidations") return historyJson("liquidations", history.liquidations(historyParams(url)));
+      if (url.pathname === "/history/candles") return historyJson("candles_1m", history.candles(historyParams(url)));
+      if (url.pathname === "/history/book") return historyJson("book_polls", history.bookPolls(historyParams(url)));
       if (url.pathname === "/report") return reportResponse(url);
       if (url.pathname === "/reports") return reportsListResponse();
       if (url.pathname === "/snapshot" && req.method === "POST") return snapshotResponse(req, url);
@@ -1519,6 +1669,19 @@ Bun.serve({
             },
             daily_reports: { dir: REPORTS_DIR, endpoint: "/report?date=YYYY-MM-DD", list: "/reports" },
             snapshots: { dir: SNAPSHOTS_DIR, endpoint: "POST /snapshot" },
+            analytics: {
+              endpoint: "/analytics",
+              ws: "/analytics/ws",
+              depth_bps: ANALYTICS_DEPTH_BPS,
+              buckets: ANALYTICS_BUCKETS,
+              push_ms: ANALYTICS_PUSH_MS,
+            },
+            history: {
+              db: HISTORY_DB,
+              keep_days: HISTORY_DAYS,
+              endpoints: ["/history/trades", "/history/liquidations", "/history/candles", "/history/book"],
+              stats: history.stats(),
+            },
             bad_frames: badFrames,
           },
           null,
@@ -1533,6 +1696,29 @@ Bun.serve({
       log(`http error: ${e}`);
       return new Response("internal error", { status: 500 });
     }
+  },
+  websocket: {
+    open(ws) {
+      analyticsClients.add(ws as never);
+    },
+    // Control plane: {"method":"subscribe","data":{"symbols":["btcusdt"]}}
+    // (null / empty = every configured symbol).
+    message(ws, message) {
+      try {
+        const m = JSON.parse(String(message));
+        if (m?.method === "subscribe") {
+          const raw = Array.isArray(m.data?.symbols) ? m.data.symbols : null;
+          (ws.data as { symbols: string[] | null }).symbols = raw
+            ? raw.map((s: unknown) => String(s).toLowerCase()).filter((s: string) => !!s)
+            : null;
+        }
+      } catch {
+        // ignore malformed control frames
+      }
+    },
+    close(ws) {
+      analyticsClients.delete(ws as never);
+    },
   },
 });
 
