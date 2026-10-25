@@ -3,7 +3,14 @@
 قالب: [Keep a Changelog](https://keepachangelog.com) · نسخه‌بندی: [SemVer](https://semver.org)
 هر فازِ `docs/UPGRADE-ROADMAP.md` یک ریزنسخهٔ minor است. تاریخ‌ها از merge های گیت‌هاب.
 
-## [Unreleased] — فاز ۸ «پایداری و توزیع» (در جریان)
+## [Unreleased] — فاز ۸ «پایداری و توزیع» + تکمیل فاز ۶
+### Added — تکمیل فاز ۶ «داده و یکپارچه‌سازی»
+- **سرور تحلیلی REST/WS** در رکوردر (`tools/recorder/analytics.ts`): کتاب سفارش زندهٔ نرمال‌شده با نتیک snapshot+delta مثل OrderbookManager (best bid/ask، mid، اسپرد bps، عدم‌توازن، ناتینگال ±۲۵bps قابل‌تنظیم، هیستوگرام عمق) + جریان معاملات (CVD سشن/۵m، نرخ و ناتینگال ۶۰s، ‏VWAP ۵m، نسبت خرید) + جمع لیکوییدیشن ۵m/۶۰m تفکیک سمت + آخرین کندل ۱م؛ ‏REST ‏`GET /analytics` و پوش WS `/analytics/ws` هر ۱s با سابسکرایب JSON — ‏schema `edgedepth.analytics.v1`؛ consumer: ترمینال اصلی شما؛ venue-agnostic (binancef و okx آزمون شد)
+- **ذخیرهٔ تاریخی SQLite از جریان نرمال‌شده** (`tools/recorder/history.ts`، ‏`bun:sqlite` ‏WAL — بدون وابستگی جدید): جدول‌های trades/liquidations/candles_1m/book_polls؛ درج دسته‌ای خارج از مسیر داغ WS (۲s/۵۰۰ ردیف)، نگه‌داری پیش‌فرض ۳ روز (`RECORDER_HISTORY_DAYS`) + prune ساعتی و checkpoint؛ ‏REST ‏`/history/{trades,liquidations,candles,book}` — schema `edgedepth.history.v1`
+- رکوردر به mini-service خودگردان روی :9002 ارتقا یافت (کنار گیت‌وی :9001) — `RECORDER_SYMBOLS` چند-نمادی
+### Fixed — بستن باگ شناخته‌شدهٔ فاز ۶
+- «Recovering depth» متناوب روی OKX: ‏`check_delta` پل نمایش/تاریخچه قبل از verdict گیت continuity صدا زده می‌شد و هر duplicate/out-of-order که گیت عمداً silent-drop می‌کند پل را «Depth sequence gap» می‌زد؛ حالا صدا زدن بعد از verdict است — drop شده‌ها پل را نمی‌شکنند، گپ واقعی مثل قبل invalidate می‌کند (`src/core/orderbook_manager.cpp`)؛ تماشای ۳ دقیقه‌ای OKX بدون فلاپ + صفر resubscribe گیت‌وی
+- roadmap: تیک نهایی هر ۸ فاز + مستندسازی بسته‌شدن این دو باگ
 ### Added
 - فعال‌سازی GitHub Actions روی fork (build.yml و release.yml از upstream، اجرا روی هر push به master)
 - `workflow_dispatch` برای اجرای دستی CI
