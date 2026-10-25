@@ -12,18 +12,20 @@ namespace i18n {
 void load() {
 #ifdef __EMSCRIPTEN__
     static char buf[64] = {};
+    // NOTE: no object literals inside EM_ASM - the preprocessor splits macro
+    // arguments on every top-level comma (braces do not protect), so the
+    // packed int avoids a {lang, digits} literal entirely.
     EM_ASM({
         try {
             const raw = localStorage.getItem('edgedepth.i18n.v1');
             if (!raw) return;
             const j = JSON.parse(raw);
-            const lang = j.lang | 0, dig = j.digits ? 1 : 0;
-            stringToUTF8(JSON.stringify({lang: lang, digits: dig}), $0, 64);
+            stringToUTF8(JSON.stringify((j.lang | 0) + (j.digits ? 100 : 0)), $0, 64);
         } catch (e) {}
     }, buf);
-    const std::string raw(buf);
-    if (raw.find("\"lang\":1") != std::string::npos) g_lang = Lang::Fa;
-    if (raw.find("\"digits\":true") != std::string::npos) g_fa_digits = true;
+    const int packed = std::atoi(buf);  // lang + 100*digits flag
+    if (packed >= 100) { g_fa_digits = true; }
+    if (packed % 100 == 1) { g_lang = Lang::Fa; }
 #endif
 }
 
