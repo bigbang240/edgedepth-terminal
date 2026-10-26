@@ -1841,6 +1841,7 @@ void ChartWidget::render_chart() {
         }
         if (rt_mode_ && rt_renderer_ && rt_depth_enabled_) {
             configure_depth_fidelity(*rt_renderer_);
+            rt_renderer_->set_opacity(rt_depth_opacity_);   // self-host: Layers > Order book depth > Opacity
             rt_renderer_->set_realtime_gap_bridge(rt_bridge_gaps_ && !ctx_.replay_mgr().is_active());
             rt_renderer_->render_cells(rt_renderer_->get_column_interval_ms(), heatmap_sensitivity_, false, rt_extend_depth_ && (!rt_history_view_ || realtime_live_edge()),
                 realtime_projection_until(rt_clock_ms_, rt_span_ms_));
@@ -3522,6 +3523,28 @@ void ChartWidget::render_controls() {
     };
     overlay_button(i18n::tr("Liquidations", i18n::fa_liquidations), "liquidations_popup", "chart.liquidations", liquidations_on, liq_anchor, liquidation_menu_detail_);
     overlay_button(i18n::tr("Layers", i18n::fa_layers), "layers_popup", "chart.layers", chart_layers_on, ly_anchor, layers_menu_detail_);
+
+    // [SELF-HOST] Alt+1..0 toggles the real-time layers in the order the Layers
+    // menu lists them (1 depth, 2 bubbles, 3 trade line, 4 1s candles, 5 HA,
+    // 6 CVD, 7 est. liquidations, 8 resting heat, 9 refill, 0 walls). Skipped
+    // while typing or while a popup owns the input, so menus stay predictable.
+    if (rt_mode_ && ImGui::GetIO().KeyAlt && !ImGui::GetIO().WantTextInput &&
+        !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId)) {
+        const auto hit = [&](ImGuiKey key) { return ImGui::IsKeyPressed(key, false); };
+        if (hit(ImGuiKey_1)) rt_depth_enabled_ = !rt_depth_enabled_;
+        else if (hit(ImGuiKey_2)) rt_bubbles_ = !rt_bubbles_;
+        else if (hit(ImGuiKey_3)) rt_trade_line_ = !rt_trade_line_;
+        else if (hit(ImGuiKey_4)) {
+            rt_candles_ = !rt_candles_;
+            chart_type_ = rt_candles_ ? ChartType::Candles : ChartType::Line;
+        }
+        else if (hit(ImGuiKey_5) && rt_candles_) rt_heikin_ = !rt_heikin_;
+        else if (hit(ImGuiKey_6)) rt_cvd_enabled_ = !rt_cvd_enabled_;
+        else if (hit(ImGuiKey_7)) rt_liq_levels_enabled_ = !rt_liq_levels_enabled_;
+        else if (hit(ImGuiKey_8)) rt_cum_depth_enabled_ = !rt_cum_depth_enabled_;
+        else if (hit(ImGuiKey_9)) rt_refill_enabled_ = !rt_refill_enabled_;
+        else if (hit(ImGuiKey_0)) rt_walls_enabled_ = !rt_walls_enabled_;
+    }
 
     // "+ widget" button (beside the layers control). This is the ONLY widget-
     // creation entry now (the old topbar "+" was removed): living in the chart

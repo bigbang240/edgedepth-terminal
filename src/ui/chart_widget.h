@@ -26,6 +26,9 @@
 #include "core/rt_cvd.h"
 #include "core/cascade_detector.h"
 #include "core/liq_levels.h"
+#include "core/whale_trail.h"
+#include <deque>
+#include <utility>
 #include "ui/realtime_dom_frame.h"
 #include "ui/realtime_dom_ladder.h"
 #include "ui/realtime_navigation.h"
@@ -478,6 +481,26 @@ private:
     bool rt_candles_hollow_ = false;  // outline bodies so the heat shows through
     bool rt_heikin_ = false;          // Phase 3: Heikin-Ashi transform of the RT buckets
     int  rt_layer_preset_ = -1;       // Phase 3: last applied layer preset (-1 none)
+    // ─── Self-host layer management ────────────────────────────────
+    // Per-layer display strength + user-saved layer sets ("MY LAYER SETS" in
+    // the Layers menu). All persisted through the chart's workspace settings.
+    float rt_depth_opacity_ = 1.0f;   // depth-cell renderer alpha (Layers > Order book depth)
+    float rt_bubble_alpha_ = 1.0f;    // trade-bubble alpha multiplier (RT + candle views)
+    float rt_cum_opacity_ = 1.0f;     // resting-depth heat alpha
+    workspace::Json layer_sets_;      // name -> captured RT layer flags
+    char layer_set_name_buf_[32] = ""; // scratch for the save-as-set input
+    bool layer_set_input_open_ = false;
+    [[nodiscard]] workspace::Json capture_layer_flags() const;
+    void apply_layer_flags(const workspace::Json& flags);
+    // ─── Cross-venue + whale trail (self-host) ─────────────────────
+    bool rt_whale_trail_enabled_ = false;   // link consecutive large prints into trails
+    int  rt_whale_window_ms_ = 8000;        // max gap between linked clips (5s/8s/15s)
+    bool rt_basis_enabled_ = false;         // OKX-vs-chart-venue basis ribbon
+    std::deque<std::pair<int64_t, double>> rt_basis_history_;  // (ts_ms, basis bps)
+    int64_t rt_basis_last_sample_ms_ = 0;
+    std::string rt_basis_inst_;             // cached okx instId for the charted pair
+    void render_realtime_whale_trail(ImDrawList* dl, const ImPlotRect& limits);
+    void render_realtime_basis(ImDrawList* dl, const ImPlotRect& limits);
     bool cascade_alerts_enabled_ = true;  // toast + notification on liquidation cascades
     CascadeDetector cascade_detector_;    // Phase 2 S1: same-side liquidation chains
     AlertEngine alert_engine_;            // Phase 2 S2: threshold alert queues

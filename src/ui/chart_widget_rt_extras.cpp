@@ -8,6 +8,7 @@
 #include "core/entitlements.h"
 #include "core/symbol_metadata.h"
 #include "core/ui_test_marks.h"
+#include "core/ticker_manager.h"
 #include "rendering/realtime_bubble.h"
 #include "rendering/theme.h"
 #include "replayer/replay_manager.h"
@@ -17,6 +18,8 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
+#include <vector>
 
 namespace {
 // The CVD lane's height, axis included.
@@ -75,7 +78,7 @@ void ChartWidget::reset_realtime_extras() {
 // Layers rows: Walls (with Pulled walls under it) in ORDER BOOK SIGNALS, CVD in REAL-TIME VIEW. Free wherever
 // real-time itself is available.
 void ChartWidget::render_realtime_wall_layer() {
-    if (Theme::menu_layer("Walls", rt_walls_enabled_)) rt_walls_enabled_ = !rt_walls_enabled_;
+    if (Theme::menu_layer("Walls", rt_walls_enabled_, false, "Alt+0")) rt_walls_enabled_ = !rt_walls_enabled_;
     if (ImGui::IsItemHovered())
         Theme::tooltip("The largest resting orders away from the touch: at least 5x the usual level\nand larger than what the touch holds, standing 3 s or more. Marked at the right edge.");
     if (!rt_walls_enabled_) return;
@@ -90,7 +93,7 @@ void ChartWidget::render_realtime_wall_layer() {
 }
 
 void ChartWidget::render_realtime_cvd_layer() {
-    if (Theme::menu_layer("CVD", rt_cvd_enabled_)) rt_cvd_enabled_ = !rt_cvd_enabled_;
+    if (Theme::menu_layer("CVD", rt_cvd_enabled_, false, "Alt+6")) rt_cvd_enabled_ = !rt_cvd_enabled_;
     if (ImGui::IsItemHovered())
         Theme::tooltip("Buy minus sell volume over the visible time, from zero at the left edge.");
 }
@@ -793,7 +796,7 @@ void ChartWidget::render_realtime_cum_depth(ImDrawList* dl, const ImPlotRect& li
         if (intensity < 0.03f) continue;
         const float y = ImPlot::PlotToPixels(0, price + tick_size_ * 0.5).y;
         dl->AddRectFilled(ImVec2(pos.x, y), ImVec2(pos.x + size.x, y + row_h),
-            ImGui::GetColorU32(ImVec4(0.94f, 0.70f, 0.31f, 0.05f + 0.30f * intensity)));
+            ImGui::GetColorU32(ImVec4(0.94f, 0.70f, 0.31f, (0.05f + 0.30f * intensity) * rt_cum_opacity_)));
         ++drawn;
     }
     if (!(hover_price > 0)) return;
@@ -882,5 +885,140 @@ void ChartWidget::render_realtime_walls_table(ImDrawList* dl) {
         dl->AddText(ImVec2(a.x + 240.0f, y), wall.touches > 0 ? Theme::u32(Theme::Tokens::WARN) : head, tch);
         y += row_h;
     }
+    ImGui::PopFont();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// [SELF-HOST] Whale trail: consecutive large same-side prints linked into a
+// visible path over the heat. Built straight from the archived bubble records
+// (the same 100ms groups the trade bubbles draw), so there is no extra data
+// path - the linking pass runs per frame over the visible window only.
+// ═══════════════════════════════════════════════════════════════════════════════
+void ChartWidget::render_realtime_whale_trail(ImDrawList* dl, const ImPlotRect& limits) {
+    if (!rt_whale_trail_enabled_ || !rt_archive_ || !(tick_size_ > 0) || !rt_mode_) return;
+    const double minimum = rt_auto_bubbles_
+        ? (rt_bubble_scale_.settled() ? rt_bubble_scale_.minimum() : 0) : rt_min_notional_;
+    if (!(minimum > 0)) return;
+    std::vector<whale_trail::Node> prints;
+    rt_archive_->bubbles().for_each(int64_t(limits.X.Min), int64_t(limits.X.Max), rt_clock_ms_,
+        [&](const RealtimeBubbleHistory::Bubble& m) {
+            if (m.value() >= minimum)
+                prints.push_back({int64_t(m.timestamp_ms), m.price, m.buy_led(), m.value()});
+        });
+    if (prints.size() < 2) return;
+    std::vector<whale_trail::Chain> chains;
+    // 40 ticks of price proximity: wide enough to follow a working order up the
+    // book, tight enough never to bridge two distinct participants' levels.
+    whale_trail::build(prints, rt_whale_window_ms_, 40.0, tick_size_, chains);
+    if (chains.empty()) return;
+    for (const auto& chain : chains) {
+        const ImVec4& token = chain.buy ? Theme::Tokens::UP : Theme::Tokens::DOWN;
+        const ImVec4 line_col(token.x, token.y, token.z, 0.55f);
+        const ImVec4 halo_col(token.x, token.y, token.z, 0.80f);
+        std::vector<ImVec2> pts;
+        pts.reserve(chain.nodes.size());
+        const whale_trail::Node* peak = &chain.nodes.front();
+        for (const auto& n : chain.nodes) {
+            pts.push_back(ImPlot::PlotToPixels(double(n.ts_ms), n.price));
+            if (n.value > peak->value) peak = &n;
+        }
+        dl->AddPolyline(pts.data(), int(pts.size()), ImGui::GetColorU32(line_col),
+                        ImDrawFlags_None, 1.8f);
+        // Small anchor dots make single-tap steps readable at dense zooms.
+        for (const auto& pt : pts)
+            dl->AddCircleFilled(pt, 2.2f, ImGui::GetColorU32(ImVec4(token.x, token.y, token.z, 0.65f)));
+        // Halo on the chain's largest clip - the print that made it a whale.
+        const float base_r = RealtimeBubble::radius(peak->value, minimum, rt_bubble_cap_);
+        const ImVec2 pc = ImPlot::PlotToPixels(double(peak->ts_ms), peak->price);
+        dl->AddCircle(pc, base_r + 3.5f, ImGui::GetColorU32(halo_col), 0, 1.5f);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// [SELF-HOST] Cross-venue basis: OKX perp last price vs this chart's venue mid,
+// in bps, as a ribbon along the bottom of the real-time plot. Samples once per
+// second from the shared ticker store (the watchlist feed already carries every
+// venue), so no extra subscription is opened.
+// ═══════════════════════════════════════════════════════════════════════════════
+static std::string okx_inst_for(const std::string& symbol) {
+    // binancef "BTCUSDT" -> okx "btc-usdt-swap" (TickerManager keys are lowercase).
+    std::string s;
+    s.reserve(symbol.size() + 10);
+    for (const char c : symbol) s.push_back(char(std::tolower(static_cast<unsigned char>(c))));
+    if (s.find('-') != std::string::npos) return s;              // already an instId
+    for (const char* quote : {"usdt", "usdc"}) {
+        const size_t qlen = std::strlen(quote);
+        if (s.size() > qlen && s.compare(s.size() - qlen, qlen, quote) == 0)
+            return s.substr(0, s.size() - qlen) + "-" + quote + "-swap";
+    }
+    return {};
+}
+
+void ChartWidget::render_realtime_basis(ImDrawList* dl, const ImPlotRect& limits) {
+    if (!rt_basis_enabled_ || !rt_mode_) return;
+    if (rt_basis_inst_.empty()) {
+        if (pair_.exchange != "binancef") return;   // basis is defined against the chart venue
+        rt_basis_inst_ = okx_inst_for(pair_.symbol);
+    }
+    if (rt_basis_inst_.empty()) return;
+    const TickerEntry* okx = ctx_.ticker_mgr().get("okx", rt_basis_inst_);
+    const bool okx_fresh = okx && okx->last_price > 0 &&
+        rt_clock_ms_ - okx->event_time_ms < 15000;
+    if (okx_fresh && rt_book_valid_ && rt_latest_) {
+        const double mid = 0.5 * (rt_latest_->bid + rt_latest_->ask);
+        if (mid > 0 && rt_clock_ms_ - rt_basis_last_sample_ms_ >= 1000) {
+            rt_basis_history_.emplace_back(rt_clock_ms_,
+                (okx->last_price - mid) / mid * 10000.0);
+            while (rt_basis_history_.size() > 600) rt_basis_history_.pop_front();
+            rt_basis_last_sample_ms_ = rt_clock_ms_;
+        }
+    }
+    if (rt_basis_history_.size() < 2) return;
+    const ImVec2 pos = ImPlot::GetPlotPos(), size = ImPlot::GetPlotSize();
+    if (size.x <= 0 || size.y <= 0) return;
+    // Trim to the visible time window so panning back shows the past ribbon;
+    // the 120s tail past the live edge simply sits at the right side.
+    while (!rt_basis_history_.empty() &&
+           rt_basis_history_.front().first < int64_t(limits.X.Min) - 1000)
+        rt_basis_history_.pop_front();
+    const float band_h = std::max(26.0f, size.y * 0.14f);
+    const float band_top = pos.y + size.y - band_h - 6.0f;
+    double max_abs = 2.0;
+    for (const auto& s : rt_basis_history_)
+        if (s.first >= int64_t(limits.X.Min))
+            max_abs = std::max(max_abs, std::fabs(s.second));
+    const auto y_for = [&](double bps) {
+        return band_top + band_h * 0.5f - float(bps / max_abs) * (band_h * 0.5f - 2.0f);
+    };
+    const auto x_for = [&](int64_t ts) {
+        const double frac = (double(ts) - limits.X.Min) / limits.X.Size();
+        return pos.x + float(std::clamp(frac, 0.0, 1.0)) * size.x;
+    };
+    // Zero baseline.
+    dl->AddLine(ImVec2(pos.x, y_for(0)), ImVec2(pos.x + size.x, y_for(0)),
+                Theme::u32(Theme::Tokens::TX3), 1.0f);
+    // Path + soft area fill, coloured by the newest sample's sign.
+    std::vector<ImVec2> pts;
+    for (const auto& s : rt_basis_history_)
+        if (s.first >= int64_t(limits.X.Min))
+            pts.push_back(ImVec2(x_for(s.first), y_for(s.second)));
+    if (pts.size() < 2) return;
+    const double latest_bps = rt_basis_history_.back().second;
+    const ImVec4& token = latest_bps >= 0 ? Theme::Tokens::UP : Theme::Tokens::DOWN;
+    const ImVec4 area_col(token.x, token.y, token.z, 0.16f);
+    const ImVec4 line_col(token.x, token.y, token.z, 0.85f);
+    dl->AddConvexPolyFilled(pts.data(), int(pts.size()), ImGui::GetColorU32(area_col));
+    dl->AddPolyline(pts.data(), int(pts.size()), ImGui::GetColorU32(line_col),
+                    ImDrawFlags_None, 1.4f);
+    // Readout chip at the band's right edge.
+    ImGui::PushFont(Theme::Fonts::mono_sm());
+    char label[40];
+    if (okx_fresh) snprintf(label, sizeof(label), "OKX %+.1f bps", latest_bps);
+    else snprintf(label, sizeof(label), "OKX no feed");
+    const ImVec2 ts = ImGui::CalcTextSize(label);
+    const ImVec2 a(pos.x + size.x - ts.x - 12.0f, band_top + 2.0f);
+    dl->AddRectFilled(ImVec2(a.x - 6.0f, a.y - 2.0f), ImVec2(a.x + ts.x + 6.0f, a.y + ts.y + 2.0f),
+                      Theme::u32(Theme::Tokens::BASE), 4.0f);
+    dl->AddText(ImVec2(a.x, a.y), ImGui::GetColorU32(line_col), label);
     ImGui::PopFont();
 }

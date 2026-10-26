@@ -11,6 +11,7 @@
 #include "core/orderbook_manager.h"
 #include "core/entitlements.h"
 #include "core/realtime_preview.h"
+#include "core/realtime_archive.h"
 #include "core/usage_emit.h"
 #include "replayer/replay_manager.h"
 #include <nlohmann/json.hpp>
@@ -205,6 +206,54 @@ void ChartWidget::apply_layer_preset(int preset) {
     set_rt_candle_seconds(preset == 0 ? 1 : preset == 1 ? 60 : 5);
 }
 
+// ─── User layer sets ("MY LAYER SETS" in the Layers menu) ───────────────────
+// A set snapshots every real-time layer switch plus the candle bucket size, so
+// a trader can flip between e.g. a scalping view and a liquidation view in one
+// click without touching the fixed Scalp/Swing/Research presets. Captures are
+// read-back tolerant: absent keys keep the current value.
+workspace::Json ChartWidget::capture_layer_flags() const {
+    return workspace::Json{{"depth", rt_depth_enabled_},      {"bubbles", rt_bubbles_},
+        {"trade_line", rt_trade_line_},      {"candles", rt_candles_},
+        {"hollow", rt_candles_hollow_},      {"heikin", rt_heikin_},
+        {"cvd", rt_cvd_enabled_},            {"est_liq", rt_liq_levels_enabled_},
+        {"resting", rt_cum_depth_enabled_},  {"walls", rt_walls_enabled_},
+        {"pulls", rt_pulls_enabled_},        {"walls_table", rt_walls_table_enabled_},
+        {"peak_hold", rt_peak_hold_},        {"refill", rt_refill_enabled_},
+        {"liq_strip", rt_liq_strip_},        {"liq_markers", rt_liq_markers_},
+        {"alerts_cascade", cascade_alerts_enabled_}, {"alerts_liq", liq_alerts_enabled_},
+        {"alerts_wall", wall_alerts_enabled_},       {"tf", rt_candle_seconds_}};
+}
+
+void ChartWidget::apply_layer_flags(const workspace::Json& f) {
+    const auto flag = [&](const char* key, bool& value) {
+        const auto it = f.find(key);
+        if (it != f.end() && it->is_boolean()) value = it->get<bool>();
+    };
+    flag("depth", rt_depth_enabled_);
+    flag("bubbles", rt_bubbles_);
+    flag("trade_line", rt_trade_line_);
+    flag("candles", rt_candles_);
+    flag("hollow", rt_candles_hollow_);
+    flag("heikin", rt_heikin_);
+    flag("cvd", rt_cvd_enabled_);
+    flag("est_liq", rt_liq_levels_enabled_);
+    flag("resting", rt_cum_depth_enabled_);
+    flag("walls", rt_walls_enabled_);
+    flag("pulls", rt_pulls_enabled_);
+    flag("walls_table", rt_walls_table_enabled_);
+    flag("peak_hold", rt_peak_hold_);
+    flag("refill", rt_refill_enabled_);
+    flag("liq_strip", rt_liq_strip_);
+    flag("liq_markers", rt_liq_markers_);
+    flag("alerts_cascade", cascade_alerts_enabled_);
+    flag("alerts_liq", liq_alerts_enabled_);
+    flag("alerts_wall", wall_alerts_enabled_);
+    if (rt_mode_) chart_type_ = rt_candles_ ? ChartType::Candles : ChartType::Line;
+    const auto tf = f.find("tf");
+    if (tf != f.end() && tf->is_number_integer())
+        set_rt_candle_seconds(std::clamp(tf->get<int>(), 1, 300));
+}
+
 void ChartWidget::render_realtime_settings() {
     using drawing::UiIcon;
     if (!ctx_.replay_mgr().is_active() && Theme::menu_toggle("Pause display", rt_paused_)) {
@@ -276,6 +325,21 @@ void ChartWidget::render_realtime_settings() {
         }
         if (Theme::menu_toggle("Hollow candles", rt_candles_hollow_)) rt_candles_hollow_ = !rt_candles_hollow_;
         if (ImGui::IsItemHovered()) Theme::tooltip("Outline candle bodies so the depth heatmap stays visible behind them.");
+        {
+            // [SELF-HOST] How much live history the browser keeps for scrolling
+            // back / review. The zoom ceilings and the IndexedDB worker budget
+            // follow RealtimeArchive::target_ms; raising it records from now on.
+            static const char* const kArchiveLabels[] = {"30 min", "2 h", "6 h", "12 h"};
+            static constexpr int64_t kArchiveMs[] = {1800000, 2LL * 3600000, 6LL * 3600000, 12LL * 3600000};
+            int idx = 0;
+            for (int i = 1; i < 4; ++i) if (RealtimeArchive::target_ms >= kArchiveMs[i]) idx = i;
+            const int next = Theme::menu_choice_row("Archive depth", "rt_archive_depth", kArchiveLabels, 4, idx);
+            if (next != idx) RealtimeArchive::set_target_ms(kArchiveMs[next]);
+            if (ImGui::IsItemHovered())
+                Theme::tooltip("How much real-time history this browser records: 30 minutes up to 12 hours.\n"
+                               "Higher values widen how far you can scroll back (and use more browser storage).\n"
+                               "Recording starts from the moment it is raised; the choice persists.");
+        }
     }
     ImGui::TextDisabled("Alerts");
     if (Theme::menu_toggle("Cascade alerts", cascade_alerts_enabled_)) cascade_alerts_enabled_ = !cascade_alerts_enabled_;
@@ -827,7 +891,7 @@ void ChartWidget::render_realtime() {
                 const ImVec2 center = ImPlot::PlotToPixels(double(m.timestamp_ms), m.price);
                 const float radius = RealtimeBubble::radius(m.value(), minimum, rt_bubble_cap_);
                 RealtimeBubble::draw(*dl, center, radius, major, Theme::u32(Theme::Tokens::BASE),
-                    RealtimeBubble::Fill::Opaque, float(m.minor()), minor);
+                    RealtimeBubble::Fill::Opaque, float(m.minor()), minor, rt_bubble_alpha_);
                 if (ui_test::enabled() && test_marks < 256)
                     ui_test::mark_rect("rt.bubble." + std::to_string(test_marks++),
                         ImVec2(center.x - radius, center.y - radius), ImVec2(center.x + radius, center.y + radius));
@@ -840,6 +904,10 @@ void ChartWidget::render_realtime() {
     render_realtime_liq_levels(dl, limits);
     render_realtime_walls(dl);
     render_refill_levels(dl, limits);
+    // [SELF-HOST] flow extras: linked large-print trails, then the cross-venue
+    // basis ribbon on top (it owns the plot's bottom band).
+    render_realtime_whale_trail(dl, limits);
+    render_realtime_basis(dl, limits);
     if (fresh && limits.X.Max > rt_clock_ms_) {
         const auto& book = *rt_latest_;
         // The dashed quotes stop where the current-depth projection stops.
@@ -1269,7 +1337,7 @@ void ChartWidget::render_candle_bubbles() {
         const ImVec4& major = m->buy_led() ? Theme::Tokens::UP : Theme::Tokens::DOWN;
         const ImVec4& minor = m->buy_led() ? Theme::Tokens::DOWN : Theme::Tokens::UP;
         RealtimeBubble::draw(*dl, c, r, major, Theme::u32(Theme::Tokens::BASE),
-                             RealtimeBubble::Fill::Translucent, float(m->minor()), minor);
+                             RealtimeBubble::Fill::Translucent, float(m->minor()), minor, rt_bubble_alpha_);
         const float dx = mouse.x - c.x, dy = mouse.y - c.y;
         // Last hit is the visible topmost disc, including its circular edge.
         if (dx * dx + dy * dy <= r * r) hovered = m;

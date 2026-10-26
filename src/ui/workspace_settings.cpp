@@ -1,6 +1,7 @@
 #include "ui/chart_widget.h"
 #include "core/position_sizing.h"
 #include "core/execution_bridge.h"
+#include "core/realtime_archive.h"
 #include <cstdio>
 #include "ui/dom_widget.h"
 #include "ui/trades_widget.h"
@@ -132,6 +133,14 @@ Json ChartWidget::save_settings() const {
     j["rt_hollow_candles"] = rt_candles_hollow_;
     j["rt_heikin"] = rt_heikin_;
     j["rt_layer_preset"] = rt_layer_preset_;
+    j["rt_depth_opacity"] = rt_depth_opacity_;     // self-host: per-layer display strength
+    j["rt_bubble_alpha"] = rt_bubble_alpha_;
+    j["rt_cum_opacity"] = rt_cum_opacity_;
+    j["layer_sets"] = layer_sets_;                  // user-saved RT layer sets (name -> flags)
+    j["rt_archive_ms"] = RealtimeArchive::target_ms; // global retention, same value from every chart
+    j["rt_whale_trail"] = rt_whale_trail_enabled_;  // self-host: linked large-print trails
+    j["rt_whale_window_ms"] = rt_whale_window_ms_;
+    j["rt_basis_okx"] = rt_basis_enabled_;          // self-host: OKX basis ribbon
     j["drawing_alerts"] = drawing_alerts_enabled_;
     j["cascade_alerts"] = cascade_alerts_enabled_;
     // Phase 5: execution & risk (globals persisted via every chart row)
@@ -313,6 +322,17 @@ void ChartWidget::load_settings(const Json& j) {
     workspace::read(j, "rt_hollow_candles", rt_candles_hollow_);
     workspace::read(j, "rt_heikin", rt_heikin_);             // absent in older saves: keeps the default (off)
     workspace::read(j, "rt_layer_preset", rt_layer_preset_, -1, 2);
+    workspace::read(j, "rt_depth_opacity", rt_depth_opacity_, 0.05, 1.0);  // absent in older saves: keeps 1.0
+    workspace::read(j, "rt_bubble_alpha", rt_bubble_alpha_, 0.05, 1.0);
+    workspace::read(j, "rt_cum_opacity", rt_cum_opacity_, 0.05, 1.0);
+    { auto it = j.find("layer_sets");
+      if (it != j.end() && it->is_object() && it->size() <= 12) layer_sets_ = *it; }
+    { int64_t saved_archive = 0;
+      workspace::read(j, "rt_archive_ms", saved_archive, 0, 12LL * 3600 * 1000);
+      if (saved_archive > 0) RealtimeArchive::set_target_ms(saved_archive); }
+    workspace::read(j, "rt_whale_trail", rt_whale_trail_enabled_);   // absent in older saves: keeps off
+    workspace::read(j, "rt_whale_window_ms", rt_whale_window_ms_, 3000, 30000);
+    workspace::read(j, "rt_basis_okx", rt_basis_enabled_);
     workspace::read(j, "drawing_alerts", drawing_alerts_enabled_); // absent in older saves: keeps the default (on)
     workspace::read(j, "cascade_alerts", cascade_alerts_enabled_);
     // Phase 5: execution & risk (globals; every chart row carries the same values)

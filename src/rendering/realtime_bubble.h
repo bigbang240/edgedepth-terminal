@@ -27,13 +27,14 @@ enum class Fill { Translucent, Opaque };
 // separate triangles, so a translucent fill is one colour in every pixel and a
 // 1px gradient at the seam antialiases it.
 inline void draw(ImDrawList& dl, ImVec2 center, float r, ImVec4 signed_color, ImU32 border, Fill fill_style,
-                 float minor = 0.0f, ImVec4 minor_color = ImVec4()) {
+                 float minor = 0.0f, ImVec4 minor_color = ImVec4(), float alpha_mul = 1.0f) {
     if (!(r > 0) || !std::isfinite(r) || !std::isfinite(center.x) || !std::isfinite(center.y)) return;
+    alpha_mul = std::clamp(alpha_mul, 0.0f, 1.0f);
     const ImVec4 clip = dl._CmdHeader.ClipRect;
     const float extent = r + 1;
     if (center.x + extent < clip.x || center.x - extent > clip.z ||
         center.y + extent < clip.y || center.y - extent > clip.w) return;
-    signed_color.w = 1.0f;
+    signed_color.w = alpha_mul;
     // Bubbles past 20 px (the larger size caps) get 32 segments so their edge stays round.
     const int shape = r < 6 ? 0 : r < 10 ? 1 : r < 20 ? 2 : 3;
     const int segments = shape == 0 ? 12 : shape == 1 ? 16 : shape == 2 ? 24 : 32;
@@ -54,7 +55,7 @@ inline void draw(ImDrawList& dl, ImVec2 center, float r, ImVec4 signed_color, Im
     const bool opaque = fill_style == Fill::Opaque;
     const ImU32 edge = opaque ? border : ImGui::GetColorU32(signed_color);
     // Translucent: small marks stay visible; large ones stay see-through.
-    const float fill_alpha = opaque ? 1.0f : r < 5.0f ? 0.38f : 0.18f;
+    const float fill_alpha = (opaque ? 1.0f : r < 5.0f ? 0.38f : 0.18f) * alpha_mul;
     ImVec4 fill_color = signed_color;
     fill_color.w = fill_alpha;
     const ImU32 fill = ImGui::GetColorU32(fill_color);

@@ -5,6 +5,7 @@
 #include "core/liq_field_tiers.h"
 #include "core/entitlements.h"
 #include "core/education_boot.h"
+#include "core/ticker_manager.h"
 #include "core/ui_test_marks.h"
 #include "core/liqmap2_scorecard.h"
 #include "rendering/observed_liquidations.h"
@@ -41,7 +42,9 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
             (std::string_view(label) == i18n::tr("Liquidation map", i18n::fa_l_liq_map) || std::string_view(label) == i18n::tr("Hyperliquid positions", i18n::fa_l_hl_positions) ||
              std::string_view(label) == i18n::tr("Reported liquidations", i18n::fa_l_reported) || std::string_view(label) == i18n::tr("Trade bubbles (large prints)", i18n::fa_l_bubbles_large) ||
              std::string_view(label) == i18n::tr("Trade bubbles", i18n::fa_l_bubbles) || std::string_view(label) == i18n::tr("Order book depth", i18n::fa_l_depth) || std::string_view(label) == "Volume profile (VPVR)" ||
-             std::string_view(label) == i18n::tr("Absorption bands", i18n::fa_l_absorption));
+             std::string_view(label) == i18n::tr("Absorption bands", i18n::fa_l_absorption) ||
+             std::string_view(label) == i18n::tr("Resting depth heat", i18n::fa_l_resting) ||
+             std::string_view(label) == "Whale trail");
         bool open = false;
         const bool clicked = Theme::menu_layer(label, on, locked, tag, has_settings ? &open : nullptr);
         if (open) detail = label;
@@ -324,7 +327,7 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
             // the Real-time menu owns navigation and panel visibility.
             layer_section("REAL-TIME VIEW");
             if (wants(i18n::tr("Order book depth", i18n::fa_l_depth))) {
-                const bool c = layer_row(i18n::tr("Order book depth", i18n::fa_l_depth), rt_depth_enabled_, false);
+                const bool c = layer_row(i18n::tr("Order book depth", i18n::fa_l_depth), rt_depth_enabled_, false, "Alt+1");
                 if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
                     open_heatmap_settings_ = true;
                     ImGui::CloseCurrentPopup();
@@ -339,9 +342,13 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
                     open_heatmap_settings_ = true;
                     ImGui::CloseCurrentPopup();
                 }
+                if (Theme::menu_field("Opacity", &rt_depth_opacity_, "%.2f", 0.05f))
+                    rt_depth_opacity_ = std::clamp(rt_depth_opacity_, 0.05f, 1.0f);
+                if (ImGui::IsItemHovered())
+                    Theme::tooltip("Fade the depth cells without turning the layer off -\nkeep trades and quotes readable on a busy book.");
                 Theme::end_menu_detail();
             }
-            if (wants(i18n::tr("Trade bubbles", i18n::fa_l_bubbles)) && layer_row(i18n::tr("Trade bubbles", i18n::fa_l_bubbles), rt_bubbles_, false)) rt_bubbles_ = !rt_bubbles_;
+            if (wants(i18n::tr("Trade bubbles", i18n::fa_l_bubbles)) && layer_row(i18n::tr("Trade bubbles", i18n::fa_l_bubbles), rt_bubbles_, false, "Alt+2")) rt_bubbles_ = !rt_bubbles_;
             if (page == i18n::tr("Trade bubbles", i18n::fa_l_bubbles)) {
                 // Per-market reference, with a separate upper size cap for exceptional groups.
                 static const char* const kCaps[] = {"Compact", "Standard", "Large"};
@@ -366,29 +373,73 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
                 if (next != cap) rt_bubble_cap_ = kCapPx[next];
                 if (ImGui::IsItemHovered())
                     Theme::tooltip("How big the largest prints grow. Compact stops at 12 px, Standard at 24, Large at 32.");
+                if (Theme::menu_field("Opacity", &rt_bubble_alpha_, "%.2f", 0.05f))
+                    rt_bubble_alpha_ = std::clamp(rt_bubble_alpha_, 0.05f, 1.0f);
+                if (ImGui::IsItemHovered())
+                    Theme::tooltip("Fade every trade bubble (real-time and candle views) -\nkeep them as a background accent under the tape.");
+                Theme::end_menu_detail();
+            }
+            if (page == i18n::tr("Resting depth heat", i18n::fa_l_resting)) {
+                Theme::begin_menu_detail();
+                if (Theme::menu_field("Opacity", &rt_cum_opacity_, "%.2f", 0.05f))
+                    rt_cum_opacity_ = std::clamp(rt_cum_opacity_, 0.05f, 1.0f);
+                if (ImGui::IsItemHovered())
+                    Theme::tooltip("Fade the gold resting-depth rows when they compete with\nthe depth cells underneath.");
+                Theme::end_menu_detail();
+            }
+            if (page == "Whale trail") {
+                Theme::begin_menu_detail();
+                static const char* const kWindows[] = {"5 s", "8 s", "15 s"};
+                static constexpr int kWindowMs[] = {5000, 8000, 15000};
+                int wi = rt_whale_window_ms_ <= 5000 ? 0 : rt_whale_window_ms_ <= 8000 ? 1 : 2;
+                const int next_w = Theme::menu_choice_row("Link window", "rt_whale_window", kWindows, 3, wi);
+                if (next_w != wi) rt_whale_window_ms_ = kWindowMs[next_w];
+                if (ImGui::IsItemHovered())
+                    Theme::tooltip("How far apart two large prints may be (time and 40 ticks of\nprice) and still count as one working order.");
                 Theme::end_menu_detail();
             }
             if (page.empty()) {
-            if (layer_row(i18n::tr("Trade-price line", i18n::fa_l_trade_line), rt_trade_line_, false)) rt_trade_line_ = !rt_trade_line_;
-            if (layer_row(i18n::tr("1s candles", i18n::fa_l_1s_candles), rt_candles_, false)) {
+            if (layer_row(i18n::tr("Trade-price line", i18n::fa_l_trade_line), rt_trade_line_, false, "Alt+3")) rt_trade_line_ = !rt_trade_line_;
+            if (layer_row(i18n::tr("1s candles", i18n::fa_l_1s_candles), rt_candles_, false, "Alt+4")) {
                 rt_candles_ = !rt_candles_;
                 chart_type_ = rt_candles_ ? ChartType::Candles : ChartType::Line;
             }
             if (rt_candles_) {
-                if (layer_row(i18n::tr("Heikin-Ashi", i18n::fa_l_heikin), rt_heikin_, false)) rt_heikin_ = !rt_heikin_;
+                if (layer_row(i18n::tr("Heikin-Ashi", i18n::fa_l_heikin), rt_heikin_, false, "Alt+5")) rt_heikin_ = !rt_heikin_;
                 if (ImGui::IsItemHovered())
                     Theme::tooltip("Smoothed real-time candles: the open is the midpoint of the previous\nHA candle, the close is the raw OHLC4. Trend structure without wick noise.");
             }
             render_realtime_cvd_layer();
-            if (layer_row(i18n::tr("Est. liquidations", i18n::fa_l_est_liq), rt_liq_levels_enabled_, false)) rt_liq_levels_enabled_ = !rt_liq_levels_enabled_;
+            if (layer_row(i18n::tr("Est. liquidations", i18n::fa_l_est_liq), rt_liq_levels_enabled_, false, "Alt+7")) rt_liq_levels_enabled_ = !rt_liq_levels_enabled_;
             if (ImGui::IsItemHovered())
                 Theme::tooltip("Estimated liquidation clusters: open interest split over leverage tiers\nusing the recent tape. Red bands are forced sells (longs), green forced buys (shorts).\nAn estimate, not real orders.");
-            if (layer_row(i18n::tr("Resting depth heat", i18n::fa_l_resting), rt_cum_depth_enabled_, false)) rt_cum_depth_enabled_ = !rt_cum_depth_enabled_;
+            if (layer_row(i18n::tr("Resting depth heat", i18n::fa_l_resting), rt_cum_depth_enabled_, false, "Alt+8")) rt_cum_depth_enabled_ = !rt_cum_depth_enabled_;
             if (ImGui::IsItemHovered())
                 Theme::tooltip("A second heat map: time-weighted resting depth per price (10-minute\nmemory). Gold rows are prices where orders have been sitting - shelves and\nwalls stand out from flicker. Hover a row for its size.");
             layer_section("ORDER BOOK SIGNALS");
             render_refill_layer_row();
             render_realtime_wall_layer();
+            // [SELF-HOST] Whale trail: consecutive large same-side prints linked
+            // into a path over the heat. Reads straight from the bubble archive.
+            if (wants("Whale trail") && layer_row("Whale trail", rt_whale_trail_enabled_, false))
+                rt_whale_trail_enabled_ = !rt_whale_trail_enabled_;
+            if (ImGui::IsItemHovered())
+                Theme::tooltip("Consecutive large same-side clips linked into a trail: a working\n"
+                               "order shows up as a path, scattered small flow stays unlinked.\n"
+                               "Reads the same grouped prints the trade bubbles draw.");
+            layer_section("CROSS-VENUE");
+            if (ctx_.ticker_mgr().has_venue("okx")) {
+                if (wants("Venue basis (OKX)") && layer_row("Venue basis (OKX)", rt_basis_enabled_, false, "okx"))
+                    rt_basis_enabled_ = !rt_basis_enabled_;
+                if (ImGui::IsItemHovered())
+                    Theme::tooltip("OKX perp last price vs this chart's mid, in bps, as a ribbon\n"
+                                   "along the bottom. Premium above zero: OKX leads. Divergence\n"
+                                   "spikes often mark where pressure started first.");
+            } else if (wants("Venue basis (OKX)")) {
+                Theme::menu_note("Cross-venue basis needs an OKX feed; this gateway\nserves Binance futures only.");
+            }
+            if (page.empty())
+                Theme::menu_note("Alt+1..0 toggles these layers anywhere:\n1 depth, 2 bubbles, 3 trade line, 4 candles, 5 Heikin-Ashi,\n6 CVD, 7 est. liq, 8 resting heat, 9 refill, 0 walls.");
             layer_section("LAYER PRESETS");
             {
                 static const char* kPresets[] = {"Scalp", "Swing", "Research"};
@@ -404,6 +455,48 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
                         "- Swing: 1m candles, estimated liquidations + resting depth, noise off\n"
                         "- Research: everything on (walls table, peak-hold, trade line)\n"
                         "Applies instantly; keep tuning afterwards, the workspace remembers it.");
+            }
+            // [SELF-HOST] User-saved layer sets: click applies, right-click deletes.
+            // A set snapshots every RT layer switch + the candle bucket size, so a
+            // trader can keep a scalping view and a liquidation view side by side.
+            {
+                if (!layer_sets_.empty()) {
+                    Theme::menu_separator();
+                    Theme::menu_section("MY LAYER SETS");
+                    std::vector<std::string> erase_names;
+                    for (auto it = layer_sets_.begin(); it != layer_sets_.end(); ++it) {
+                        const std::string name = it.key();
+                        ImGui::PushID(name.c_str());
+                        if (Theme::menu_item(UiIcon::Candles, name.c_str(), nullptr, true, true)) {
+                            apply_layer_flags(it.value());
+                            rt_layer_preset_ = -1;   // a custom set supersedes the fixed layouts
+                        }
+                        if (ImGui::IsItemHovered())
+                            Theme::tooltip("Click: apply this set. Right-click: delete it.\nThe workspace remembers applied sets across reloads.");
+                        if (ImGui::IsItemClicked(ImGuiMouseButton_Right))
+                            erase_names.push_back(name);
+                        ImGui::PopID();
+                    }
+                    for (const auto& name : erase_names) layer_sets_.erase(name);
+                }
+                if (Theme::menu_item(UiIcon::Plus, "Save current as set\xe2\x80\xa6", nullptr, true, true))
+                    layer_set_input_open_ = !layer_set_input_open_;
+                if (ImGui::IsItemHovered())
+                    Theme::tooltip("Name and save the layers exactly as they are now,\nthen bring them back with one click from this menu.");
+                if (layer_set_input_open_) {
+                    ImGui::SetNextItemWidth(158);
+                    const bool enter = ImGui::InputTextWithHint("##layerset_name", "Set name",
+                        layer_set_name_buf_, sizeof(layer_set_name_buf_));
+                    const std::string candidate = layer_set_name_buf_;
+                    const bool valid = !candidate.empty() && candidate.size() <= 24;
+                    if ((valid && (enter || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter))) ||
+                        (valid && Theme::menu_item(UiIcon::Check, "Save set", nullptr, true, true))) {
+                        layer_sets_[candidate] = capture_layer_flags();
+                        rt_layer_preset_ = -1;
+                        layer_set_input_open_ = false;
+                        layer_set_name_buf_[0] = '\0';
+                    }
+                }
             }
             }
         } else if (!rt_mode_) {
