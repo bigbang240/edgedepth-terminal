@@ -59,6 +59,11 @@ EM_JS(void, workspace_import, (), {
 #endif
 namespace workspace {
 namespace {
+// Bump whenever shipped chart defaults change in a way existing browsers must
+// pick up: the one-time repair below re-applies the Liquidity preset and tab
+// documents from older builds stop shadowing it. The user's own changes
+// persist after the repair (their next capture is stamped with this revision).
+constexpr int kLayoutRevision = 4;
 Json library = {{"version",1},{"named",Json::object()}};
 Json pending, current;
 std::vector<std::unique_ptr<Widget>>* panels = nullptr;
@@ -258,7 +263,8 @@ void flush() {
         ImGui::GetFrameCount() <= capture_after_frame) return;
     auto next = capture();
     if (next.is_null() || next.dump().size() > max_bytes) return;
-    current = std::move(next); library["current"] = current; persist();
+    current = std::move(next); current["layout_revision"] = kLayoutRevision;
+    library["current"] = current; persist();
 #ifdef __EMSCRIPTEN__
     workspace_write_tab(current.dump().c_str());
 #endif
@@ -284,7 +290,7 @@ void tick(std::vector<std::unique_ptr<Widget>>& widgets, const AppContext& ctx,
                 load_named(stored);
                 if (stored.contains("current") && valid_document(stored["current"])) {
                     pending = stored["current"];
-                    if (!stored.contains("layout_revision") || stored["layout_revision"] != 3) {
+                    if (!stored.contains("layout_revision") || stored["layout_revision"] != kLayoutRevision) {
                         // Migrate to the current defaults: the Liquidity preset
                         // (real-time mode, live candles over the heatmap) is
                         // the product's core view. One-time per revision; the
@@ -302,7 +308,12 @@ void tick(std::vector<std::unique_ptr<Widget>>& widgets, const AppContext& ctx,
         if (char* tab = workspace_read_tab()) {
             if (*tab) {
                 auto doc = parse_document(tab);
-                if (!doc.is_null()) pending = std::move(doc);
+                // A tab doc captured by a build with older defaults must not
+                // shadow the revision repair above: same rule, same one-time
+                // semantics. Fresh captures are stamped with kLayoutRevision.
+                if (!doc.is_null() && doc.contains("layout_revision") &&
+                    doc["layout_revision"] == kLayoutRevision)
+                    pending = std::move(doc);
             }
             std::free(tab);
         }
@@ -324,7 +335,7 @@ void tick(std::vector<std::unique_ptr<Widget>>& widgets, const AppContext& ctx,
     was_enabled = true;
     if (!pending.is_null()) {
         apply(pending); pending = Json{}; last_capture = -1;
-        library["layout_revision"] = 3;
+        library["layout_revision"] = kLayoutRevision;
         // DockBuilder and new windows need a completed frame before capture.
         capture_after_frame = ImGui::GetFrameCount() + 1;
         return;
@@ -345,13 +356,14 @@ void tick(std::vector<std::unique_ptr<Widget>>& widgets, const AppContext& ctx,
         }
     }
     if (ImGui::GetFrameCount() <= capture_after_frame) return;
-    library["layout_revision"] = 3;
+    library["layout_revision"] = kLayoutRevision;
     if (save_requested || export_requested || ImGui::GetTime() - last_capture >= 1.0) {
         auto next = capture(); last_capture = ImGui::GetTime();
         if (next.is_null() || next.dump().size() > max_bytes) {
             save_requested = export_requested = false; return;
         }
-        current = std::move(next); library["current"] = current;
+        current = std::move(next); current["layout_revision"] = kLayoutRevision;
+        library["current"] = current;
         // The tab document carries this window's layout every second; the
         // shared library's "current" is only the default for a new window,
         // and every write to it wakes every other terminal window (storage

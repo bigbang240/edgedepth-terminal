@@ -296,8 +296,10 @@ ChartWidget::ChartWidget(
     , liq_field_(ctx)
 {
     link_id_ = g_time_link.next_id++;
-    // Self-hosted charts start with depth only. Saved workspace choices win.
-    rt_bubbles_ = Entitlements::hosted();
+    // The hosted product opens depth-only on purpose (its onboarding choice).
+    // Self-hosted stacks ship the full order-flow view: trade bubbles on from
+    // the first launch. Saved workspace choices still win over this default.
+    rt_bubbles_ = true;
     if (compare_) time_linked_ = true;
     // A secondary chart cannot share the app-level manager: that holds ONE
     // timeframe and ONE follow-live latch, which is exactly what the two

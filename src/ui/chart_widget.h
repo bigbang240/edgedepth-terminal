@@ -601,7 +601,7 @@ private:
     // ─── Heatmap ─────────────────────────────────────────────────────────
     std::chrono::steady_clock::time_point last_heatmap_update_ms_;
     static constexpr int64_t HEATMAP_UPDATE_INTERVAL_MS = 100;
-    bool heatmap_enabled_ = false;
+    bool heatmap_enabled_ = true;   // self-hosted first launch ships the depth heat on
     std::string heatmap_mode_ = "UHD";
     HeatmapType heatmap_type_ = HeatmapType::OrderbookDepth;
     bool heatmap_data_requested_ = false;
@@ -812,7 +812,7 @@ private:
     // "Large" = quote value >= kCandleBubbleMult x the same 60s 75th-percentile
     // market scale RT uses. Hold the reference until explicit recalibration
     // so panning recorded history cannot change the size of an existing print.
-    bool    candle_bubbles_ = false;
+    bool    candle_bubbles_ = true;      // large prints visible without a toggle hunt
     bool    candle_bubble_history_enabled_ = true;
     CandleBubbleHistory candle_bubble_history_;
     float   candle_bubble_min_ = 0.0f;           // manual quote-value floor; 0 = auto
