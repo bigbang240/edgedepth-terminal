@@ -47,9 +47,9 @@
 **شکاف:** مدل برآورد لیکوییدیشن خودمان (از OI + mark price، مستقل از سرور) پیاده نشده؛ cascade detection (زنجیرهٔ لیکوییدیشن) ندارد؛ هشدار realtime ندارد.
 
 ### 4) لایهٔ Layers (لایه‌ها) — `chart_widget_overlays.cpp` (۵۴۱ خط)
-**موجود:** منوی Layers با زیرصفحه: Price Levels (VWAP روزانه، H/L/C روز/هفتهٔ قبل، VWAP انکر شده)، Order book depth، Trade bubbles، VPVR، Liquidation map، HL positions، Reported liquidations، Scenario profile، Refill levels/history، Absorption bands، Touch-odds، Compression overlay. هر ردیف: toggle + قفل PRO + ذخیره در workspace. چرخش دو منوی مستقل: Layers و Liquidations.
+**موجود:** منوی Layers با زیرصفحه: Price Levels (VWAP روزانه، H/L/C روز/هفتهٔ قبل، VWAP انکر شده)، Order book depth، Trade bubbles، VPVR، Liquidation map، HL positions، Reported liquidations، Scenario profile، Refill levels/history، Absorption bands، Touch-odds، Compression overlay. هر ردیف: toggle + قفل PRO + ذخیره در workspace. چرخش دو منوی مستقل: Layers و Liquidations. بعد از فاز ۹: لایه‌ست نام‌دار کاربر، شفافیت per-layer، کلیدهای میان‌بر Alt و لایه‌های Whale trail / Venue basis / Slippage cone / Layer events هم اضافه شدند.
 
-**شکاف:** ترتیب/مکاش‌پذیری لایه‌ها (z-order UI) ندارند؛ لایهٔ کاربر-سازیشه (import لایهٔ شخصی) ندارد؛ ذخیرهٔ مجموعه-لایه به‌صورت preset نام‌گذاری‌شده ندارد.
+**شکاف:** ترتیب/مکاش‌پذیری لایه‌ها (z-order UI) ندارند؛ لایهٔ کاربر-سازیشه (import لایهٔ شخصی) ندارد.
 
 ### 5) لایهٔ Widgets — `src/ui/widget.h` + `Menu::resolve_widget_add_request`
 **موجود:** ۱۲ نوع widget: Chart (چند-نمونه)، Orderbook (۲۵ سطح)، DOM، Trades، Stats، Data&Research، Watchlist، PositionsPanel (Paper trading سه‌تب)، ReplayLibrary، DebugLog، ResearchMomentPanel. سیستم dockspace کامل ImGui (کشیدن/رها کردن، چیدمان‌های پیش‌فرض، reset، حالت companion برای DOM/Trades). روتین به‌روزرسانی هر widget (Turbo/RealTime/Standard/Slow).
@@ -92,7 +92,7 @@
 - [x] **پیک‌هولد (Peak hold)**: رد تاریک کم‌رنگ برای بیشینهٔ ۱۰/۳۰ دقیقهٔ اخیر — PR#2
 - [x] **Snapshot API**: `window.__ed_state` (mirror دوبار در ثانیه) + ضبط canvas از `captureStream` — PR#2
 - [x] **دیتا-بیرون‌دهی WS**: پل JSON-WS روی سیم protobuf گیت‌وی (feat(egress) در edgedepth-gateway master)
-- [ ] عمق بافر RT قابل تنظیم (۳۰min فعلی → ۲/۶/۱۲ ساعت با مدیر حافظه) — افق مرورگر تا ۱۲h از `__EDGEDEPTH_RT_ARCHIVE_MS__`
+- [x] **عمق بافر RT قابل تنظیم** (۳۰min فعلی → ۲/۶/۱۲ ساعت با مدیر حافظه) — انتخابگر «Archive depth» در منوی Real-time، پایدار در workspace؛ سقف زوم و بودجهٔ کارگر IndexedDB از `RealtimeArchive::target_ms` پیروی می‌کنند و افق مرورگر تا ۱۲h از `__EDGEDEPTH_RT_ARCHIVE_MS__` قابل بالا بردن است
 
 ### فاز ۲ — «جنگ افزار لیکوییدیشن»
 هدف: دیدن جایی که بازار می‌سوزد، قبل از دیگران.
@@ -134,6 +134,13 @@
 - [x] نسخه‌بندی SemVer (0.7.0) + صفحهٔ CHANGELOG در هر دو ریپو + `VERSION`
 - [x] auto-update checker — `version.json` در deploy سلف-هاست + بنر کهربایی «New build» با reload با کلیک (بررسی هنگام بارگذاری + هر ۵ دقیقه)
 - [x] بهینه‌سازی: SIMD از پیش فعال (`-msimd128`)، بیلد Release بدون debug info با `-O3 -flto`، کش مرورگر هش‌دار با `?v=<tag>` — یافته‌ها در CHANGELOG ثبت شد
+
+### فاز ۹ — «سوئیت مدیریت لایه‌ها» (Wave 1-3) — ✅ تحویل‌شده (20261026b + 20261028b)
+بر پایهٔ پیشنهادهای بخش Layers، در سه موج با بازبینی مرورگر و push جداگانه:
+- [x] **Wave 1 — مدیریت**: مجموعه‌لایهٔ نام‌دار کاربر («MY LAYER SETS»: کلیک = اعمال، راست‌کلیک = حذف، ≤۱۲ مجموعه، snapshot کامل سوییچ‌های RT + باکت کندل، ماندگار در workspace)؛ شفافیت per-layer (عمق RT، حباب‌ها، حرارت ماندگار — اسلایدر در صفحهٔ تنظیم هر لایه)؛ کلیدهای میان‌بر Alt+1..0 با گارد WantTextInput/popup و چیپ «Alt+n» روی همهٔ ردیف‌ها؛ انتخابگر عمق آرشیو (فاز ۱ را هم بست)
+- [x] **Wave 2 — لایه‌های دادهٔ جدید**: Whale trail (زنجیرهٔ حریصانهٔ clip های بزرگ هم‌سمت روی آرشیو حباب‌ها: پنجرهٔ ۵/۸/۱۵ ثانیه، نزدیکی قیمت ۴۰تیکی، هاله روی peak clip — `core/whale_trail.h`؛ اکتشافی — فیدهای عمومی id سفارش ندارند)؛ Venue basis (OKX) (آخرین پرپ OKX در برابر mid چارت به bps، روبان ۱۲۰ ثانیه‌ای در کف پلات، نمونه‌برداری ۱/s از TickerManager مشترک — بدون اشتراک جدید؛ gated روی has_venue("okx"))
+- [x] **Wave 3 — یکپارچه‌سازی**: ویجت Layer events (رینگ ۲۴تایی: cascade / لیکوییدیشن بالای آستانه / wall pull / مصرف refill؛ رنگ تگ بر اساس سمت)؛ هشدار «Refill consumed» (سطوح exhausted با آبستراکت اجراشده ≥ آستانهٔ دلاری قابل‌ویرایش → toast + Notification + بیپ ۴۴۰Hz)؛ Slippage cone (پیمایش کتاب زنده برای سفارش بازار شبیه‌سازی‌شده: خطوط VWAP خط‌چین + چیپ «N BTC - slip buy X sell Y bps»؛ پریست ۰.۵/۱/۵/۱۰/۲۵ + اندازهٔ دقیق)
+- [x] **پاس فارسی Wave ها**: همهٔ ردیف‌ها/سکشن‌ها/فیلدها/نوت‌های جدید (رد پای نهنگ، بیسیس صرافی، مخروط لغزش، رویدادهای لایه، دیوارها، سطوح ری‌فیل، مجموعه‌های من، شفافیت، عمق آرشیو و…) در جدول i18n (`gen-i18n-fa.py` — شکل‌دهی خط‌به‌خط برای رشته‌های چندخطی؛ تولتیپ‌های بلند مطابق الگوی فاز ۷ انگلیسی می‌مانند)
 
 ---
 
