@@ -140,6 +140,7 @@ Json ChartWidget::save_settings() const {
     j["rt_archive_ms"] = RealtimeArchive::target_ms; // global retention, same value from every chart
     j["rt_whale_trail"] = rt_whale_trail_enabled_;  // self-host: linked large-print trails
     j["rt_whale_window_ms"] = rt_whale_window_ms_;
+    j["rt_whale_step_ticks"] = rt_whale_step_ticks_; // v2: user-chosen price proximity
     j["rt_basis_okx"] = rt_basis_enabled_;          // self-host: OKX basis ribbon
     j["rt_events"] = rt_events_enabled_;            // self-host: layer-events corner feed
     j["rt_slip"] = rt_slip_enabled_;                // self-host: slippage cone
@@ -337,6 +338,7 @@ void ChartWidget::load_settings(const Json& j) {
       if (saved_archive > 0) RealtimeArchive::set_target_ms(saved_archive); }
     workspace::read(j, "rt_whale_trail", rt_whale_trail_enabled_);   // absent in older saves: keeps off
     workspace::read(j, "rt_whale_window_ms", rt_whale_window_ms_, 3000, 30000);
+    workspace::read(j, "rt_whale_step_ticks", rt_whale_step_ticks_, 5, 200);
     workspace::read(j, "rt_basis_okx", rt_basis_enabled_);
     workspace::read(j, "rt_events", rt_events_enabled_);           // absent in older saves: keeps on
     workspace::read(j, "rt_slip", rt_slip_enabled_);               // absent in older saves: keeps off

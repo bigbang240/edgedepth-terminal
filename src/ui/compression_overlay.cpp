@@ -1,5 +1,6 @@
 #include "ui/compression_overlay.h"
 #include "core/compression_geometry.h"
+#include "core/i18n.h"
 #include "core/research_url.h"
 #include "rendering/theme.h"
 #include "implot.h"
@@ -43,12 +44,12 @@ void open(const Terminal::Pair& pair, const char* tf) {
 }
 void menu(const Terminal::Pair& pair, bool replay) {
     if (pair.exchange != "binancef") return;
-    if (Theme::begin_menu_group("Compression")) {
-        if (replay) Theme::menu_note("Open setups from their investigation.");
+    if (Theme::begin_menu_group(i18n::tr("Compression", i18n::fa_compression_grp))) {
+        if (replay) Theme::menu_note(i18n::tr("Open setups from their investigation.", i18n::fa_note_setups));
         else {
-            if (Theme::menu_toggle("Inspect 1h compression", false, false)) open(pair, "1h");
+            if (Theme::menu_toggle(i18n::tr("Inspect 1h compression", i18n::fa_inspect_1h), false, false)) open(pair, "1h");
             if (ImGui::IsItemHovered()) Theme::tooltip("Experimental watchlist, admin access.");
-            if (Theme::menu_toggle("Inspect 4h compression", false, false)) open(pair, "4h");
+            if (Theme::menu_toggle(i18n::tr("Inspect 4h compression", i18n::fa_inspect_4h), false, false)) open(pair, "4h");
             if (ImGui::IsItemHovered()) Theme::tooltip("Experimental watchlist, admin access.");
         }
         Theme::end_menu_group();

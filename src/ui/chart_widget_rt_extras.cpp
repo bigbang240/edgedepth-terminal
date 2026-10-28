@@ -927,14 +927,19 @@ void ChartWidget::render_realtime_whale_trail(ImDrawList* dl, const ImPlotRect& 
         });
     if (prints.size() < 2) return;
     std::vector<whale_trail::Chain> chains;
-    // 40 ticks of price proximity: wide enough to follow a working order up the
-    // book, tight enough never to bridge two distinct participants' levels.
-    whale_trail::build(prints, rt_whale_window_ms_, 40.0, tick_size_, chains);
+    // Price proximity comes from the user's step choice (v2): Tight 20 ticks
+    // reads only orders walking one shelf, Wide 80 follows an order climbing
+    // several shelves. Best-fit / value gate / span cap live in whale_trail.
+    whale_trail::build(prints, rt_whale_window_ms_, double(rt_whale_step_ticks_), tick_size_, chains);
     if (chains.empty()) return;
     for (const auto& chain : chains) {
         const ImVec4& token = chain.buy ? Theme::Tokens::UP : Theme::Tokens::DOWN;
-        const ImVec4 line_col(token.x, token.y, token.z, 0.55f);
         const ImVec4 halo_col(token.x, token.y, token.z, 0.80f);
+        // Line weight carries the trail's quoted total: 1.5 px baseline, up to
+        // ~3.4 px once the linked clips sum ~64x over the bubble minimum.
+        const float width = std::clamp(
+            1.5f + 0.32f * float(std::log2(std::max(1.0, chain.total_value / minimum))),
+            1.5f, 3.4f);
         std::vector<ImVec2> pts;
         pts.reserve(chain.nodes.size());
         const whale_trail::Node* peak = &chain.nodes.front();
@@ -942,11 +947,35 @@ void ChartWidget::render_realtime_whale_trail(ImDrawList* dl, const ImPlotRect& 
             pts.push_back(ImPlot::PlotToPixels(double(n.ts_ms), n.price));
             if (n.value > peak->value) peak = &n;
         }
-        dl->AddPolyline(pts.data(), int(pts.size()), ImGui::GetColorU32(line_col),
-                        ImDrawFlags_None, 1.8f);
+        // Segments brighten toward the present: direction reads even where the
+        // path overlaps itself at dense zooms, and older legs recede.
+        const int segs = int(pts.size()) - 1;
+        for (int i = 0; i < segs; ++i) {
+            const float a = segs <= 1 ? 0.55f
+                                      : 0.32f + 0.46f * (float(i) / float(segs - 1));
+            dl->AddLine(pts[i], pts[i + 1],
+                        ImGui::GetColorU32(ImVec4(token.x, token.y, token.z, a)), width);
+        }
         // Small anchor dots make single-tap steps readable at dense zooms.
         for (const auto& pt : pts)
             dl->AddCircleFilled(pt, 2.2f, ImGui::GetColorU32(ImVec4(token.x, token.y, token.z, 0.65f)));
+        // Arrowhead on the newest end, oriented along the last leg: which way
+        // the working order is heading without tracing dot to dot.
+        if (segs >= 1) {
+            const ImVec2& a = pts[segs - 1];
+            const ImVec2& b = pts[segs];
+            const float dx = b.x - a.x, dy = b.y - a.y;
+            const float len = std::sqrt(dx * dx + dy * dy);
+            if (len > 1.0f) {
+                const float ux = dx / len, uy = dy / len;
+                const ImVec2 tip(b.x + ux * 6.0f, b.y + uy * 6.0f);
+                const ImVec2 w1(b.x - ux * 2.0f - uy * 3.2f, b.y - uy * 2.0f + ux * 3.2f);
+                const ImVec2 w2(b.x - ux * 2.0f + uy * 3.2f, b.y - uy * 2.0f - ux * 3.2f);
+                const ImVec2 tri[3] = {tip, w1, w2};
+                dl->AddConvexPolyFilled(tri, 3,
+                    ImGui::GetColorU32(ImVec4(token.x, token.y, token.z, 0.85f)));
+            }
+        }
         // Halo on the chain's largest clip - the print that made it a whale.
         const float base_r = RealtimeBubble::radius(peak->value, minimum, rt_bubble_cap_);
         const ImVec2 pc = ImPlot::PlotToPixels(double(peak->ts_ms), peak->price);

@@ -265,7 +265,7 @@ void ChartWidget::apply_layer_flags(const workspace::Json& f) {
 
 void ChartWidget::render_realtime_settings() {
     using drawing::UiIcon;
-    if (!ctx_.replay_mgr().is_active() && Theme::menu_toggle("Pause display", rt_paused_)) {
+    if (!ctx_.replay_mgr().is_active() && Theme::menu_toggle(i18n::tr("Pause display", i18n::fa_pause_display), rt_paused_)) {
         rt_paused_ = !rt_paused_;
         if (rt_paused_) {
             rt_paused_trades_ = candles().realtime_trades().trades();
@@ -275,9 +275,9 @@ void ChartWidget::render_realtime_settings() {
         } else { rt_paused_trades_.clear(); rt_paused_liquidations_.clear(); }
     }
     ui_test::mark("rt.pause");
-    if (Theme::menu_toggle("Follow price", rt_auto_price_)) rt_auto_price_ = !rt_auto_price_;
+    if (Theme::menu_toggle(i18n::tr("Follow price", i18n::fa_follow_price), rt_auto_price_)) rt_auto_price_ = !rt_auto_price_;
     if (ImGui::IsItemHovered()) Theme::tooltip("Keep price in view. Drag the price axis to inspect manually.");
-    if (Theme::menu_item(UiIcon::Play, "Return live")) {
+    if (Theme::menu_item(UiIcon::Play, i18n::tr("Return live", i18n::fa_return_live))) {
         rt_paused_ = false;
         rt_paused_trades_.clear(); rt_paused_liquidations_.clear();
         rt_span_ms_ = realtime_default_span_ms; rt_auto_price_ = true;
@@ -285,12 +285,12 @@ void ChartWidget::render_realtime_settings() {
         candles().set_follow_live(true);
     }
     ui_test::mark("rt.live");
-    if (rt_archive_ && Theme::menu_item(UiIcon::Range, "Whole session")) {
+    if (rt_archive_ && Theme::menu_item(UiIcon::Range, i18n::tr("Whole session", i18n::fa_whole_session))) {
         rt_span_ms_ = double(RealtimeArchive::target_ms) / 0.88;
         candles().set_follow_live(true);
     }
     ui_test::mark("rt.whole");
-    ImGui::TextDisabled("Heat window");
+    ImGui::TextDisabled("%s", i18n::tr("Heat window", i18n::fa_heat_window));
     if (ImGui::IsItemHovered())
         Theme::tooltip("How much live session the heat and candles show behind the live edge.");
     for (const int mins : {1, 5, 15, 30}) {
@@ -309,15 +309,15 @@ void ChartWidget::render_realtime_settings() {
         ImGui::PopID();
     }
     Theme::menu_separator();
-    if (Theme::menu_toggle("Depth ladder", rt_dom_shown_)) rt_dom_shown_ = !rt_dom_shown_;
+    if (Theme::menu_toggle(i18n::tr("Depth ladder", i18n::fa_depth_ladder), rt_dom_shown_)) rt_dom_shown_ = !rt_dom_shown_;
     ui_test::mark("rt.ladder");
-    if (Theme::menu_toggle("Side panels", rt_show_standalone_)) rt_show_standalone_ = !rt_show_standalone_;
+    if (Theme::menu_toggle(i18n::tr("Side panels", i18n::fa_side_panels), rt_show_standalone_)) rt_show_standalone_ = !rt_show_standalone_;
     if (ImGui::IsItemHovered()) Theme::tooltip("Show the separate DOM and trade panels beside this view.");
-    if (Theme::menu_toggle("Link charts", link_charts_enabled())) set_link_charts_enabled(!link_charts_enabled());
+    if (Theme::menu_toggle(i18n::tr("Link charts", i18n::fa_link_charts), link_charts_enabled())) set_link_charts_enabled(!link_charts_enabled());
     if (ImGui::IsItemHovered())
         Theme::tooltip("Sync crosshair and zoom across every open chart, any symbols.\nThe chart under the mouse drives the group; real-time views share\nthe zoom span, candle charts share the full axis.");
     if (rt_candles_) {
-        ImGui::TextDisabled("Candle size");
+        ImGui::TextDisabled("%s", i18n::tr("Candle size", i18n::fa_candle_size));
         if (ImGui::IsItemHovered())
             Theme::tooltip("Aggregate the live trade flow into buckets of this length, 1s to 5m.");
         for (const int sec : {1, 5, 15, 30, 60, 300}) {
@@ -332,7 +332,7 @@ void ChartWidget::render_realtime_settings() {
             if (on) ImGui::PopStyleColor();
             ImGui::PopID();
         }
-        if (Theme::menu_toggle("Hollow candles", rt_candles_hollow_)) rt_candles_hollow_ = !rt_candles_hollow_;
+        if (Theme::menu_toggle(i18n::tr("Hollow candles", i18n::fa_l_hollow), rt_candles_hollow_)) rt_candles_hollow_ = !rt_candles_hollow_;
         if (ImGui::IsItemHovered()) Theme::tooltip("Outline candle bodies so the depth heatmap stays visible behind them.");
         {
             // [SELF-HOST] How much live history the browser keeps for scrolling
@@ -351,18 +351,18 @@ void ChartWidget::render_realtime_settings() {
                                "Recording starts from the moment it is raised; the choice persists.");
         }
     }
-    ImGui::TextDisabled("Alerts");
-    if (Theme::menu_toggle("Cascade alerts", cascade_alerts_enabled_)) cascade_alerts_enabled_ = !cascade_alerts_enabled_;
+    ImGui::TextDisabled("%s", i18n::tr("Alerts", i18n::fa_sec_alerts));
+    if (Theme::menu_toggle(i18n::tr("Cascade alerts", i18n::fa_cascade_alerts), cascade_alerts_enabled_)) cascade_alerts_enabled_ = !cascade_alerts_enabled_;
     if (ImGui::IsItemHovered()) Theme::tooltip("Notify when 3+ same-side liquidations fire within 2 seconds (cascade chain).");
-    if (Theme::menu_toggle("Big liquidations", liq_alerts_enabled_)) liq_alerts_enabled_ = !liq_alerts_enabled_;
+    if (Theme::menu_toggle(i18n::tr("Big liquidations", i18n::fa_big_liq_alerts), liq_alerts_enabled_)) liq_alerts_enabled_ = !liq_alerts_enabled_;
     if (ImGui::IsItemHovered())
         Theme::tooltip("Notify on a single liquidation at or above the dollar threshold below.");
     if (liq_alerts_enabled_) {
         ImGui::SetNextItemWidth(170.0f);
-        if (ImGui::InputDouble("Threshold ($)", &liq_alert_usd_, 50000.0, 250000.0, "$%.0f"))
+        if (ImGui::InputDouble(i18n::tr("Threshold ($)", i18n::fa_threshold_usd), &liq_alert_usd_, 50000.0, 250000.0, "$%.0f"))
             liq_alert_usd_ = liq_alert_usd_ < 10000.0 ? 10000.0 : liq_alert_usd_;
     }
-    if (Theme::menu_toggle("Wall pulls", wall_alerts_enabled_)) wall_alerts_enabled_ = !wall_alerts_enabled_;
+    if (Theme::menu_toggle(i18n::tr("Wall pulls", i18n::fa_wall_pulls), wall_alerts_enabled_)) wall_alerts_enabled_ = !wall_alerts_enabled_;
     if (ImGui::IsItemHovered())
         Theme::tooltip("Notify when a tracked depth wall near price is pulled (eaten or cancelled).");
     if (Theme::menu_toggle(i18n::tr("Refill consumed", i18n::fa_refill_consumed), refill_alerts_enabled_)) refill_alerts_enabled_ = !refill_alerts_enabled_;
@@ -370,45 +370,45 @@ void ChartWidget::render_realtime_settings() {
         Theme::tooltip("Notify when a tracked refill level's liquidity is traded through\n(exhausted) and the traded value clears the threshold below.");
     if (refill_alerts_enabled_) {
         ImGui::SetNextItemWidth(170.0f);
-        if (ImGui::InputDouble("Refill threshold ($)", &refill_alert_usd_, 50000.0, 250000.0, "$%.0f"))
+        if (ImGui::InputDouble(i18n::tr("Refill threshold ($)", i18n::fa_refill_threshold), &refill_alert_usd_, 50000.0, 250000.0, "$%.0f"))
             refill_alert_usd_ = refill_alert_usd_ < 10000.0 ? 10000.0 : refill_alert_usd_;
     }
-    if (Theme::menu_toggle("Drawing alerts", drawing_alerts_enabled_)) drawing_alerts_enabled_ = !drawing_alerts_enabled_;
+    if (Theme::menu_toggle(i18n::tr("Drawing alerts", i18n::fa_drawing_alerts), drawing_alerts_enabled_)) drawing_alerts_enabled_ = !drawing_alerts_enabled_;
     if (ImGui::IsItemHovered())
         Theme::tooltip("Notify when the price crosses a drawn line: horizontal lines and rays fire at\ntheir level, trendlines and rays project to the current time. The line stays armed.");
 
     // ── Phase 5: execution & risk ──────────────────────────────────────────
     Theme::menu_separator();
-    ImGui::TextDisabled("Execution");
-    if (Theme::menu_toggle("Paper on alerts", paper_on_alerts_)) paper_on_alerts_ = !paper_on_alerts_;
+    ImGui::TextDisabled("%s", i18n::tr("Execution", i18n::fa_exec_group));
+    if (Theme::menu_toggle(i18n::tr("Paper on alerts", i18n::fa_paper_on_alerts), paper_on_alerts_)) paper_on_alerts_ = !paper_on_alerts_;
     if (ImGui::IsItemHovered())
         Theme::tooltip("Open a local paper position whenever a price or drawing alert fires.\nEntry at the alert price, stop at the % below, TP1 = 1R, TP2 = 2R, then a\ntrailing runner. Quantity is risk-based (account x risk% / stop distance).\nSee the Paper Trading widget for the open positions and daily stats.");
     {
         auto& ps = position_sizing::settings();
         ImGui::SetNextItemWidth(170.0f);
-        if (ImGui::InputDouble("Account ($)", &ps.account_usd, 1000.0, 5000.0, "$%.0f"))
+        if (ImGui::InputDouble(i18n::tr("Account ($)", i18n::fa_account_usd), &ps.account_usd, 1000.0, 5000.0, "$%.0f"))
             position_sizing::clamp_settings(ps);
         if (ImGui::IsItemHovered()) Theme::tooltip("Account equity used by the size calculator on position drawings\nand by the alert paper orders.");
         ImGui::SetNextItemWidth(170.0f);
-        if (ImGui::InputDouble("Risk per trade (%)", &ps.risk_pct, 0.1, 0.5, "%.2f%%"))
+        if (ImGui::InputDouble(i18n::tr("Risk per trade (%)", i18n::fa_risk_per_trade), &ps.risk_pct, 0.1, 0.5, "%.2f%%"))
             position_sizing::clamp_settings(ps);
         if (ImGui::IsItemHovered()) Theme::tooltip("Risk per trade as a percentage of the account.");
     }
     if (paper_on_alerts_) {
         ImGui::SetNextItemWidth(170.0f);
-        if (ImGui::InputDouble("Paper stop (%)", &paper_auto_stop_pct_, 0.1, 0.5, "%.2f%%"))
+        if (ImGui::InputDouble(i18n::tr("Paper stop (%)", i18n::fa_paper_stop), &paper_auto_stop_pct_, 0.1, 0.5, "%.2f%%"))
             paper_auto_stop_pct_ = std::clamp(paper_auto_stop_pct_, 0.05, 20.0);
     }
     {
         auto& wb = exec_bridge::settings();
-        if (Theme::menu_toggle("Webhook bridge", wb.enabled)) wb.enabled = !wb.enabled;
+        if (Theme::menu_toggle(i18n::tr("Webhook bridge", i18n::fa_webhook_bridge), wb.enabled)) wb.enabled = !wb.enabled;
         if (ImGui::IsItemHovered())
             Theme::tooltip("POST a JSON message to your own bot for every alert\n(and paper opens/closes when enabled below). The target must\nallow CORS from this origin - self-hosted users point it at\ntheir own box or a proxy.");
         if (wb.enabled) {
             ImGui::SetNextItemWidth(170.0f);
             ImGui::InputText("##webhook_url", wb.url, sizeof(wb.url));
             if (ImGui::IsItemHovered()) Theme::tooltip("Webhook endpoint URL, e.g. http://your-box:8080/edgedepth");
-            if (Theme::menu_toggle("Include paper fills", wb.paper_fills)) wb.paper_fills = !wb.paper_fills;
+            if (Theme::menu_toggle(i18n::tr("Include paper fills", i18n::fa_include_fills), wb.paper_fills)) wb.paper_fills = !wb.paper_fills;
             ImGui::TextDisabled("last: %s", exec_bridge::last_status().c_str());
         }
     }
@@ -416,14 +416,14 @@ void ChartWidget::render_realtime_settings() {
     if (!rt_archive_) return;
     const auto& a = *rt_archive_;
     Theme::menu_separator();
-    if (Theme::begin_menu_group("Session history")) {
-        ImGui::TextDisabled("Recorded %.1f min", double(std::max(int64_t(0), a.last - a.first)) / 60000);
+    if (Theme::begin_menu_group(i18n::tr("Session history", i18n::fa_session_history))) {
+        ImGui::TextDisabled(i18n::tr("Recorded %.1f min", i18n::fa_recorded_min), double(std::max(int64_t(0), a.last - a.first)) / 60000);
         if (ImGui::IsItemHovered()) Theme::tooltip("Up to 30 minutes in browser storage. Closing the chart clears this history.");
         if (!a.startup_status.empty()) ImGui::TextWrapped("%s", a.startup_status.c_str());
         const auto& b = a.bubbles();
         const unsigned long long skipped = b.approximate_records + b.late_records + b.overflow_records;
         if (skipped) {
-            ImGui::TextDisabled("Bubbles omitted: %llu records", skipped);
+            ImGui::TextDisabled(i18n::tr("Bubbles omitted: %llu records", i18n::fa_bubbles_omitted), skipped);
             if (ImGui::IsItemHovered())
                 Theme::tooltip("%llu multi-price summaries, %llu late records, %llu over capture capacity.\nOriginal records remain in session history where storage is available.",
                     (unsigned long long)b.approximate_records, (unsigned long long)b.late_records,

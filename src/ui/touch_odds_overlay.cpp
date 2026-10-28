@@ -1,5 +1,6 @@
 #include "ui/touch_odds_overlay.h"
 #include "core/display_time_zone.h"
+#include "core/i18n.h"
 #include "core/research_url.h"
 #include "core/touch_odds.h"
 #include "core/liq_rails.h"
@@ -232,11 +233,11 @@ void menu(const Terminal::Pair& pair, bool& enabled, bool observed_allowed, cons
     if (rails_off) {
         Theme::menu_note(rails_off);
     } else {
-        if (Theme::menu_toggle("Touch-odds rails", rails_on)) rails_on = !rails_on;
+        if (Theme::menu_toggle(i18n::tr("Touch-odds rails", i18n::fa_touch_rails), rails_on)) rails_on = !rails_on;
         if (ImGui::IsItemHovered())
             Theme::tooltip("Fuel x chance of touch by 1h, 4h and 24h, in place of the bands. Not a magnet.\n"
                            "Fuel: the scenario map, or observed positions on Hyperliquid charts.");
-        if (rails_on && observed_allowed && Theme::menu_toggle("Fuel: observed HL positions", observed_on))
+        if (rails_on && observed_allowed && Theme::menu_toggle(i18n::tr("Fuel: observed HL positions", i18n::fa_fuel_observed), observed_on))
             observed_on = !observed_on;
     }
     Theme::end_menu_detail();

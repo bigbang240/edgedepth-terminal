@@ -1,5 +1,6 @@
 #include "ui/chart_widget.h"
 #include "core/candle_manager.h"
+#include "core/i18n.h"
 #include "core/liquidation_heatmap_manager.h"
 #include "core/display_time_zone.h"
 #include "core/entitlements.h"
@@ -25,24 +26,24 @@ bool ChartWidget::liquidation_activity_visible() const {
 // Candle charts: the reported-liquidation row's settings in Layers, under the row while it is on. The everyday
 // controls first (callouts and their threshold, the activity subplot); the rest in a collapsed Options group.
 void ChartWidget::render_liquidation_settings() {
-    if(Theme::menu_toggle("Callouts on candles",liq_markers_))liq_markers_=!liq_markers_;
+    if(Theme::menu_toggle(i18n::tr("Callouts on candles",i18n::fa_callouts_candles),liq_markers_))liq_markers_=!liq_markers_;
     if(ImGui::IsItemHovered())Theme::tooltip("A $ pill at the wick of candles whose liquidations were unusual for this market:\nshorts above the high, longs below the low. Every candle stays in the activity subplot.");
     if(liq_markers_){
         static const char* const kAt[]={"1.5\xc3\x97","2\xc3\x97","3\xc3\x97","5\xc3\x97"};
         static constexpr float kAtX[]={1.5f,2.0f,3.0f,5.0f};
         int at=0;
         for(int i=1;i<4;++i)if(std::abs(kAtX[i]-liq_callout_x_)<std::abs(kAtX[at]-liq_callout_x_))at=i;
-        const int next=Theme::menu_choice_row("Callout at","liq_callout_at",kAt,4,at);
+        const int next=Theme::menu_choice_row(i18n::tr("Callout at",i18n::fa_callout_at),"liq_callout_at",kAt,4,at);
         if(next!=at)liq_callout_x_=kAtX[next];
         if(ImGui::IsItemHovered())Theme::tooltip("Times this market's typical candle: the mean long or short total per candle\nover its last 200 candles.");
     }
-    if(Theme::menu_toggle("Activity subplot",candle_liq_strip_))candle_liq_strip_=!candle_liq_strip_;
-    if(Theme::begin_menu_group("Options##reported")){
-        if(Theme::menu_toggle("Price profile",liq_report_profile_))liq_report_profile_=!liq_report_profile_;
+    if(Theme::menu_toggle(i18n::tr("Activity subplot",i18n::fa_activity_subplot),candle_liq_strip_))candle_liq_strip_=!candle_liq_strip_;
+    if(Theme::begin_menu_group(i18n::tr("Options##reported",i18n::fa_options_reported))){
+        if(Theme::menu_toggle(i18n::tr("Price profile",i18n::fa_price_profile),liq_report_profile_))liq_report_profile_=!liq_report_profile_;
         if(ImGui::IsItemHovered())Theme::tooltip(observed_liquidations::bankruptcy_prices(pair_.exchange)
             ?"Reported dollars by price over the visible time, at the right edge.\nBybit prices are bankruptcy prices, not where the orders traded."
             :"Reported dollars by price over the visible time, at the right edge.");
-        if(Theme::menu_field("Ignore reports under $",&liq_obs_min_usd_)){
+        if(Theme::menu_field(i18n::tr("Ignore reports under $",i18n::fa_ignore_under),&liq_obs_min_usd_)){
             if(!std::isfinite(liq_obs_min_usd_))liq_obs_min_usd_=0;
             liq_obs_min_usd_=std::clamp(liq_obs_min_usd_,0.0f,1e15f);
         }

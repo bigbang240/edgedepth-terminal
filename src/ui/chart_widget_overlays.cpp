@@ -73,16 +73,16 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
                                observed_liquidations::feed_line(pair_.exchange));
             if (page == i18n::tr("Reported liquidations", i18n::fa_l_reported)) {
                 Theme::begin_menu_detail();
-                if (Theme::menu_toggle("Diamonds on the tape", rt_liq_markers_)) rt_liq_markers_ = !rt_liq_markers_;
+                if (Theme::menu_toggle(i18n::tr("Diamonds on the tape", i18n::fa_diamonds), rt_liq_markers_)) rt_liq_markers_ = !rt_liq_markers_;
                 if (ImGui::IsItemHovered())
                     Theme::tooltip(observed_liquidations::bankruptcy_prices(pair_.exchange)
                         ? "Each report at its time, on the print the forced order made (Bybit reports\nbankruptcy prices). Sized against this market's last hour."
                         : "Each report at its time and fill price, sized against this market's last hour.");
-                if (Theme::menu_toggle("Activity subplot", rt_liq_strip_)) rt_liq_strip_ = !rt_liq_strip_;
+                if (Theme::menu_toggle(i18n::tr("Activity subplot", i18n::fa_activity_subplot), rt_liq_strip_)) rt_liq_strip_ = !rt_liq_strip_;
                 Theme::end_menu_detail();
             }
         } else {
-            layer_section("POSITION LEVELS");
+            layer_section(i18n::tr("POSITION LEVELS", i18n::fa_sec_position_levels));
             if (wants(i18n::tr("Hyperliquid positions", i18n::fa_l_hl_positions))) {
         // Hyperliquid positions = observed position levels from the HL census (Pro, P2e) - ground truth,
         // never folded into the modelled map above. Keyed by underlying, so it's offered on any venue's
@@ -130,23 +130,23 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
                     }
                 }
                 if (liqmap2_rails_drawn()) {
-                    static const char* const kLead[] = {"V2 rails", "Hyperliquid"};
-                    hl_over_v2_ = Theme::menu_choice_row("Leads", "hl_lead", kLead, 2, hl_over_v2_ ? 1 : 0) == 1;
+                    const char* const kLead[] = {i18n::tr("V2 rails", i18n::fa_lead_v2), i18n::tr("Hyperliquid", i18n::fa_lead_hl)};
+                    hl_over_v2_ = Theme::menu_choice_row(i18n::tr("Leads", i18n::fa_leads), "hl_lead", kLead, 2, hl_over_v2_ ? 1 : 0) == 1;
                     if (ImGui::IsItemHovered())
                         Theme::tooltip("Both rails draw. The leader keeps its profile, labels and hover; the other draws fainter\n"
                                        "beneath it. V2: modelled from this venue's open interest. Hyperliquid: positions that exist.");
                 }
-                if (Theme::menu_toggle("Value labels", rail_value_labels_)) rail_value_labels_ = !rail_value_labels_;
-                if (Theme::menu_toggle("Profile at right edge", hl_profile_)) hl_profile_ = !hl_profile_;
+                if (Theme::menu_toggle(i18n::tr("Value labels", i18n::fa_value_labels), rail_value_labels_)) rail_value_labels_ = !rail_value_labels_;
+                if (Theme::menu_toggle(i18n::tr("Profile at right edge", i18n::fa_profile_right), hl_profile_)) hl_profile_ = !hl_profile_;
                 ui_test::mark("overlay.hl.profile");
                 {
-                if (Theme::menu_field("Minimum $", &liq_census_min_usd_)) {
+                if (Theme::menu_field(i18n::tr("Minimum $", i18n::fa_min_usd_field), &liq_census_min_usd_)) {
                     if (!std::isfinite(liq_census_min_usd_)) liq_census_min_usd_ = 1000;
                     liq_census_min_usd_ = std::clamp(liq_census_min_usd_, 0.0f, 1e12f);
                 }
                 if (ImGui::IsItemHovered())
                     Theme::tooltip("Hide rails whose positions, in the leverage chosen, hold less than this.");
-                Theme::menu_note("History: the last seven days, loaded as the view reaches back.");
+                Theme::menu_note(i18n::tr("History: the last seven days, loaded as the view reaches back.", i18n::fa_note_hist_7d));
                 }
                 Theme::end_menu_detail();
                 ImGui::PopID();
@@ -168,7 +168,7 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
         const bool has_record = live && liqmap2::scorecard_url(pair_.exchange, pair_.symbol, record_url, sizeof(record_url));
         const auto record_item = [&] {
             if (!has_record) return;
-            if (Theme::menu_item(UiIcon::Bars, "Daily record", "edgedepth.com")) ui::open_url(record_url);
+            if (Theme::menu_item(UiIcon::Bars, i18n::tr("Daily record", i18n::fa_daily_record), "edgedepth.com")) ui::open_url(record_url);
             if (ImGui::IsItemHovered()) Theme::tooltip("The map's public scorecard for this market, day by day.");
         };
         if (live && v2_access == liqmap2::Access::locked) {
@@ -201,8 +201,8 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
             // horizons; 4 h by default, as 1 h understates in development) or by the dollars.
             Theme::begin_menu_detail();
             if (v2_access == liqmap2::Access::preview) {
-                static const char* const kColour[] = {"1h", "4h", "24h", "Dollars"};
-                liqmap2_rails_colour_ = Theme::menu_choice_row("Colour", "liqmap2_colour", kColour, 4, std::clamp(liqmap2_rails_colour_, 0, 3));
+                const char* const kColour[] = {i18n::tr("1h", i18n::fa_hour_1), i18n::tr("4h", i18n::fa_hour_4), i18n::tr("24h", i18n::fa_h24), i18n::tr("Dollars", i18n::fa_dollars)};
+                liqmap2_rails_colour_ = Theme::menu_choice_row(i18n::tr("Colour", i18n::fa_colour), "liqmap2_colour", kColour, 4, std::clamp(liqmap2_rails_colour_, 0, 3));
                 if (ImGui::IsItemHovered())
                     Theme::tooltip("Rail colour: liquidations expected within 1 h, 4 h or 24 h, or the dollars forced out\n"
                                    "if price reaches the rail. A horizon falls back to dollars while any rail in view has\n"
@@ -210,15 +210,15 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
                                    "1 h and 4 h are admin only until their forward look passes.");
             } else {
                 // Customers: 24 h or dollars. The 1 h / 4 h figures stay unvalidated until their forward look.
-                static const char* const kColour[] = {"24h", "Dollars"};
-                const int sel = Theme::menu_choice_row("Colour", "liqmap2_colour", kColour, 2, rails_colour() == 3 ? 1 : 0);
+                const char* const kColour[] = {i18n::tr("24h", i18n::fa_h24), i18n::tr("Dollars", i18n::fa_dollars)};
+                const int sel = Theme::menu_choice_row(i18n::tr("Colour", i18n::fa_colour), "liqmap2_colour", kColour, 2, rails_colour() == 3 ? 1 : 0);
                 liqmap2_rails_colour_ = 2 + sel;
                 if (ImGui::IsItemHovered())
                     Theme::tooltip("Rail colour: liquidations expected within 24 h, or the dollars forced out if price\n"
                                    "reaches the rail. Bybit and Binance rails are both drawn.");
             }
-            if (Theme::menu_toggle("Value labels", rail_value_labels_)) rail_value_labels_ = !rail_value_labels_;
-            if (Theme::menu_toggle("Profile at right edge", liqmap2_rails_profile_)) liqmap2_rails_profile_ = !liqmap2_rails_profile_;
+            if (Theme::menu_toggle(i18n::tr("Value labels", i18n::fa_value_labels), rail_value_labels_)) rail_value_labels_ = !rail_value_labels_;
+            if (Theme::menu_toggle(i18n::tr("Profile at right edge", i18n::fa_profile_right), liqmap2_rails_profile_)) liqmap2_rails_profile_ = !liqmap2_rails_profile_;
             if (ImGui::IsItemHovered()) Theme::tooltip("The live rails' value by price at the right edge, both venues summed.");
             Theme::menu_note(liqmap2::kForwardTest);
             record_item();
@@ -285,7 +285,7 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
                     else if (liq_field::display_tiers(lmask, cap).enabled == 0 && lmask != 0)
                         ImGui::TextDisabled("No tier fits this market's %gx cap.", cap);
                 }
-                if (Theme::menu_item(UiIcon::Gear, "Map style\xe2\x80\xa6")) {
+                if (Theme::menu_item(UiIcon::Gear, i18n::tr("Map style\xe2\x80\xa6", i18n::fa_map_style))) {
                     open_liq_settings_ = true;
                     ImGui::CloseCurrentPopup();
                 }
@@ -293,7 +293,7 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
         }
             }
             if (wants(i18n::tr("Reported liquidations", i18n::fa_l_reported))) {
-                layer_section("REPORTED EVENTS");
+                layer_section(i18n::tr("REPORTED EVENTS", i18n::fa_sec_reported_events));
         // Observed = real @forceOrder prints via the liquidations stream (Pro).
         if (layer_row(i18n::tr("Reported liquidations", i18n::fa_l_reported), pro && reported_liquidations_enabled(), !pro)) {
             // Switching the source on brings its callouts with it, as the
@@ -325,7 +325,7 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
             // draw nothing here, and i18n::tr("Order book depth", i18n::fa_l_depth) must mean the sampled
             // depth cells, not the candle heatmap. Overlay switches live here;
             // the Real-time menu owns navigation and panel visibility.
-            layer_section("REAL-TIME VIEW");
+            layer_section(i18n::tr("REAL-TIME VIEW", i18n::fa_sec_rt_view));
             if (wants(i18n::tr("Order book depth", i18n::fa_l_depth))) {
                 const bool c = layer_row(i18n::tr("Order book depth", i18n::fa_l_depth), rt_depth_enabled_, false, "Alt+1");
                 if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
@@ -351,10 +351,10 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
             if (wants(i18n::tr("Trade bubbles", i18n::fa_l_bubbles)) && layer_row(i18n::tr("Trade bubbles", i18n::fa_l_bubbles), rt_bubbles_, false, "Alt+2")) rt_bubbles_ = !rt_bubbles_;
             if (page == i18n::tr("Trade bubbles", i18n::fa_l_bubbles)) {
                 // Per-market reference, with a separate upper size cap for exceptional groups.
-                static const char* const kCaps[] = {"Compact", "Standard", "Large"};
+                const char* const kCaps[] = {i18n::tr("Compact", i18n::fa_cap_compact), i18n::tr("Standard", i18n::fa_cap_standard), i18n::tr("Large", i18n::fa_cap_large)};
                 static constexpr float kCapPx[] = {bubble_size::kCompact, bubble_size::kStandard, bubble_size::kLarge};
                 Theme::begin_menu_detail();
-                if (Theme::menu_toggle("Auto market size", rt_auto_bubbles_)) {
+                if (Theme::menu_toggle(i18n::tr("Auto market size", i18n::fa_auto_market_size), rt_auto_bubbles_)) {
                     rt_auto_bubbles_ = !rt_auto_bubbles_;
                     rt_bubble_scale_ = {};
                 }
@@ -362,14 +362,14 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
                 if (ImGui::IsItemHovered())
                     Theme::tooltip("Sizes and filters bubbles against this market's last minute of grouped trades.\nThe reference eases over about 20 seconds, so ordinary activity stays small and\nstandouts stand out. Recalibrate snaps it to now.");
                 if (!rt_auto_bubbles_) {
-                    if (Theme::menu_field("Minimum value ($)", &rt_min_notional_))
+                    if (Theme::menu_field(i18n::tr("Minimum value ($)", i18n::fa_min_value_usd), &rt_min_notional_))
                         if (!std::isfinite(rt_min_notional_) || rt_min_notional_ < 1) rt_min_notional_ = 1;
                 } else {
-                    if (Theme::menu_item(UiIcon::Refresh, "Recalibrate sizes", nullptr, true, true)) rt_bubble_scale_ = {};
+                    if (Theme::menu_item(UiIcon::Refresh, i18n::tr("Recalibrate sizes", i18n::fa_recalibrate_sizes), nullptr, true, true)) rt_bubble_scale_ = {};
                     ui_test::mark("rt.bubbles.recalibrate");
                 }
                 const int cap = rt_bubble_cap_ == bubble_size::kCompact ? 0 : rt_bubble_cap_ == bubble_size::kLarge ? 2 : 1;
-                const int next = Theme::menu_choice_row("Max size", "rt_bubble_cap", kCaps, 3, cap);
+                const int next = Theme::menu_choice_row(i18n::tr("Max size", i18n::fa_max_size), "rt_bubble_cap", kCaps, 3, cap);
                 if (next != cap) rt_bubble_cap_ = kCapPx[next];
                 if (ImGui::IsItemHovered())
                     Theme::tooltip("How big the largest prints grow. Compact stops at 12 px, Standard at 24, Large at 32.");
@@ -395,7 +395,16 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
                 const int next_w = Theme::menu_choice_row(i18n::tr("Link window", i18n::fa_link_window), "rt_whale_window", kWindows, 3, wi);
                 if (next_w != wi) rt_whale_window_ms_ = kWindowMs[next_w];
                 if (ImGui::IsItemHovered())
-                    Theme::tooltip("How far apart two large prints may be (time and 40 ticks of\nprice) and still count as one working order.");
+                    Theme::tooltip("How far apart two large prints may be in time and still\nlink into one working order.");
+                // v2: user-chosen price proximity. Tight keeps an order on one
+                // shelf, Wide follows it climbing several shelves.
+                const char* const kSteps[] = {i18n::tr("Tight", i18n::fa_step_tight), i18n::tr("Normal", i18n::fa_step_normal), i18n::tr("Wide", i18n::fa_step_wide)};
+                static constexpr int kStepTicks[] = {20, 40, 80};
+                int si = rt_whale_step_ticks_ <= 20 ? 0 : rt_whale_step_ticks_ <= 40 ? 1 : 2;
+                const int next_s = Theme::menu_choice_row(i18n::tr("Price step", i18n::fa_whale_step), "rt_whale_step", kSteps, 3, si);
+                if (next_s != si) rt_whale_step_ticks_ = kStepTicks[next_s];
+                if (ImGui::IsItemHovered())
+                    Theme::tooltip("How far in price two clips may sit and still count as one\nworking order: Tight 20 ticks, Normal 40, Wide 80.");
                 Theme::end_menu_detail();
             }
             if (page.empty()) {
@@ -538,7 +547,7 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
             }
         } else if (!rt_mode_) {
             if (page == "Price levels") {
-        layer_section("PRICE LEVELS");
+        layer_section(i18n::tr("PRICE LEVELS", i18n::fa_sec_price_levels));
         if (layer_row(i18n::tr("Daily VWAP (UTC)", i18n::fa_l_vwap), session_vwap_, false)) {
             session_vwap_ = !session_vwap_; reference_update_time_ = -1;
         }
@@ -560,25 +569,25 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
             const bool time_views = ct_allows_time_overlays(chart_type_);
             if (vwap_anchor_ms_ || missing || !time_views) {
                 Theme::begin_menu_detail();
-                if (vwap_anchor_ms_ && Theme::menu_item(UiIcon::Close, "Clear anchored VWAP", nullptr, true, true)) {
+                if (vwap_anchor_ms_ && Theme::menu_item(UiIcon::Close, i18n::tr("Clear anchored VWAP", i18n::fa_clear_anchored_vwap), nullptr, true, true)) {
                     vwap_anchor_ms_ = 0; anchored_vwap_data_.clear();
                 }
                 if (missing && candles().is_loading()) {
-                    Theme::menu_note("Loading earlier candles\xe2\x80\xa6");
+                    Theme::menu_note(i18n::tr("Loading earlier candles\xe2\x80\xa6", i18n::fa_note_loading_candles));
                 } else if (missing) {
                     // Bounded, explicit read, ending at the observed replay clock.
-                    if (Theme::menu_item(UiIcon::Refresh, "Load earlier candles", "history missing", !candles().is_loading(), true))
+                    if (Theme::menu_item(UiIcon::Refresh, i18n::tr("Load earlier candles", i18n::fa_load_earlier), "history missing", !candles().is_loading(), true))
                         candles().request_historical(20160, reference_asof_);
                     if (ImGui::IsItemHovered())
                         Theme::tooltip("Levels stop where bars are missing.\nCoarse candles may not align to the period.");
                 }
-                if (!time_views) Theme::menu_note("Time-based chart views only.");
+                if (!time_views) Theme::menu_note(i18n::tr("Time-based chart views only.", i18n::fa_note_time_views));
                 Theme::end_menu_detail();
             }
         }
             } else {
                 if (page.empty()) {
-                    if (Theme::menu_item(UiIcon::ChevronRight, "Price levels", nullptr, true, true)) detail = "Price levels";
+                    if (Theme::menu_item(UiIcon::ChevronRight, i18n::tr("Price levels", i18n::fa_price_levels_item), nullptr, true, true)) detail = "Price levels";
                     ui_test::mark("overlay.price");
                     Theme::menu_separator();
                 }
@@ -594,7 +603,7 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
         }
         if (page == i18n::tr("Order book depth", i18n::fa_l_depth)) {
             Theme::begin_menu_detail();
-            if (Theme::menu_item(UiIcon::Gear, "Depth settings\xe2\x80\xa6")) {
+            if (Theme::menu_item(UiIcon::Gear, i18n::tr("Depth settings\xe2\x80\xa6", i18n::fa_depth_settings))) {
                 open_heatmap_settings_ = true;
                 ImGui::CloseCurrentPopup();
             }
@@ -618,24 +627,24 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
                     if (floor > 0) Theme::tooltip("Quote value a trade needs to draw. 0 = auto: a fixed reference at 8x typical recorded trade value (currently %.4g).", floor);
                     else           Theme::tooltip("Quote value a trade needs to draw. 0 = auto: 8x the market's typical trade size over the last minute (still calibrating).");
                 }
-                if (Theme::menu_item(UiIcon::Refresh, "Recalibrate bubble sizes", nullptr, true, true)) {
+                if (Theme::menu_item(UiIcon::Refresh, i18n::tr("Recalibrate bubble sizes", i18n::fa_recalibrate_bubbles), nullptr, true, true)) {
                     candle_bubble_size_reference_ = 0; candle_bubble_auto_floor_ = 0; candle_bubble_scale_ = {}; candle_bubble_scale_since_ms_ = 0;
                     candle_bubble_history_.reset();
                 }
                 if (ctx_.replay_mgr().is_active() || EducationBoot::instance().is_pack())
-                    Theme::menu_note("Replay bubbles show traversed trades.");
+                    Theme::menu_note(i18n::tr("Replay bubbles show traversed trades.", i18n::fa_note_replay_bubbles));
                 else if (pair_.exchange != "binancef")
-                    Theme::menu_note("Recent history: Binance futures only.");
+                    Theme::menu_note(i18n::tr("Recent history: Binance futures only.", i18n::fa_note_recent_binance));
                 else if (!Entitlements::is_pro())
-                    Theme::menu_note("Recent trade history requires Pro.");
+                    Theme::menu_note(i18n::tr("Recent trade history requires Pro.", i18n::fa_note_recent_pro));
                 else {
-                    if (Theme::menu_toggle("Recent trade history (6 h)", candle_bubble_history_enabled_)) {
+                    if (Theme::menu_toggle(i18n::tr("Recent trade history (6 h)", i18n::fa_recent_6h), candle_bubble_history_enabled_)) {
                         candle_bubble_history_enabled_ = !candle_bubble_history_enabled_;
                         if (!candle_bubble_history_enabled_) candle_bubble_history_.reset();
                     }
                     if (ImGui::IsItemHovered())
                         Theme::tooltip("Strongest non-overlapping prints; zoom in for more.\nMinimum value filters records without resizing them.");
-                    if (!candle_bubble_history_.error.empty() && Theme::menu_item(UiIcon::Refresh, "Retry history", nullptr, true, true))
+                    if (!candle_bubble_history_.error.empty() && Theme::menu_item(UiIcon::Refresh, i18n::tr("Retry history", i18n::fa_retry_history), nullptr, true, true))
                         candle_bubble_history_.reset();
                 }
         });
@@ -653,7 +662,7 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
         }
         if (page == "Volume profile (VPVR)") {
             Theme::begin_menu_detail();
-            if (Theme::menu_item(UiIcon::Gear, "Profile settings\xe2\x80\xa6")) {
+            if (Theme::menu_item(UiIcon::Gear, i18n::tr("Profile settings\xe2\x80\xa6", i18n::fa_profile_settings))) {
                 open_vpvr_settings_ = true;
                 ImGui::CloseCurrentPopup();
             }

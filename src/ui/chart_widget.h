@@ -496,6 +496,7 @@ private:
     // ─── Cross-venue + whale trail (self-host) ─────────────────────
     bool rt_whale_trail_enabled_ = false;   // link consecutive large prints into trails
     int  rt_whale_window_ms_ = 8000;        // max gap between linked clips (5s/8s/15s)
+    int  rt_whale_step_ticks_ = 40;         // max price step between linked clips (ticks)
     bool rt_basis_enabled_ = false;         // OKX-vs-chart-venue basis ribbon
     std::deque<std::pair<int64_t, double>> rt_basis_history_;  // (ts_ms, basis bps)
     int64_t rt_basis_last_sample_ms_ = 0;

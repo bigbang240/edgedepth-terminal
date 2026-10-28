@@ -1,5 +1,6 @@
 #include "ui/chart_widget.h"
 #include "core/activity_strip.h"
+#include "core/i18n.h"
 #include "core/terminal_request.h"
 #include "core/candle_manager.h"
 #include "core/orderbook_manager.h"
@@ -127,11 +128,11 @@ void ChartWidget::render_bookmark_action() {
 }
 void ChartWidget::render_activity_settings() {
     if(!Entitlements::is_admin()||pair_.exchange!="binancef")return;
-    if(Theme::menu_toggle("Activity strip",activity_enabled_,false))activity_enabled_=!activity_enabled_;
+    if(Theme::menu_toggle(i18n::tr("Activity strip",i18n::fa_activity_strip),activity_enabled_,false))activity_enabled_=!activity_enabled_;
     if(activity_enabled_){
         Theme::begin_menu_detail();
-        if(Theme::begin_menu_group("Options##activity")){
-            ImGui::Checkbox("Trades multiple",&activity_trades_);ImGui::Checkbox("Volume multiple",&activity_volume_);
+        if(Theme::begin_menu_group(i18n::tr("Options##activity",i18n::fa_options_activity))){
+            ImGui::Checkbox(i18n::tr("Trades multiple",i18n::fa_trades_multiple),&activity_trades_);ImGui::Checkbox(i18n::tr("Volume multiple",i18n::fa_volume_multiple),&activity_volume_);
             ImGui::Checkbox("5m open interest",&activity_oi_);ImGui::Checkbox("5m taker buys",&activity_buy_);
             ImGui::Checkbox("State shading",&activity_shading_);ImGui::Checkbox("Book balance (+/-2%)",&activity_book_enabled_);
             if(ImGui::IsItemHovered())Theme::tooltip("Bid dollars / (bid + ask dollars) within 2%% of mid. Recorded depth received here; gaps remain blank.");
@@ -139,9 +140,9 @@ void ChartWidget::render_activity_settings() {
         }
         Theme::end_menu_detail();
     }
-    if(Theme::menu_toggle("Watcher lines",alert_lines_,false))alert_lines_=!alert_lines_;
-    if(Theme::menu_toggle("Watcher markers",alert_markers_,false))alert_markers_=!alert_markers_;
-    if((alert_lines_||alert_markers_)&&activity_data_.alerts_status=="unavailable")Theme::menu_note("Watcher source unavailable");
+    if(Theme::menu_toggle(i18n::tr("Watcher lines",i18n::fa_watcher_lines),alert_lines_,false))alert_lines_=!alert_lines_;
+    if(Theme::menu_toggle(i18n::tr("Watcher markers",i18n::fa_watcher_markers),alert_markers_,false))alert_markers_=!alert_markers_;
+    if((alert_lines_||alert_markers_)&&activity_data_.alerts_status=="unavailable")Theme::menu_note(i18n::tr("Watcher source unavailable",i18n::fa_watcher_source));
 }
 void ChartWidget::render_activity_strip() {
     if(!activity_visible())return;
