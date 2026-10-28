@@ -141,6 +141,11 @@ Json ChartWidget::save_settings() const {
     j["rt_whale_trail"] = rt_whale_trail_enabled_;  // self-host: linked large-print trails
     j["rt_whale_window_ms"] = rt_whale_window_ms_;
     j["rt_basis_okx"] = rt_basis_enabled_;          // self-host: OKX basis ribbon
+    j["rt_events"] = rt_events_enabled_;            // self-host: layer-events corner feed
+    j["rt_slip"] = rt_slip_enabled_;                // self-host: slippage cone
+    j["rt_slip_size"] = rt_slip_size_;
+    j["refill_alerts"] = refill_alerts_enabled_;    // self-host: consumed refill levels
+    j["refill_alert_usd"] = refill_alert_usd_;
     j["drawing_alerts"] = drawing_alerts_enabled_;
     j["cascade_alerts"] = cascade_alerts_enabled_;
     // Phase 5: execution & risk (globals persisted via every chart row)
@@ -333,6 +338,11 @@ void ChartWidget::load_settings(const Json& j) {
     workspace::read(j, "rt_whale_trail", rt_whale_trail_enabled_);   // absent in older saves: keeps off
     workspace::read(j, "rt_whale_window_ms", rt_whale_window_ms_, 3000, 30000);
     workspace::read(j, "rt_basis_okx", rt_basis_enabled_);
+    workspace::read(j, "rt_events", rt_events_enabled_);           // absent in older saves: keeps on
+    workspace::read(j, "rt_slip", rt_slip_enabled_);               // absent in older saves: keeps off
+    workspace::read(j, "rt_slip_size", rt_slip_size_, 0.1, 100000.0);
+    workspace::read(j, "refill_alerts", refill_alerts_enabled_);
+    workspace::read(j, "refill_alert_usd", refill_alert_usd_, 10000.0, 100000000.0);
     workspace::read(j, "drawing_alerts", drawing_alerts_enabled_); // absent in older saves: keeps the default (on)
     workspace::read(j, "cascade_alerts", cascade_alerts_enabled_);
     // Phase 5: execution & risk (globals; every chart row carries the same values)

@@ -73,6 +73,8 @@ void ChartWidget::reset_realtime_extras() {
     rt_walls_.reset();
     rt_walls_serial_ = 0;
     rt_wall_marks_.clear();
+    rt_event_feed_.reset();
+    last_refill_alert_ms_ = 0;
 }
 
 // Layers rows: Walls (with Pulled walls under it) in ORDER BOOK SIGNALS, CVD in REAL-TIME VIEW. Free wherever
@@ -557,10 +559,15 @@ static std::string rt_upper_symbol(const Terminal::Pair& pair) {
 
 void ChartWidget::on_liquidation_observed(const Terminal::Liquidation& l) {
     cascade_detector_.observe(l.timestamp_ms, l.price, l.is_buy);
-    if (liq_alerts_enabled_) {
-        const double usd = l.qty > 0.0 && l.price > 0.0 ? l.qty * l.price : 0.0;
-        if (usd >= liq_alert_usd_)
+    const double usd = l.qty > 0.0 && l.price > 0.0 ? l.qty * l.price : 0.0;
+    if (usd >= liq_alert_usd_) {
+        if (liq_alerts_enabled_)
             alert_engine_.observe_liquidation(l.timestamp_ms, l.price, usd, l.is_buy);
+        // The events widget collects regardless of the alert toggle.
+        char txt[96];
+        snprintf(txt, sizeof(txt), "%s %s @ %.0f", rt_fmt_usd(usd).c_str(),
+                 l.is_buy ? "SHORTS" : "LONGS", l.price);
+        rt_event_feed_.push(l.timestamp_ms, RtEvent::Kind::liq, l.is_buy, usd, txt);
     }
     pump_cascade_alerts();
 }
@@ -568,6 +575,10 @@ void ChartWidget::on_liquidation_observed(const Terminal::Liquidation& l) {
 void ChartWidget::pump_cascade_alerts() {
     CascadeChain chain;
     while (cascade_detector_.take_finished(chain)) {
+        // The events widget collects finished chains regardless of the toggle.
+        char txt[96];
+        snprintf(txt, sizeof(txt), "x%d \xc2\xb7 %.1fs", chain.count, chain.span_s());
+        rt_event_feed_.push(chain.end_ms, RtEvent::Kind::cascade, chain.buy_side, 0.0, txt);
         if (!cascade_alerts_enabled_ || chain.alerted) continue;
         chain.alerted = true;
         char span[24];
@@ -608,8 +619,9 @@ void ChartWidget::pump_rt_alerts() {
 // Feed every pull the tracker has classified since the last scan exactly once
 // (newest first; the watermark stops the walk). First scan after enable/reset
 // fast-forwards to the newest pull so pre-toggle pulls never burst as stale.
+// The events widget collects every pull; the toast queue only when its toggle
+// is on, so the scan itself no longer gates on wall_alerts_enabled_.
 void ChartWidget::scan_new_wall_pulls() {
-    if (!wall_alerts_enabled_) return;
     if (last_pull_alert_ms_ == 0) {
         rt_walls_.for_each_pull_newest([&](const rt_walls::Pull& p) {
             last_pull_alert_ms_ = p.wall.end_ms;  // arm: skip pre-toggle pulls
@@ -621,6 +633,12 @@ void ChartWidget::scan_new_wall_pulls() {
     rt_walls_.for_each_pull_newest([&](const rt_walls::Pull& p) {
         if (p.wall.end_ms <= last_pull_alert_ms_) return false;  // seen already
         alert_engine_.observe_wall_pull(p.wall.end_ms, p.wall.price, p.vanished, p.wall.bid);
+        char txt[96];
+        snprintf(txt, sizeof(txt), "%s pulled %s @ %.0f", p.wall.bid ? "bid" : "ask",
+                 rt_fmt_usd(p.vanished * p.wall.price).c_str(), p.wall.price);
+        // A bid wall vanishing removes support (bearish); an ask wall going is relief.
+        rt_event_feed_.push(p.wall.end_ms, RtEvent::Kind::wall, !p.wall.bid,
+                            p.vanished * p.wall.price, txt);
         if (p.wall.end_ms > newest) newest = p.wall.end_ms;
         return true;
     });
@@ -629,9 +647,10 @@ void ChartWidget::scan_new_wall_pulls() {
 
 void ChartWidget::render_realtime_cascades(ImDrawList* dl, const ImPlotRect& limits) {
     cascade_detector_.sweep(int64_t(rt_clock_ms_));
-    pump_cascade_alerts();  // chains closed by the quiet-gap sweep alert here
-    scan_new_wall_pulls();  // S2: newly classified pulls enter the alert queue
-    pump_rt_alerts();       // S2: drain big-liq + wall-pull queues to the toast
+    pump_cascade_alerts();   // chains closed by the quiet-gap sweep alert here
+    scan_new_wall_pulls();   // S2: newly classified pulls enter the alert queue
+    scan_refill_consumed();  // self-host: consumed refill levels feed + alert
+    pump_rt_alerts();        // S2: drain big-liq + wall-pull queues to the toast
     const ImU32 band = Theme::u32(Theme::Tokens::WARN, 0.10f);
     const ImU32 edge = Theme::u32(Theme::Tokens::WARN, 0.55f);
     const ImU32 pill = Theme::u32(Theme::Tokens::WARN, 0.85f);
@@ -1020,5 +1039,227 @@ void ChartWidget::render_realtime_basis(ImDrawList* dl, const ImPlotRect& limits
     dl->AddRectFilled(ImVec2(a.x - 6.0f, a.y - 2.0f), ImVec2(a.x + ts.x + 6.0f, a.y + ts.y + 2.0f),
                       Theme::u32(Theme::Tokens::BASE), 4.0f);
     dl->AddText(ImVec2(a.x, a.y), ImGui::GetColorU32(line_col), label);
+    ImGui::PopFont();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// [SELF-HOST] Refill-consumed sweep: the refill store closes a level as
+// exhausted when the liquidity that kept refilling there is traded through.
+// Every such close enters the events feed; when the toggle is on and the
+// traded value clears the threshold, the shared toast + Notification + beep
+// path fires too. Watermark walk over closed_ms, armed on the first scan so
+// pre-toggle closes never burst as stale (same pattern as the wall pulls).
+// ═══════════════════════════════════════════════════════════════════════════════
+void ChartWidget::scan_refill_consumed() {
+    const refill::Market* m = refill::store().find(pair_.exchange, pair_.symbol);
+    if (!m || m->levels.empty()) return;
+    const bool armed = last_refill_alert_ms_ != 0;
+    int64_t newest = last_refill_alert_ms_;
+    for (const auto& l : m->levels) {
+        if (l.status != refill::End::exhausted) continue;
+        const int64_t at = l.closed_ms > 0 ? l.closed_ms : l.updated_ms;
+        if (at <= 0) continue;
+        if (!armed) {
+            if (at > newest) newest = at;  // arm quietly past the backlog
+            continue;
+        }
+        if (at <= last_refill_alert_ms_ || !(l.executed_usd >= refill_alert_usd_)) {
+            if (at > newest) newest = at;
+            continue;
+        }
+        if (at > newest) newest = at;
+        char price[48], txt[96];
+        fmt_.format_price(price, sizeof(price), l.price);
+        snprintf(txt, sizeof(txt), "%s consumed %s @ %s",
+                 l.side == refill::Side::bid ? "bid" : "ask",
+                 rt_fmt_usd(l.executed_usd).c_str(), price);
+        // A consumed bid level removes support (bearish); an ask gone is relief.
+        rt_event_feed_.push(at, RtEvent::Kind::refill, l.side != refill::Side::bid,
+                            l.executed_usd, txt);
+        if (refill_alerts_enabled_) {
+            alert_toast_msg_ = rt_upper_symbol(pair_) + " refill level consumed " +
+                               rt_fmt_usd(l.executed_usd) + " @ " + price;
+            alert_toast_until_ = ImGui::GetTime() + 6.0;
+            rt_fire_alert("EdgeDepth refill", alert_toast_msg_, 440.0f);
+        }
+    }
+    last_refill_alert_ms_ = newest;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// [SELF-HOST] Layer-events widget: the recent layer events (cascades, threshold
+// liquidations, pulled walls, consumed refill levels) as a compact corner feed
+// on the real-time plot. Passive by design: it collects whatever the alert
+// toggles hold, newest first, fading with age. Sits in the top-right corner
+// next to the walls table; when that table is on, the feed docks under the
+// status chip on the left so the two panels never fight for the corner.
+// ═══════════════════════════════════════════════════════════════════════════════
+void ChartWidget::render_realtime_event_feed(ImDrawList* dl, const ImPlotRect& limits) {
+    (void)limits;
+    if (!rt_events_enabled_ || !rt_mode_ || rt_event_feed_.empty()) return;
+    const ImVec2 pos = ImPlot::GetPlotPos(), size = ImPlot::GetPlotSize();
+    if (size.x < 240.0f || size.y < 180.0f) return;
+    ImGui::PushFont(Theme::Fonts::mono_sm());
+    const float lh = ImGui::GetTextLineHeight();
+    constexpr int kMaxRows = 6;
+    char age[kMaxRows][16];
+    const char* tags[kMaxRows];
+    const char* texts[kMaxRows];
+    ImU32 tag_col[kMaxRows], ink_col[kMaxRows];
+    int rows = 0;
+    float text_w = 0.0f, tag_w = 0.0f;
+    rt_event_feed_.for_each([&](const RtEvent& e) {
+        if (rows >= kMaxRows) return;
+        const int64_t secs = std::max<int64_t>(0, (int64_t(rt_clock_ms_) - e.ts_ms) / 1000);
+        if (secs >= 3600) std::snprintf(age[rows], sizeof(age[rows]), "%lldh",
+                                        (long long)(secs / 3600));
+        else if (secs >= 60) std::snprintf(age[rows], sizeof(age[rows]), "%lldm",
+                                           (long long)(secs / 60));
+        else std::snprintf(age[rows], sizeof(age[rows]), "%llds", (long long)secs);
+        switch (e.kind) {
+            case RtEvent::Kind::cascade: tags[rows] = "CASCADE"; break;
+            case RtEvent::Kind::wall:    tags[rows] = "WALL";    break;
+            case RtEvent::Kind::refill:  tags[rows] = "REFILL";  break;
+            default:                     tags[rows] = "LIQ";     break;
+        }
+        texts[rows] = e.text;
+        const ImVec4& side = e.bull ? Theme::Tokens::UP : Theme::Tokens::DOWN;
+        tag_col[rows] = Theme::u32(e.kind == RtEvent::Kind::cascade ? Theme::Tokens::WARN : side);
+        const float fade = 1.0f - 0.09f * float(rows);
+        ink_col[rows] = ImGui::GetColorU32(ImVec4(Theme::Tokens::TX1.x, Theme::Tokens::TX1.y,
+                                                  Theme::Tokens::TX1.z, fade));
+        text_w = std::max(text_w, ImGui::CalcTextSize(e.text).x);
+        tag_w = std::max(tag_w, ImGui::CalcTextSize(tags[rows]).x);
+        ++rows;
+    });
+    if (!rows) { ImGui::PopFont(); return; }
+    const float age_w = ImGui::CalcTextSize("00m").x;
+    const float head_w = ImGui::CalcTextSize("LAYER EVENTS").x;
+    const float width = 8.0f + tag_w + 8.0f + text_w + 8.0f + age_w + 10.0f;
+    const float height = 5.0f + lh + 3.0f + float(rows) * (lh + 3.0f) + 4.0f;
+    const bool walls_table = rt_walls_table_enabled_ && rt_walls_enabled_;
+    const float x = walls_table ? pos.x + 10.0f : pos.x + size.x - width - 8.0f;
+    const float y = walls_table ? pos.y + 66.0f : pos.y + 8.0f;
+    dl->AddRectFilled(ImVec2(x, y), ImVec2(x + width, y + height),
+                      Theme::u32(Theme::Tokens::PANEL, 0.90f), Theme::Radius::R2);
+    dl->AddRect(ImVec2(x, y), ImVec2(x + width, y + height),
+                Theme::u32(Theme::Tokens::BD2), Theme::Radius::R2, 0, 1.0f);
+    dl->AddText(ImVec2(x + 8.0f, y + 5.0f), Theme::u32(Theme::Tokens::TX2), "LAYER EVENTS");
+    dl->AddLine(ImVec2(x + 6.0f, y + 5.0f + lh + 1.0f), ImVec2(x + width - 6.0f, y + 5.0f + lh + 1.0f),
+                Theme::u32(Theme::Tokens::BD2), 1.0f);
+    float ry = y + 5.0f + lh + 3.0f;
+    for (int i = 0; i < rows; ++i) {
+        dl->AddText(ImVec2(x + 8.0f, ry), tag_col[i], tags[i]);
+        dl->AddText(ImVec2(x + 8.0f + tag_w + 8.0f, ry), ink_col[i], texts[i]);
+        dl->AddText(ImVec2(x + width - 8.0f - ImGui::CalcTextSize(age[i]).x, ry),
+                    Theme::u32(Theme::Tokens::TX3), age[i]);
+        ry += lh + 3.0f;
+    }
+    ImGui::PopFont();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// [SELF-HOST] Slippage cone: walk the live book for a simulated market order of
+// the configured size and draw where it would actually fill. The wedge between
+// the touch and the volume-weighted fill price is the expected slippage; dashed
+// lines mark both fills, the chip carries the numbers in bps. A walk that runs
+// out of stored rows reads "+" - the venue's book is deeper than the archive
+// keeps at the touch. Buys lift the asks (red side), sells hit the bids (green).
+// ═══════════════════════════════════════════════════════════════════════════════
+namespace {
+struct SlipWalk {
+    double vwap = 0.0, filled = 0.0;
+    bool complete = false, any = false;
+};
+SlipWalk slip_walk_side(const std::vector<Terminal::BookEntry>& levels, const size_t begin,
+                        const size_t end, const double size) {
+    SlipWalk w;
+    double notional = 0.0;
+    for (size_t i = begin; i < end && w.filled < size && i - begin < 300; ++i) {
+        const double q = levels[i].size;
+        if (!(q > 0) || !(levels[i].price > 0)) continue;
+        const double take = std::min(q, size - w.filled);
+        notional += take * levels[i].price;
+        w.filled += take;
+        w.any = true;
+    }
+    if (w.filled > 0) w.vwap = notional / w.filled;
+    w.complete = w.filled >= size * (1.0 - 1e-9);
+    return w;
+}
+}  // namespace
+
+void ChartWidget::render_realtime_slippage(ImDrawList* dl, const ImPlotRect& limits) {
+    if (!rt_slip_enabled_ || !rt_mode_ || !rt_book_valid_ || !rt_latest_) return;
+    if (!(rt_slip_size_ > 0)) return;
+    const auto& book = *rt_latest_;
+    if (book.levels.empty() || !(book.bid > 0) || !(book.ask > book.bid)) return;
+    // Archived rows: bids fill the head (best first), asks the tail (best first);
+    // the touch prices split them.
+    size_t split = 0;
+    while (split < book.levels.size() && book.levels[split].price < book.ask) ++split;
+    const SlipWalk ask_walk = slip_walk_side(book.levels, split, book.levels.size(), rt_slip_size_);
+    const SlipWalk bid_walk = slip_walk_side(book.levels, 0, split, rt_slip_size_);
+    if (!ask_walk.any && !bid_walk.any) return;
+    const ImVec2 pos = ImPlot::GetPlotPos(), size = ImPlot::GetPlotSize();
+    if (size.x <= 0 || size.y <= 0) return;
+    const float edge = ImPlot::PlotToPixels(double(rt_clock_ms_), 0).x;
+    if (edge < pos.x + 2.0f || edge > pos.x + size.x - 40.0f) return;  // live edge off-view
+    const float run = 56.0f;  // cone length in px
+    const auto dashed = [&](const float y0, const float y1, const ImU32 col) {
+        for (float d = 0.0f; d < run + 20.0f; d += 8.0f)
+            dl->AddLine(ImVec2(edge + d, y0), ImVec2(std::min(edge + d + 4.0f, edge + run + 20.0f), y1),
+                        col, 1.1f);
+    };
+    ImGui::PushFont(Theme::Fonts::mono_sm());
+    char chip[80];
+    if (ask_walk.any && bid_walk.any) {
+        const float y_ask_touch = ImPlot::PlotToPixels(0, book.ask).y;
+        const float y_bid_touch = ImPlot::PlotToPixels(0, book.bid).y;
+        const float y_ask_fill = ImPlot::PlotToPixels(0, ask_walk.vwap).y;
+        const float y_bid_fill = ImPlot::PlotToPixels(0, bid_walk.vwap).y;
+        const double buy_bps = (ask_walk.vwap - book.ask) / book.ask * 10000.0;
+        const double sell_bps = (book.bid - bid_walk.vwap) / book.bid * 10000.0;
+        // Wedges: touch at the live edge opening into the fill level.
+        dl->AddTriangleFilled(ImVec2(edge, y_ask_touch), ImVec2(edge + run, y_ask_fill),
+                              ImVec2(edge + run, y_ask_touch), Theme::u32(Theme::Tokens::DOWN, 0.10f));
+        dl->AddTriangleFilled(ImVec2(edge, y_bid_touch), ImVec2(edge + run, y_bid_fill),
+                              ImVec2(edge + run, y_bid_touch), Theme::u32(Theme::Tokens::UP, 0.10f));
+        dashed(y_ask_fill, y_ask_fill, Theme::u32(Theme::Tokens::DOWN, 0.65f));
+        dashed(y_bid_fill, y_bid_fill, Theme::u32(Theme::Tokens::UP, 0.65f));
+        const char* plus_buy = ask_walk.complete ? "" : "+";
+        const char* plus_sell = bid_walk.complete ? "" : "+";
+        snprintf(chip, sizeof(chip), "%g %s \xc2\xb7 slip buy %.1f%s sell %.1f%s bps",
+                 rt_slip_size_, realtime_base_asset(), buy_bps, plus_buy, sell_bps, plus_sell);
+        const ImVec2 ts = ImGui::CalcTextSize(chip);
+        float cy = 0.5f * (y_ask_fill + y_bid_fill) - 0.5f * ts.y;
+        cy = std::clamp(cy, pos.y + 4.0f, pos.y + size.y - ts.y - 4.0f);
+        float cx = std::clamp(edge + run + 26.0f, pos.x + 4.0f, pos.x + size.x - ts.x - 12.0f);
+        dl->AddRectFilled(ImVec2(cx - 6.0f, cy - 2.0f), ImVec2(cx + ts.x + 6.0f, cy + ts.y + 2.0f),
+                          Theme::u32(Theme::Tokens::BASE, 0.82f), 4.0f);
+        dl->AddText(ImVec2(cx, cy), Theme::u32(Theme::Tokens::TX1), chip);
+    } else {
+        // Only one side of the book is reachable at this size.
+        const bool buy_side = ask_walk.any;
+        const double vwap = buy_side ? ask_walk.vwap : bid_walk.vwap;
+        const double touch = buy_side ? book.ask : book.bid;
+        const float y_touch = ImPlot::PlotToPixels(0, touch).y;
+        const float y_fill = ImPlot::PlotToPixels(0, vwap).y;
+        const ImVec4& token = buy_side ? Theme::Tokens::DOWN : Theme::Tokens::UP;
+        dl->AddTriangleFilled(ImVec2(edge, y_touch), ImVec2(edge + run, y_fill),
+                              ImVec2(edge + run, y_touch), Theme::u32(token, 0.10f));
+        dashed(y_fill, y_fill, Theme::u32(token, 0.65f));
+        const double bps = buy_side ? (ask_walk.vwap - book.ask) / book.ask * 10000.0
+                                    : (book.bid - bid_walk.vwap) / book.bid * 10000.0;
+        snprintf(chip, sizeof(chip), "%g %s \xc2\xb7 slip %s %.1f%s bps", rt_slip_size_,
+                 realtime_base_asset(), buy_side ? "buy" : "sell", bps,
+                 (buy_side ? ask_walk.complete : bid_walk.complete) ? "" : "+");
+        const ImVec2 ts = ImGui::CalcTextSize(chip);
+        float cy = std::clamp(y_fill - 0.5f * ts.y, pos.y + 4.0f, pos.y + size.y - ts.y - 4.0f);
+        float cx = std::clamp(edge + run + 26.0f, pos.x + 4.0f, pos.x + size.x - ts.x - 12.0f);
+        dl->AddRectFilled(ImVec2(cx - 6.0f, cy - 2.0f), ImVec2(cx + ts.x + 6.0f, cy + ts.y + 2.0f),
+                          Theme::u32(Theme::Tokens::BASE, 0.82f), 4.0f);
+        dl->AddText(ImVec2(cx, cy), Theme::u32(Theme::Tokens::TX1), chip);
+    }
     ImGui::PopFont();
 }

@@ -27,6 +27,7 @@
 #include "core/cascade_detector.h"
 #include "core/liq_levels.h"
 #include "core/whale_trail.h"
+#include "core/rt_event_feed.h"
 #include <deque>
 #include <utility>
 #include "ui/realtime_dom_frame.h"
@@ -501,6 +502,20 @@ private:
     std::string rt_basis_inst_;             // cached okx instId for the charted pair
     void render_realtime_whale_trail(ImDrawList* dl, const ImPlotRect& limits);
     void render_realtime_basis(ImDrawList* dl, const ImPlotRect& limits);
+    // ─── Layer events widget + refill-consumed alerts (self-host) ───
+    // The feed collects every detected event regardless of the alert toggles;
+    // the corner widget is a passive recent-history view of the same data.
+    RtEventFeed rt_event_feed_;
+    bool rt_events_enabled_ = true;       // corner feed on the real-time plot
+    bool refill_alerts_enabled_ = false;  // notify when a refill level is consumed
+    double refill_alert_usd_ = 100000.0;  // consumed at/above this notional
+    int64_t last_refill_alert_ms_ = 0;    // watermark: each consumed level once
+    // ─── Slippage cone (self-host) ─────────────────────────────────
+    bool rt_slip_enabled_ = false;        // walk the live book for expected slippage
+    double rt_slip_size_ = 5.0;           // simulated market order size (base units)
+    void render_realtime_event_feed(ImDrawList* dl, const ImPlotRect& limits);
+    void render_realtime_slippage(ImDrawList* dl, const ImPlotRect& limits);
+    void scan_refill_consumed();          // watermark walk over the refill store
     bool cascade_alerts_enabled_ = true;  // toast + notification on liquidation cascades
     CascadeDetector cascade_detector_;    // Phase 2 S1: same-side liquidation chains
     AlertEngine alert_engine_;            // Phase 2 S2: threshold alert queues

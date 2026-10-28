@@ -44,7 +44,7 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
              std::string_view(label) == i18n::tr("Trade bubbles", i18n::fa_l_bubbles) || std::string_view(label) == i18n::tr("Order book depth", i18n::fa_l_depth) || std::string_view(label) == "Volume profile (VPVR)" ||
              std::string_view(label) == i18n::tr("Absorption bands", i18n::fa_l_absorption) ||
              std::string_view(label) == i18n::tr("Resting depth heat", i18n::fa_l_resting) ||
-             std::string_view(label) == "Whale trail");
+             std::string_view(label) == "Whale trail" || std::string_view(label) == "Slippage cone");
         bool open = false;
         const bool clicked = Theme::menu_layer(label, on, locked, tag, has_settings ? &open : nullptr);
         if (open) detail = label;
@@ -438,6 +438,20 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
             } else if (wants("Venue basis (OKX)")) {
                 Theme::menu_note("Cross-venue basis needs an OKX feed; this gateway\nserves Binance futures only.");
             }
+            layer_section("EXECUTION");
+            if (wants("Slippage cone") && layer_row("Slippage cone", rt_slip_enabled_, false))
+                rt_slip_enabled_ = !rt_slip_enabled_;
+            if (ImGui::IsItemHovered())
+                Theme::tooltip("Walk the live book for a simulated market order and draw\n"
+                               "where it would actually fill: the wedge between the touch\n"
+                               "and the dashed line is the expected slippage, bps on the chip.");
+            layer_section("EVENTS");
+            if (wants("Layer events") && layer_row("Layer events", rt_events_enabled_, false))
+                rt_events_enabled_ = !rt_events_enabled_;
+            if (ImGui::IsItemHovered())
+                Theme::tooltip("Corner feed of the recent layer events: cascades, threshold\n"
+                               "liquidations, pulled walls, consumed refill levels. Collects\n"
+                               "regardless of the alert toggles; the Real-time menu arms alerts.");
             if (page.empty())
                 Theme::menu_note("Alt+1..0 toggles these layers anywhere:\n1 depth, 2 bubbles, 3 trade line, 4 candles, 5 Heikin-Ashi,\n6 CVD, 7 est. liq, 8 resting heat, 9 refill, 0 walls.");
             layer_section("LAYER PRESETS");
@@ -498,6 +512,31 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
                     }
                 }
             }
+            }
+            // [SELF-HOST] Slippage-cone detail page: renders outside the
+            // page.empty() block (detail pages never render there - same
+            // structure as the resting-heat and whale-trail pages).
+            if (page == "Slippage cone") {
+                Theme::begin_menu_detail();
+                static const char* const kSizes[] = {"0.5", "1", "5", "10", "25"};
+                static constexpr double kSizeVals[] = {0.5, 1.0, 5.0, 10.0, 25.0};
+                int si = 2;
+                for (int i = 0; i < 5; ++i)
+                    if (std::abs(rt_slip_size_ - kSizeVals[i]) < 1e-9) si = i;
+                const int next_s = Theme::menu_choice_row("Preset size", "rt_slip_preset", kSizes, 5, si);
+                if (next_s != si) rt_slip_size_ = kSizeVals[next_s];
+                if (ImGui::IsItemHovered())
+                    Theme::tooltip("Quick sizes for the simulated market order.");
+                float custom = float(rt_slip_size_);
+                if (Theme::menu_field("Exact size", &custom, "%.1f", 1.0f))
+                    rt_slip_size_ = std::clamp(double(custom), 0.1, 10000.0);
+                if (ImGui::IsItemHovered())
+                    Theme::tooltip("Market order size to simulate, in base units. A plus sign\n"
+                                   "on the bps means the archived book ends before the size fills.");
+                Theme::menu_note("Fills are volume-weighted over the stored rows at the\n"
+                                 "touch - an estimate over the visible book, not the\n"
+                                 "venue's full depth.");
+                Theme::end_menu_detail();
             }
         } else if (!rt_mode_) {
             if (page == "Price levels") {

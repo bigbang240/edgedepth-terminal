@@ -203,6 +203,9 @@ void ChartWidget::apply_layer_preset(int preset) {
     cascade_alerts_enabled_ = true;
     liq_alerts_enabled_ = preset != 1;
     wall_alerts_enabled_ = preset == 2;
+    rt_events_enabled_ = true;
+    rt_slip_enabled_ = preset != 1;          // execution aid for scalp + research
+    refill_alerts_enabled_ = preset == 2;
     set_rt_candle_seconds(preset == 0 ? 1 : preset == 1 ? 60 : 5);
 }
 
@@ -221,7 +224,9 @@ workspace::Json ChartWidget::capture_layer_flags() const {
         {"peak_hold", rt_peak_hold_},        {"refill", rt_refill_enabled_},
         {"liq_strip", rt_liq_strip_},        {"liq_markers", rt_liq_markers_},
         {"alerts_cascade", cascade_alerts_enabled_}, {"alerts_liq", liq_alerts_enabled_},
-        {"alerts_wall", wall_alerts_enabled_},       {"tf", rt_candle_seconds_}};
+        {"alerts_wall", wall_alerts_enabled_},       {"alerts_refill", refill_alerts_enabled_},
+        {"events", rt_events_enabled_},              {"slip", rt_slip_enabled_},
+        {"tf", rt_candle_seconds_}};
 }
 
 void ChartWidget::apply_layer_flags(const workspace::Json& f) {
@@ -248,6 +253,9 @@ void ChartWidget::apply_layer_flags(const workspace::Json& f) {
     flag("alerts_cascade", cascade_alerts_enabled_);
     flag("alerts_liq", liq_alerts_enabled_);
     flag("alerts_wall", wall_alerts_enabled_);
+    flag("alerts_refill", refill_alerts_enabled_);
+    flag("events", rt_events_enabled_);
+    flag("slip", rt_slip_enabled_);
     if (rt_mode_) chart_type_ = rt_candles_ ? ChartType::Candles : ChartType::Line;
     const auto tf = f.find("tf");
     if (tf != f.end() && tf->is_number_integer())
@@ -355,6 +363,14 @@ void ChartWidget::render_realtime_settings() {
     if (Theme::menu_toggle("Wall pulls", wall_alerts_enabled_)) wall_alerts_enabled_ = !wall_alerts_enabled_;
     if (ImGui::IsItemHovered())
         Theme::tooltip("Notify when a tracked depth wall near price is pulled (eaten or cancelled).");
+    if (Theme::menu_toggle("Refill consumed", refill_alerts_enabled_)) refill_alerts_enabled_ = !refill_alerts_enabled_;
+    if (ImGui::IsItemHovered())
+        Theme::tooltip("Notify when a tracked refill level's liquidity is traded through\n(exhausted) and the traded value clears the threshold below.");
+    if (refill_alerts_enabled_) {
+        ImGui::SetNextItemWidth(170.0f);
+        if (ImGui::InputDouble("Refill threshold ($)", &refill_alert_usd_, 50000.0, 250000.0, "$%.0f"))
+            refill_alert_usd_ = refill_alert_usd_ < 10000.0 ? 10000.0 : refill_alert_usd_;
+    }
     if (Theme::menu_toggle("Drawing alerts", drawing_alerts_enabled_)) drawing_alerts_enabled_ = !drawing_alerts_enabled_;
     if (ImGui::IsItemHovered())
         Theme::tooltip("Notify when the price crosses a drawn line: horizontal lines and rays fire at\ntheir level, trendlines and rays project to the current time. The line stays armed.");
@@ -908,6 +924,10 @@ void ChartWidget::render_realtime() {
     // basis ribbon on top (it owns the plot's bottom band).
     render_realtime_whale_trail(dl, limits);
     render_realtime_basis(dl, limits);
+    // [SELF-HOST] execution + events: the slippage cone at the live edge, the
+    // layer-events corner feed last (a panel, on top of every overlay).
+    render_realtime_slippage(dl, limits);
+    render_realtime_event_feed(dl, limits);
     if (fresh && limits.X.Max > rt_clock_ms_) {
         const auto& book = *rt_latest_;
         // The dashed quotes stop where the current-depth projection stops.
