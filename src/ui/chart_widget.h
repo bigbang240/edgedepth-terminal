@@ -541,6 +541,7 @@ private:
     // rt_dom_frame_ after the plot publishes it. rt_dom_linked_ is this frame's
     // "ladder on screen": the price scale then keeps its rows readable.
     bool rt_dom_shown_ = true;
+    bool rt_dom_diff_ = true;   // depth ladder: flash rows whose resting size jumps or gets eaten
     bool rt_dom_linked_ = false;
     RealtimeDomLadder rt_dom_ladder_;
     RealtimePriceWindow rt_price_window_;

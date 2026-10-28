@@ -230,6 +230,57 @@ void RealtimeDomLadder::render(const RealtimeDOMFrame& frame, const PriceFormatt
         std::nth_element(depth_sizes_.begin(), at, depth_sizes_.end());
         depth_ref = *at / 0.36;   // sqrt(0.36) = 0.6
     }
+
+    // ── Depth-diff animation: compare resting sizes against the previous sample ──
+    // A real size change fires a flash: a jump of at least ~2% of the visible depth
+    // scale and 30% of the level, or half a level eaten (a consumed wall fades
+    // slower). Book samples arrive between frames, so identical frames no-op.
+    const float diff_dt = ImGui::GetIO().DeltaTime > 0.0f ? ImGui::GetIO().DeltaTime : 1.0f / 60.0f;
+    if (diff_animation && frame.bucket_size() != diffs_bucket_size_) {
+        diffs_.clear();
+        diffs_bucket_size_ = frame.bucket_size();
+    }
+    if (diff_animation) {
+        const auto fire = [&](double prev, double now, bool was_wall, float& flash,
+                              float& kind, double& diff_out, bool& slow) {
+            if (!(prev > 0.0 || now > 0.0)) return;
+            const double d = now - prev;
+            const double abs_ref = std::max(depth_ref * 0.02, 1e-12);
+            if (d > 0.0 && d >= abs_ref && d >= 0.30 * std::max(prev, now)) {
+                flash = 1.0f; kind = 1.0f; diff_out = d; slow = false;      // size added
+            } else if (d < 0.0 && prev > 0.0 && -d >= std::max(abs_ref, 0.5 * prev)) {
+                flash = 1.0f; kind = -1.0f; diff_out = d; slow = was_wall;  // size eaten
+            }
+        };
+        for (size_t i = 0; i < count; ++i) {
+            auto& st = diffs_[first_bucket + int64_t(i)];
+            fire(st.bid, rows_[i].bid, depth_ref > 0 && st.bid >= depth_ref,
+                 st.bid_flash, st.bid_kind, st.bid_diff, st.bid_slow);
+            fire(st.ask, rows_[i].ask, depth_ref > 0 && st.ask >= depth_ref,
+                 st.ask_flash, st.ask_kind, st.ask_diff, st.ask_slow);
+            st.bid = rows_[i].bid;
+            st.ask = rows_[i].ask;
+        }
+        // Decay every entry, on and off screen, so a scrolled-back row never pops hot.
+        for (auto& kv : diffs_) {
+            auto& cell = kv.second;
+            if (cell.bid_flash > 0.0f) {
+                cell.bid_flash = std::max(0.0f, cell.bid_flash - diff_dt / (cell.bid_slow ? 1.4f : 0.55f));
+                if (cell.bid_flash <= 0.0f) cell.bid_slow = false;
+            }
+            if (cell.ask_flash > 0.0f) {
+                cell.ask_flash = std::max(0.0f, cell.ask_flash - diff_dt / (cell.ask_slow ? 1.4f : 0.55f));
+                if (cell.ask_flash <= 0.0f) cell.ask_slow = false;
+            }
+        }
+        if (++sweep_frame_ >= 240) {
+            sweep_frame_ = 0;
+            for (auto it = diffs_.begin(); it != diffs_.end();) {
+                if (it->first < first_bucket || it->first > last_bucket) it = diffs_.erase(it);
+                else ++it;
+            }
+        }
+    }
     const float row_h = float(step / (frame.price_max - frame.price_min) * (frame.bottom - frame.top));
     const int64_t mid_row = row_index((frame.bid() + frame.ask()) * 0.5);
     const int64_t bid_row = row_index(frame.bid()), ask_row = row_index(frame.ask());
@@ -242,6 +293,20 @@ void RealtimeDomLadder::render(const RealtimeDOMFrame& frame, const PriceFormatt
         const float y0 = y - row_h * 0.5f, y1 = y + row_h * 0.5f;
         if (y1 < top || y0 > bottom) continue;
         if (int64_t(i) == mid_row) dl->AddRectFilled(ImVec2(org.x, y0), ImVec2(right, y1), u32(Tokens::ELEV));
+        // Depth-diff flashes: the row half of the changed side, tinted by what happened.
+        if (diff_animation) {
+            const auto it = diffs_.find(first_bucket + int64_t(i));
+            if (it != diffs_.end()) {
+                if (it->second.bid_flash > 0.0f)
+                    dl->AddRectFilled(ImVec2(org.x, y0), ImVec2(edges[2], y1),
+                        u32(it->second.bid_kind > 0 ? Tokens::UP : Tokens::DOWN,
+                            (it->second.bid_kind > 0 ? 0.16f : 0.22f) * it->second.bid_flash));
+                if (it->second.ask_flash > 0.0f)
+                    dl->AddRectFilled(ImVec2(edges[3], y0), ImVec2(right, y1),
+                        u32(it->second.ask_kind > 0 ? Tokens::UP : Tokens::DOWN,
+                            (it->second.ask_kind > 0 ? 0.16f : 0.22f) * it->second.ask_flash));
+            }
+        }
     }
     if (frame.refill) for (int k = 0; k < frame.refill->count; ++k) {
         const int64_t idx = row_index(frame.refill->marks[size_t(k)].price);
@@ -301,6 +366,31 @@ void RealtimeDomLadder::render(const RealtimeDOMFrame& frame, const PriceFormatt
             bar(c, y, v, max_flow, side, 0.14f, 0.32f, side, label);
         }
         dl->PopClipRect();
+    }
+    // The size change that fired each flash, signed, at the outer edge of the depth cell.
+    if (diff_animation && row_h >= 11.0f) {
+        for (size_t i = 0; i < count; ++i) {
+            const auto it = diffs_.find(first_bucket + int64_t(i));
+            if (it == diffs_.end()) continue;
+            const auto& st = it->second;
+            if (st.bid_flash <= 0.0f && st.ask_flash <= 0.0f) continue;
+            const float y = frame.price_y(frame.bucket_center(first_bucket + int64_t(i)));
+            const float ty = std::round(y - text_h * 0.5f);
+            char lbl[24];
+            if (st.bid_flash > 0.0f) {
+                ladder_quantity(st.bid_diff, true, lbl, sizeof(lbl), edges[2] - edges[1] - 12);
+                dl->AddText(ImVec2(edges[1] + 3.0f, ty),
+                    u32(st.bid_kind > 0 ? Tokens::UP : Tokens::DOWN,
+                        0.35f + 0.6f * st.bid_flash), lbl);
+            }
+            if (st.ask_flash > 0.0f) {
+                ladder_quantity(st.ask_diff, true, lbl, sizeof(lbl), edges[4] - edges[3] - 12);
+                const float tw = ImGui::CalcTextSize(lbl).x;
+                dl->AddText(ImVec2(edges[4] - tw - 3.0f, ty),
+                    u32(st.ask_kind > 0 ? Tokens::UP : Tokens::DOWN,
+                        0.35f + 0.6f * st.ask_flash), lbl);
+            }
+        }
     }
     // Walls the chart marks at its right edge: a side-coloured bar at the outer end of their depth cell.
     if (frame.walls) for (int k = 0; k < frame.walls->count; ++k) {

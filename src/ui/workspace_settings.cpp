@@ -130,6 +130,7 @@ Json ChartWidget::save_settings() const {
     j["candle_bubble_min"] = candle_bubble_min_;
     j["rt_trade_line"] = rt_trade_line_;
     j["rt_dom"] = rt_dom_shown_;
+    j["rt_dom_diff"] = rt_dom_diff_;
     j["rt_hollow_candles"] = rt_candles_hollow_;
     j["rt_heikin"] = rt_heikin_;
     j["rt_layer_preset"] = rt_layer_preset_;
@@ -265,6 +266,7 @@ Json ChartWidget::save_settings() const {
     s["imbalance_min_volume"] = m.imbalance_min_volume;
     s["stacked_levels"] = m.stacked_levels;
     s["imbalance_ratio"] = m.imbalance_ratio;
+    s["show_delta_divergence"] = m.show_delta_divergence;
     j["footprint"] = std::move(s); }
     { auto& m = ctx_.tpo_mgr(); Json s;
     s["session_period_hours"] = m.session_period_hours;
@@ -325,6 +327,7 @@ void ChartWidget::load_settings(const Json& j) {
     workspace::read(j, "candle_bubble_min", candle_bubble_min_, 0, 1000000000000.0);
     workspace::read(j, "rt_trade_line", rt_trade_line_);
     workspace::read(j, "rt_dom", rt_dom_shown_);
+    workspace::read(j, "rt_dom_diff", rt_dom_diff_);
     workspace::read(j, "rt_hollow_candles", rt_candles_hollow_);
     workspace::read(j, "rt_heikin", rt_heikin_);             // absent in older saves: keeps the default (off)
     workspace::read(j, "rt_layer_preset", rt_layer_preset_, -1, 2);
@@ -522,7 +525,7 @@ void ChartWidget::load_settings(const Json& j) {
         indicator_mgr_.load_layout(workspace::object(j, "indicator_layout"));
     }
     { auto& m = ctx_.footprint_mgr(); const auto& s = workspace::object(j, "footprint");
-    workspace::read(s, "mode", m.mode, 0, 3);
+    workspace::read(s, "mode", m.mode, 0, 4);
     workspace::read(s, "comparison", m.comparison, 0, 1);
     workspace::read(s, "ticks_per_row", m.ticks_per_row, 0, 100000);
     workspace::read(s, "show_imbalances", m.show_imbalances);
@@ -531,6 +534,7 @@ void ChartWidget::load_settings(const Json& j) {
     workspace::read(s, "imbalance_min_volume", m.imbalance_min_volume, 0, 1000000000000000.0);
     workspace::read(s, "stacked_levels", m.stacked_levels, 0, 10);
     workspace::read(s, "imbalance_ratio", m.imbalance_ratio, 1.5, 10);
+    workspace::read(s, "show_delta_divergence", m.show_delta_divergence);
     }
     { auto& m = ctx_.tpo_mgr(); const auto& s = workspace::object(j, "tpo");
     workspace::read(s, "session_period_hours", m.session_period_hours, 24, 168);

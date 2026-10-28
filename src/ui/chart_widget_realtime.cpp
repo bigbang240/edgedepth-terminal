@@ -311,6 +311,10 @@ void ChartWidget::render_realtime_settings() {
     Theme::menu_separator();
     if (Theme::menu_toggle(i18n::tr("Depth ladder", i18n::fa_depth_ladder), rt_dom_shown_)) rt_dom_shown_ = !rt_dom_shown_;
     ui_test::mark("rt.ladder");
+    if (rt_dom_shown_) {
+        if (Theme::menu_toggle(i18n::tr("Depth changes", i18n::fa_depth_changes), rt_dom_diff_)) rt_dom_diff_ = !rt_dom_diff_;
+        if (ImGui::IsItemHovered()) Theme::tooltip("Flash ladder rows whose resting size just jumped or was eaten.");
+    }
     if (Theme::menu_toggle(i18n::tr("Side panels", i18n::fa_side_panels), rt_show_standalone_)) rt_show_standalone_ = !rt_show_standalone_;
     if (ImGui::IsItemHovered()) Theme::tooltip("Show the separate DOM and trade panels beside this view.");
     if (Theme::menu_toggle(i18n::tr("Link charts", i18n::fa_link_charts), link_charts_enabled())) set_link_charts_enabled(!link_charts_enabled());

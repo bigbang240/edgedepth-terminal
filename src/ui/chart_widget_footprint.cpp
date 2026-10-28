@@ -74,6 +74,10 @@ void ChartWidget::render_footprint_overlay(double visible_x_min, double visible_
     const double pixels_per_candle = ImPlot::GetPlotSize().x / visible_candles;
     if (pixels_per_candle < 3.0) return;
 
+    // Delta divergence state: the last closed, reconciled candle with footprint data.
+    bool div_valid = false;
+    double div_high = 0.0, div_low = 0.0, div_delta = 0.0;
+
     // Zoom modes:
     //   zoomed_out_block: single colored rect per candle (no per-level detail)
     //                     Kicks in when candles are too narrow for text - matches MMT behavior
@@ -320,6 +324,58 @@ void ChartWidget::render_footprint_overlay(double visible_x_min, double visible_
                         IM_COL32(230, 230, 230, 255), delta_buf);
                 }
 
+            } else if (fp_mgr.mode == FootprintManager::Mode::Matrix) {
+                // Delta matrix: sells | buys | delta | volume as four columns.
+                const bool wide = cell_width >= 92.0f;
+                const float w_sell  = cell_width * 0.30f;
+                const float w_buy   = cell_width * 0.30f;
+                const float w_delta = wide ? cell_width * 0.22f : cell_width * 0.40f;
+                const float w_vol   = wide ? cell_width - w_sell - w_buy - w_delta : 0.0f;
+                const float si = max_vol > 0 ? std::sqrt(static_cast<float>(gl.sell_volume / max_vol)) : 0.0f;
+                const float bi = max_vol > 0 ? std::sqrt(static_cast<float>(gl.buy_volume / max_vol)) : 0.0f;
+                const float dn = max_abs_delta > 0 ? std::sqrt(static_cast<float>(std::abs(gl.delta) / max_abs_delta)) : 0.0f;
+                const float vi = max_vol > 0 ? std::sqrt(static_cast<float>(gl.total_volume / max_vol)) : 0.0f;
+
+                float cx = left;
+                const auto cell = [&](float w, ImU32 bg) {
+                    if (w > 0.5f)
+                        draw_list->AddRectFilled(ImVec2(cx, row_top), ImVec2(cx + w, row_bottom), bg);
+                };
+                // Dimmer siblings of the Cluster palette so the matrix reads as data, not noise.
+                cell(w_sell, IM_COL32(25 + int(100 * si), 14 + int(15 * si), 30 + int(45 * si), 235));
+                cell(w_buy,  IM_COL32(14 + int(15 * bi), 20 + int(42 * bi), 35 + int(92 * bi), 235));
+                cell(w_delta, gl.delta >= 0.0
+                    ? IM_COL32(12 + int(14 * dn), 22 + int(50 * dn), 34 + int(96 * dn), 235)
+                    : IM_COL32(26 + int(110 * dn), 14 + int(16 * dn), 30 + int(48 * dn), 235));
+                if (wide) cell(w_vol, IM_COL32(14 + int(16 * vi), 20 + int(40 * vi), 40 + int(92 * vi), 235));
+                cx += w_sell;
+                draw_list->AddLine(ImVec2(cx, row_top), ImVec2(cx, row_bottom), IM_COL32(100, 100, 120, 70), 1.0f);
+                cx += w_buy;
+                draw_list->AddLine(ImVec2(cx, row_top), ImVec2(cx, row_bottom), IM_COL32(100, 100, 120, 70), 1.0f);
+                cx += w_delta;
+                if (wide)
+                    draw_list->AddLine(ImVec2(cx, row_top), ImVec2(cx, row_bottom), IM_COL32(100, 100, 120, 70), 1.0f);
+
+                if (show_text && row_height >= fp_font_size * 0.5f) {
+                    char b_sell[16], b_buy[16], b_delta[16], b_vol[16];
+                    format_fp_volume(b_sell, sizeof(b_sell), gl.sell_volume);
+                    format_fp_volume(b_buy, sizeof(b_buy), gl.buy_volume);
+                    format_fp_volume(b_delta, sizeof(b_delta), gl.delta);
+                    const float text_y = row_top + (row_height - fp_font_size) * 0.5f;
+                    const auto put = [&](const char* txt, float x, float w, ImU32 ink) {
+                        const ImVec2 sz = font->CalcTextSizeA(fp_font_size, FLT_MAX, 0.0f, txt);
+                        draw_list->AddText(font, fp_font_size,
+                            ImVec2(x + (w - sz.x) * 0.5f, text_y), ink, txt);
+                    };
+                    put(b_sell, left, w_sell, IM_COL32(230, 215, 215, 255));
+                    put(b_buy, left + w_sell, w_buy, IM_COL32(215, 225, 240, 255));
+                    put(b_delta, left + w_sell + w_buy, w_delta, IM_COL32(230, 230, 230, 255));
+                    if (wide) {
+                        format_fp_volume(b_vol, sizeof(b_vol), gl.total_volume);
+                        put(b_vol, left + w_sell + w_buy + w_delta, w_vol, IM_COL32(210, 220, 215, 255));
+                    }
+                }
+
             } else { // Volume mode
                 float vi = std::sqrt(static_cast<float>(gl.total_volume / max_vol));
                 ImU32 bg = IM_COL32(14+int(20*vi), 20+int(50*vi), 40+int(115*vi), 230+int(25*vi));
@@ -373,6 +429,39 @@ void ChartWidget::render_footprint_overlay(double visible_x_min, double visible_
                                IM_COL32(120, 170, 200, 180), vf);
             draw_list->AddText(font, ff, ImVec2(sx + vs.x + 3.0f, footer_y),
                 mc->delta >= 0 ? IM_COL32(100, 180, 130, 180) : IM_COL32(180, 100, 100, 180), df);
+        }
+
+        // ── Delta divergence: price makes a new extreme while delta goes the other way ──
+        // Classic absorption tell. Closed, reconciled candles only - observed/live cells and
+        // the building candle are provisional by definition.
+        if (fp_mgr.show_delta_divergence && show_text && mc &&
+            !mc->provisional && !mc->observed_trades) {
+            if (div_valid) {
+                const double scale = std::max(std::abs(mc->delta), std::abs(div_delta));
+                const double diff = mc->delta - div_delta;
+                if (scale > 0.0 && std::abs(diff) >= 0.25 * scale) {
+                    constexpr float s = 4.0f, off = 6.0f;
+                    if (candle_high > div_high && diff < 0.0) {
+                        // Bearish: higher high on weaker delta.
+                        const ImVec2 at = ImPlot::PlotToPixels(candle_center, candle_high);
+                        draw_list->AddTriangleFilled(
+                            ImVec2(at.x - s, at.y - off - 2.0f * s),
+                            ImVec2(at.x + s, at.y - off - 2.0f * s),
+                            ImVec2(at.x, at.y - off), IM_COL32(210, 80, 80, 220));
+                    } else if (candle_low < div_low && diff > 0.0) {
+                        // Bullish: lower low on stronger (rising) delta.
+                        const ImVec2 at = ImPlot::PlotToPixels(candle_center, candle_low);
+                        draw_list->AddTriangleFilled(
+                            ImVec2(at.x - s, at.y + off + 2.0f * s),
+                            ImVec2(at.x + s, at.y + off + 2.0f * s),
+                            ImVec2(at.x, at.y + off), IM_COL32(80, 190, 120, 220));
+                    }
+                }
+            }
+            div_valid = true;
+            div_high = candle_high;
+            div_low = candle_low;
+            div_delta = mc->delta;
         }
     }
 
@@ -707,12 +796,14 @@ void ChartWidget::render_footprint_settings_popup() {
         auto& fp = ctx_.footprint_mgr();
 
         if (footprint_settings_panel_.tab("Mode")) {
-            const char* fp_modes[] = { "Cluster", "Delta", "Volume", "Profile" };
+            const char* fp_modes[] = { "Cluster", "Delta", "Volume", "Profile", "Matrix" };
             int mode_idx = static_cast<int>(fp.mode);
             ImGui::SetNextItemWidth(130);
-            if (ImGui::Combo("Mode##fp", &mode_idx, fp_modes, 4)) {
+            if (ImGui::Combo("Mode##fp", &mode_idx, fp_modes, 5)) {
                 fp.mode = static_cast<FootprintManager::Mode>(mode_idx);
             }
+            if (fp.mode == FootprintManager::Mode::Matrix && ImGui::IsItemHovered())
+                Theme::tooltip("Delta matrix: sells | buys | delta | volume per row.");
         }
         if (footprint_settings_panel_.tab("Imbalances")) {
             int comparison = static_cast<int>(fp.comparison);
@@ -748,6 +839,11 @@ void ChartWidget::render_footprint_settings_popup() {
             ImGui::Checkbox("Imbalance Highlights##fp", &fp.show_imbalances);
             ImGui::Checkbox("POC Marker##fp", &fp.show_poc);
             ImGui::Checkbox("V:/D: Footer##fp", &fp.show_summary);
+            ImGui::Checkbox("Delta divergence##fp", &fp.show_delta_divergence);
+            if (ImGui::IsItemHovered()) Theme::tooltip(
+                "Mark candles whose price makes a higher high or lower low\n"
+                "while delta moves the other way against the previous candle\n"
+                "(absorption). Closed, reconciled candles only.");
         }
         if (footprint_settings_panel_.tab("Sizing")) {
             ImGui::Text("Ticks Per Row");

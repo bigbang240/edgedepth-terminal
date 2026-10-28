@@ -60,6 +60,7 @@ public:
         Delta,      // Single column: delta per level
         Volume,     // Single column: total volume per level
         Profile,    // Aggregated sidebar histogram (all visible candles)
+        Matrix,     // Delta matrix: sells | buys | delta | volume per row
     };
 
     enum class Comparison { SamePrice, Diagonal };
@@ -166,6 +167,7 @@ public:
     bool  show_imbalances  = true;
     bool  show_poc         = true;
     bool  show_summary     = true;    // V: / D: footer per candle
+    bool  show_delta_divergence = true; // price HH/LL against a weaker delta vs the previous candle
     Comparison comparison = Comparison::SamePrice;
     double imbalance_min_volume = 0.0; // numerator volume, in feed units
     int stacked_levels = 0;           // 0 = off; otherwise at least 2

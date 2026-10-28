@@ -213,6 +213,7 @@ TABLE = [
     ("whole_session",  "Whole session",     "کل نشست"),
     ("heat_window",    "Heat window",       "پنجرهٔ حرارت"),
     ("depth_ladder",   "Depth ladder",      "نردبان عمق"),
+    ("depth_changes",  "Depth changes",     "تغییرات عمق"),
     ("side_panels",    "Side panels",       "پنل‌های کناری"),
     ("link_charts",    "Link charts",       "همگام‌سازی چارت‌ها"),
     ("candle_size",    "Candle size",       "اندازهٔ کندل"),

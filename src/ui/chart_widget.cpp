@@ -1230,6 +1230,7 @@ void ChartWidget::render() {
         ImGui::PushFont(Theme::Fonts::mono_sm());
         ImGui::BeginChild("##rt_dom_ladder", ImVec2(0, 0), false,
                           ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        rt_dom_ladder_.diff_animation = rt_dom_diff_;
         rt_dom_ladder_.render(rt_dom_frame_, fmt_, &rt_dom_shown_);
         ImGui::EndChild();
         ImGui::PopFont();
