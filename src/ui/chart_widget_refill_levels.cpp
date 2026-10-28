@@ -1,6 +1,7 @@
 // Refill levels in Real-time: the subscription, the rails on the chart, the ladder marks, the Layers row and the
 // status chip. The model, the access rule and the wire contract are in core/refill_levels.h.
 #include "ui/chart_widget.h"
+#include "core/i18n.h"
 #include "core/education_boot.h"
 #include "core/entitlements.h"
 #include "core/ui_test_marks.h"
@@ -259,20 +260,20 @@ void ChartWidget::render_refill_layer_row() {
     const refill::Access access = refill_access();
     const bool pack = refill_pack();
     if (pack || access == refill::Access::unsupported) {
-        Theme::menu_layer("Refill levels", false, false, pack ? "not in local replay" : "Binance futures only");
+        Theme::menu_layer(i18n::tr("Refill levels", i18n::fa_l_refill), false, false, pack ? "not in local replay" : "Binance futures only");
         if (ImGui::IsItemHovered())
             Theme::tooltip(pack ? "Refill levels come from the replay server, not local replays."
                                 : "Refill levels are on Binance futures only for now.");
         return;
     }
     if (access == refill::Access::locked || refill_server_locked()) {
-        if (Theme::menu_layer("Refill levels", false, true)) open_refill_upsell("click");
+        if (Theme::menu_layer(i18n::tr("Refill levels", i18n::fa_l_refill), false, true)) open_refill_upsell("click");
         if (ImGui::IsItemHovered())
             Theme::tooltip("Prices that keep getting hit and keep refilling.\nFree on BTC, Pro on every other market.");
         return;
     }
     const bool free_here = access == refill::Access::free_taste;
-    if (Theme::menu_layer("Refill levels", rt_refill_enabled_, false, free_here ? "free here" : nullptr))
+    if (Theme::menu_layer(i18n::tr("Refill levels", i18n::fa_l_refill), rt_refill_enabled_, false, free_here ? "free here" : nullptr))
         rt_refill_enabled_ = !rt_refill_enabled_;
     if (ImGui::IsItemHovered())
         Theme::tooltip("Prices that keep getting hit and keep refilling.\nObserved refills, not a hidden order or its size.%s",

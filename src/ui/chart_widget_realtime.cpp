@@ -1,4 +1,5 @@
 #include "ui/chart_widget.h"
+#include "core/i18n.h"
 #include "core/ui_test_marks.h"
 #include "core/position_sizing.h"
 #include "core/execution_bridge.h"
@@ -337,11 +338,12 @@ void ChartWidget::render_realtime_settings() {
             // [SELF-HOST] How much live history the browser keeps for scrolling
             // back / review. The zoom ceilings and the IndexedDB worker budget
             // follow RealtimeArchive::target_ms; raising it records from now on.
-            static const char* const kArchiveLabels[] = {"30 min", "2 h", "6 h", "12 h"};
+            const char* const kArchiveLabels[] = {i18n::tr("30 min", i18n::fa_arch_30m), i18n::tr("2 h", i18n::fa_arch_2h),
+                                                   i18n::tr("6 h", i18n::fa_arch_6h), i18n::tr("12 h", i18n::fa_arch_12h)};
             static constexpr int64_t kArchiveMs[] = {1800000, 2LL * 3600000, 6LL * 3600000, 12LL * 3600000};
             int idx = 0;
             for (int i = 1; i < 4; ++i) if (RealtimeArchive::target_ms >= kArchiveMs[i]) idx = i;
-            const int next = Theme::menu_choice_row("Archive depth", "rt_archive_depth", kArchiveLabels, 4, idx);
+            const int next = Theme::menu_choice_row(i18n::tr("Archive depth", i18n::fa_archive_depth), "rt_archive_depth", kArchiveLabels, 4, idx);
             if (next != idx) RealtimeArchive::set_target_ms(kArchiveMs[next]);
             if (ImGui::IsItemHovered())
                 Theme::tooltip("How much real-time history this browser records: 30 minutes up to 12 hours.\n"
@@ -363,7 +365,7 @@ void ChartWidget::render_realtime_settings() {
     if (Theme::menu_toggle("Wall pulls", wall_alerts_enabled_)) wall_alerts_enabled_ = !wall_alerts_enabled_;
     if (ImGui::IsItemHovered())
         Theme::tooltip("Notify when a tracked depth wall near price is pulled (eaten or cancelled).");
-    if (Theme::menu_toggle("Refill consumed", refill_alerts_enabled_)) refill_alerts_enabled_ = !refill_alerts_enabled_;
+    if (Theme::menu_toggle(i18n::tr("Refill consumed", i18n::fa_refill_consumed), refill_alerts_enabled_)) refill_alerts_enabled_ = !refill_alerts_enabled_;
     if (ImGui::IsItemHovered())
         Theme::tooltip("Notify when a tracked refill level's liquidity is traded through\n(exhausted) and the traded value clears the threshold below.");
     if (refill_alerts_enabled_) {

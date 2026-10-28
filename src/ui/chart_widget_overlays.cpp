@@ -29,7 +29,7 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
     const bool pro = Entitlements::is_pro();
     const bool absorption_supported = liquidity_response::supported(pair_.exchange, pair_.symbol);
     if (!detail.empty()) {
-        if (Theme::menu_item(UiIcon::ChevronLeft, "Back", nullptr, true, true)) detail.clear();
+        if (Theme::menu_item(UiIcon::ChevronLeft, i18n::tr("Back", i18n::fa_back), nullptr, true, true)) detail.clear();
         ui_test::mark("overlay.back");
         Theme::menu_separator();
     }
@@ -44,7 +44,7 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
              std::string_view(label) == i18n::tr("Trade bubbles", i18n::fa_l_bubbles) || std::string_view(label) == i18n::tr("Order book depth", i18n::fa_l_depth) || std::string_view(label) == "Volume profile (VPVR)" ||
              std::string_view(label) == i18n::tr("Absorption bands", i18n::fa_l_absorption) ||
              std::string_view(label) == i18n::tr("Resting depth heat", i18n::fa_l_resting) ||
-             std::string_view(label) == "Whale trail" || std::string_view(label) == "Slippage cone");
+             std::string_view(label) == i18n::tr("Whale trail", i18n::fa_l_whale_trail) || std::string_view(label) == i18n::tr("Slippage cone", i18n::fa_l_slippage));
         bool open = false;
         const bool clicked = Theme::menu_layer(label, on, locked, tag, has_settings ? &open : nullptr);
         if (open) detail = label;
@@ -338,11 +338,11 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
             }
             if (page == i18n::tr("Order book depth", i18n::fa_l_depth)) {
                 Theme::begin_menu_detail();
-                if (Theme::menu_item(UiIcon::Gear, "Depth settings\xe2\x80\xa6")) {
+                if (Theme::menu_item(UiIcon::Gear, i18n::tr("Depth settings\xe2\x80\xa6", i18n::fa_depth_settings))) {
                     open_heatmap_settings_ = true;
                     ImGui::CloseCurrentPopup();
                 }
-                if (Theme::menu_field("Opacity", &rt_depth_opacity_, "%.2f", 0.05f))
+                if (Theme::menu_field(i18n::tr("Opacity", i18n::fa_opacity), &rt_depth_opacity_, "%.2f", 0.05f))
                     rt_depth_opacity_ = std::clamp(rt_depth_opacity_, 0.05f, 1.0f);
                 if (ImGui::IsItemHovered())
                     Theme::tooltip("Fade the depth cells without turning the layer off -\nkeep trades and quotes readable on a busy book.");
@@ -373,7 +373,7 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
                 if (next != cap) rt_bubble_cap_ = kCapPx[next];
                 if (ImGui::IsItemHovered())
                     Theme::tooltip("How big the largest prints grow. Compact stops at 12 px, Standard at 24, Large at 32.");
-                if (Theme::menu_field("Opacity", &rt_bubble_alpha_, "%.2f", 0.05f))
+                if (Theme::menu_field(i18n::tr("Opacity", i18n::fa_opacity), &rt_bubble_alpha_, "%.2f", 0.05f))
                     rt_bubble_alpha_ = std::clamp(rt_bubble_alpha_, 0.05f, 1.0f);
                 if (ImGui::IsItemHovered())
                     Theme::tooltip("Fade every trade bubble (real-time and candle views) -\nkeep them as a background accent under the tape.");
@@ -381,18 +381,18 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
             }
             if (page == i18n::tr("Resting depth heat", i18n::fa_l_resting)) {
                 Theme::begin_menu_detail();
-                if (Theme::menu_field("Opacity", &rt_cum_opacity_, "%.2f", 0.05f))
+                if (Theme::menu_field(i18n::tr("Opacity", i18n::fa_opacity), &rt_cum_opacity_, "%.2f", 0.05f))
                     rt_cum_opacity_ = std::clamp(rt_cum_opacity_, 0.05f, 1.0f);
                 if (ImGui::IsItemHovered())
                     Theme::tooltip("Fade the gold resting-depth rows when they compete with\nthe depth cells underneath.");
                 Theme::end_menu_detail();
             }
-            if (page == "Whale trail") {
+            if (page == i18n::tr("Whale trail", i18n::fa_l_whale_trail)) {
                 Theme::begin_menu_detail();
-                static const char* const kWindows[] = {"5 s", "8 s", "15 s"};
+                const char* const kWindows[] = {i18n::tr("5 s", i18n::fa_whale_5s), i18n::tr("8 s", i18n::fa_whale_8s), i18n::tr("15 s", i18n::fa_whale_15s)};
                 static constexpr int kWindowMs[] = {5000, 8000, 15000};
                 int wi = rt_whale_window_ms_ <= 5000 ? 0 : rt_whale_window_ms_ <= 8000 ? 1 : 2;
-                const int next_w = Theme::menu_choice_row("Link window", "rt_whale_window", kWindows, 3, wi);
+                const int next_w = Theme::menu_choice_row(i18n::tr("Link window", i18n::fa_link_window), "rt_whale_window", kWindows, 3, wi);
                 if (next_w != wi) rt_whale_window_ms_ = kWindowMs[next_w];
                 if (ImGui::IsItemHovered())
                     Theme::tooltip("How far apart two large prints may be (time and 40 ticks of\nprice) and still count as one working order.");
@@ -416,48 +416,48 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
             if (layer_row(i18n::tr("Resting depth heat", i18n::fa_l_resting), rt_cum_depth_enabled_, false, "Alt+8")) rt_cum_depth_enabled_ = !rt_cum_depth_enabled_;
             if (ImGui::IsItemHovered())
                 Theme::tooltip("A second heat map: time-weighted resting depth per price (10-minute\nmemory). Gold rows are prices where orders have been sitting - shelves and\nwalls stand out from flicker. Hover a row for its size.");
-            layer_section("ORDER BOOK SIGNALS");
+            layer_section(i18n::tr("ORDER BOOK SIGNALS", i18n::fa_sec_ob_signals));
             render_refill_layer_row();
             render_realtime_wall_layer();
             // [SELF-HOST] Whale trail: consecutive large same-side prints linked
             // into a path over the heat. Reads straight from the bubble archive.
-            if (wants("Whale trail") && layer_row("Whale trail", rt_whale_trail_enabled_, false))
+            if (wants(i18n::tr("Whale trail", i18n::fa_l_whale_trail)) && layer_row(i18n::tr("Whale trail", i18n::fa_l_whale_trail), rt_whale_trail_enabled_, false))
                 rt_whale_trail_enabled_ = !rt_whale_trail_enabled_;
             if (ImGui::IsItemHovered())
                 Theme::tooltip("Consecutive large same-side clips linked into a trail: a working\n"
                                "order shows up as a path, scattered small flow stays unlinked.\n"
                                "Reads the same grouped prints the trade bubbles draw.");
-            layer_section("CROSS-VENUE");
+            layer_section(i18n::tr("CROSS-VENUE", i18n::fa_sec_cross_venue));
             if (ctx_.ticker_mgr().has_venue("okx")) {
-                if (wants("Venue basis (OKX)") && layer_row("Venue basis (OKX)", rt_basis_enabled_, false, "okx"))
+                if (wants(i18n::tr("Venue basis (OKX)", i18n::fa_l_venue_basis)) && layer_row(i18n::tr("Venue basis (OKX)", i18n::fa_l_venue_basis), rt_basis_enabled_, false, "okx"))
                     rt_basis_enabled_ = !rt_basis_enabled_;
                 if (ImGui::IsItemHovered())
                     Theme::tooltip("OKX perp last price vs this chart's mid, in bps, as a ribbon\n"
                                    "along the bottom. Premium above zero: OKX leads. Divergence\n"
                                    "spikes often mark where pressure started first.");
-            } else if (wants("Venue basis (OKX)")) {
-                Theme::menu_note("Cross-venue basis needs an OKX feed; this gateway\nserves Binance futures only.");
+            } else if (wants(i18n::tr("Venue basis (OKX)", i18n::fa_l_venue_basis))) {
+                Theme::menu_note(i18n::tr("Cross-venue basis needs an OKX feed; this gateway\nserves Binance futures only.", i18n::fa_note_okx));
             }
-            layer_section("EXECUTION");
-            if (wants("Slippage cone") && layer_row("Slippage cone", rt_slip_enabled_, false))
+            layer_section(i18n::tr("EXECUTION", i18n::fa_sec_execution));
+            if (wants(i18n::tr("Slippage cone", i18n::fa_l_slippage)) && layer_row(i18n::tr("Slippage cone", i18n::fa_l_slippage), rt_slip_enabled_, false))
                 rt_slip_enabled_ = !rt_slip_enabled_;
             if (ImGui::IsItemHovered())
                 Theme::tooltip("Walk the live book for a simulated market order and draw\n"
                                "where it would actually fill: the wedge between the touch\n"
                                "and the dashed line is the expected slippage, bps on the chip.");
-            layer_section("EVENTS");
-            if (wants("Layer events") && layer_row("Layer events", rt_events_enabled_, false))
+            layer_section(i18n::tr("EVENTS", i18n::fa_sec_events));
+            if (wants(i18n::tr("Layer events", i18n::fa_l_events)) && layer_row(i18n::tr("Layer events", i18n::fa_l_events), rt_events_enabled_, false))
                 rt_events_enabled_ = !rt_events_enabled_;
             if (ImGui::IsItemHovered())
                 Theme::tooltip("Corner feed of the recent layer events: cascades, threshold\n"
                                "liquidations, pulled walls, consumed refill levels. Collects\n"
                                "regardless of the alert toggles; the Real-time menu arms alerts.");
             if (page.empty())
-                Theme::menu_note("Alt+1..0 toggles these layers anywhere:\n1 depth, 2 bubbles, 3 trade line, 4 candles, 5 Heikin-Ashi,\n6 CVD, 7 est. liq, 8 resting heat, 9 refill, 0 walls.");
-            layer_section("LAYER PRESETS");
+                Theme::menu_note(i18n::tr("Alt+1..0 toggles these layers anywhere:\n1 depth, 2 bubbles, 3 trade line, 4 candles, 5 Heikin-Ashi,\n6 CVD, 7 est. liq, 8 resting heat, 9 refill, 0 walls.", i18n::fa_note_alt));
+            layer_section(i18n::tr("LAYER PRESETS", i18n::fa_sec_presets));
             {
-                static const char* kPresets[] = {"Scalp", "Swing", "Research"};
-                const int next = Theme::menu_choice_row("Layout", "rt_layer_preset", kPresets, 3,
+                const char* const kPresets[] = {i18n::tr("Scalp", i18n::fa_preset_scalp), i18n::tr("Swing", i18n::fa_preset_swing), i18n::tr("Research", i18n::fa_preset_research)};
+                const int next = Theme::menu_choice_row(i18n::tr("Layout", i18n::fa_layout), "rt_layer_preset", kPresets, 3,
                     rt_layer_preset_ >= 0 && rt_layer_preset_ <= 2 ? rt_layer_preset_ : -1);
                 if (next >= 0 && next != rt_layer_preset_) {
                     rt_layer_preset_ = next;
@@ -476,7 +476,7 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
             {
                 if (!layer_sets_.empty()) {
                     Theme::menu_separator();
-                    Theme::menu_section("MY LAYER SETS");
+                    Theme::menu_section(i18n::tr("MY LAYER SETS", i18n::fa_sec_my_sets));
                     std::vector<std::string> erase_names;
                     for (auto it = layer_sets_.begin(); it != layer_sets_.end(); ++it) {
                         const std::string name = it.key();
@@ -493,18 +493,18 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
                     }
                     for (const auto& name : erase_names) layer_sets_.erase(name);
                 }
-                if (Theme::menu_item(UiIcon::Plus, "Save current as set\xe2\x80\xa6", nullptr, true, true))
+                if (Theme::menu_item(UiIcon::Plus, i18n::tr("Save current as set\xe2\x80\xa6", i18n::fa_save_cur_set), nullptr, true, true))
                     layer_set_input_open_ = !layer_set_input_open_;
                 if (ImGui::IsItemHovered())
                     Theme::tooltip("Name and save the layers exactly as they are now,\nthen bring them back with one click from this menu.");
                 if (layer_set_input_open_) {
                     ImGui::SetNextItemWidth(158);
-                    const bool enter = ImGui::InputTextWithHint("##layerset_name", "Set name",
+                    const bool enter = ImGui::InputTextWithHint("##layerset_name", i18n::tr("Set name", i18n::fa_set_name),
                         layer_set_name_buf_, sizeof(layer_set_name_buf_));
                     const std::string candidate = layer_set_name_buf_;
                     const bool valid = !candidate.empty() && candidate.size() <= 24;
                     if ((valid && (enter || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter))) ||
-                        (valid && Theme::menu_item(UiIcon::Check, "Save set", nullptr, true, true))) {
+                        (valid && Theme::menu_item(UiIcon::Check, i18n::tr("Save set", i18n::fa_save_set), nullptr, true, true))) {
                         layer_sets_[candidate] = capture_layer_flags();
                         rt_layer_preset_ = -1;
                         layer_set_input_open_ = false;
@@ -516,26 +516,24 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
             // [SELF-HOST] Slippage-cone detail page: renders outside the
             // page.empty() block (detail pages never render there - same
             // structure as the resting-heat and whale-trail pages).
-            if (page == "Slippage cone") {
+            if (page == i18n::tr("Slippage cone", i18n::fa_l_slippage)) {
                 Theme::begin_menu_detail();
                 static const char* const kSizes[] = {"0.5", "1", "5", "10", "25"};
                 static constexpr double kSizeVals[] = {0.5, 1.0, 5.0, 10.0, 25.0};
                 int si = 2;
                 for (int i = 0; i < 5; ++i)
                     if (std::abs(rt_slip_size_ - kSizeVals[i]) < 1e-9) si = i;
-                const int next_s = Theme::menu_choice_row("Preset size", "rt_slip_preset", kSizes, 5, si);
+                const int next_s = Theme::menu_choice_row(i18n::tr("Preset size", i18n::fa_preset_size), "rt_slip_preset", kSizes, 5, si);
                 if (next_s != si) rt_slip_size_ = kSizeVals[next_s];
                 if (ImGui::IsItemHovered())
                     Theme::tooltip("Quick sizes for the simulated market order.");
                 float custom = float(rt_slip_size_);
-                if (Theme::menu_field("Exact size", &custom, "%.1f", 1.0f))
+                if (Theme::menu_field(i18n::tr("Exact size", i18n::fa_exact_size), &custom, "%.1f", 1.0f))
                     rt_slip_size_ = std::clamp(double(custom), 0.1, 10000.0);
                 if (ImGui::IsItemHovered())
                     Theme::tooltip("Market order size to simulate, in base units. A plus sign\n"
                                    "on the bps means the archived book ends before the size fills.");
-                Theme::menu_note("Fills are volume-weighted over the stored rows at the\n"
-                                 "touch - an estimate over the visible book, not the\n"
-                                 "venue's full depth.");
+                Theme::menu_note(i18n::tr("Fills are volume-weighted over the stored rows at the\ntouch - an estimate over the visible book, not the\nvenue's full depth.", i18n::fa_note_slip));
                 Theme::end_menu_detail();
             }
         } else if (!rt_mode_) {
@@ -669,7 +667,7 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
         const bool research = Entitlements::is_admin() || (!rt_mode_ && pair_.exchange == "binancef");
         if (research && page.empty()) {
             Theme::menu_separator();
-            if (Theme::menu_item(UiIcon::ChevronRight, "Research tools", nullptr, true, true)) detail = "Research tools";
+            if (Theme::menu_item(UiIcon::ChevronRight, i18n::tr("Research tools", i18n::fa_research_tools), nullptr, true, true)) detail = "Research tools";
             ui_test::mark("overlay.research");
         }
         if (research && page == "Research tools") {

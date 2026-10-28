@@ -3,6 +3,7 @@
 // planner and the selection are in core/refill_history.h; the access rule, the upsell and the hover wording are
 // shared with the Real-time layer (core/refill_levels.h, chart_widget_refill_levels.cpp).
 #include "ui/chart_widget.h"
+#include "core/i18n.h"
 #include "core/display_time_zone.h"
 #include "core/entitlements.h"
 #include "core/footprint_manager.h"
@@ -298,20 +299,20 @@ void ChartWidget::render_refill_history_layer_row() {
     const refill::Access access = refill_access();
     const bool pack = refill_pack();
     if (pack || access == refill::Access::unsupported) {
-        Theme::menu_layer("Refill levels", false, false, pack ? "not in local replay" : "Binance futures only");
+        Theme::menu_layer(i18n::tr("Refill levels", i18n::fa_l_refill), false, false, pack ? "not in local replay" : "Binance futures only");
         if (ImGui::IsItemHovered())
             Theme::tooltip(pack ? "Refill levels come from the replay server, not local replays."
                                 : "Refill levels are on Binance futures only for now.");
         return;
     }
     if (access == refill::Access::locked || refill_history_locked()) {
-        if (Theme::menu_layer("Refill levels", false, true)) open_refill_upsell("click");
+        if (Theme::menu_layer(i18n::tr("Refill levels", i18n::fa_l_refill), false, true)) open_refill_upsell("click");
         if (ImGui::IsItemHovered())
             Theme::tooltip("Prices that kept refilling as they got hit.\nFree on BTC, Pro on every other market.");
         return;
     }
     const bool free_here = access == refill::Access::free_taste;
-    if (Theme::menu_layer("Refill levels", candle_refill_enabled_, false, free_here ? "free here" : nullptr))
+    if (Theme::menu_layer(i18n::tr("Refill levels", i18n::fa_l_refill), candle_refill_enabled_, false, free_here ? "free here" : nullptr))
         candle_refill_enabled_ = !candle_refill_enabled_;
     const refill::history::Market* m =
         refill::history::store().find(pair_.exchange, pair_.symbol, ctx_.replay_mgr().is_active());

@@ -3,6 +3,7 @@
 // the chart's real-time state and draws. Automatic heatmap contrast lives in
 // the renderer (core/rt_contrast.h); the chart only passes its switch.
 #include "ui/chart_widget.h"
+#include "core/i18n.h"
 #include "core/candle_manager.h"
 #include "core/display_time_zone.h"
 #include "core/entitlements.h"
@@ -80,15 +81,15 @@ void ChartWidget::reset_realtime_extras() {
 // Layers rows: Walls (with Pulled walls under it) in ORDER BOOK SIGNALS, CVD in REAL-TIME VIEW. Free wherever
 // real-time itself is available.
 void ChartWidget::render_realtime_wall_layer() {
-    if (Theme::menu_layer("Walls", rt_walls_enabled_, false, "Alt+0")) rt_walls_enabled_ = !rt_walls_enabled_;
+    if (Theme::menu_layer(i18n::tr("Walls", i18n::fa_l_walls), rt_walls_enabled_, false, "Alt+0")) rt_walls_enabled_ = !rt_walls_enabled_;
     if (ImGui::IsItemHovered())
         Theme::tooltip("The largest resting orders away from the touch: at least 5x the usual level\nand larger than what the touch holds, standing 3 s or more. Marked at the right edge.");
     if (!rt_walls_enabled_) return;
     Theme::begin_menu_detail();
-    if (Theme::menu_toggle("Pulled walls", rt_pulls_enabled_)) rt_pulls_enabled_ = !rt_pulls_enabled_;
+    if (Theme::menu_toggle(i18n::tr("Pulled walls", i18n::fa_l_pulled_walls), rt_pulls_enabled_)) rt_pulls_enabled_ = !rt_pulls_enabled_;
     if (ImGui::IsItemHovered())
         Theme::tooltip("A wall that stood, then mostly vanished within a second near price\nwithout trading there. Larger squares mean more removed depth.\nSignificant and recent pulls stay visible, up to 30 minutes or 256 retained events.");
-    if (Theme::menu_toggle("Active walls table", rt_walls_table_enabled_)) rt_walls_table_enabled_ = !rt_walls_table_enabled_;
+    if (Theme::menu_toggle(i18n::tr("Active walls table", i18n::fa_l_walls_table), rt_walls_table_enabled_)) rt_walls_table_enabled_ = !rt_walls_table_enabled_;
     if (ImGui::IsItemHovered())
         Theme::tooltip("A compact table of the walls being tracked, top-right inside the plot:\nprice, size, multiple, age, distance from mid and how often the price traded into them.");
     Theme::end_menu_detail();
@@ -1134,7 +1135,8 @@ void ChartWidget::render_realtime_event_feed(ImDrawList* dl, const ImPlotRect& l
     });
     if (!rows) { ImGui::PopFont(); return; }
     const float age_w = ImGui::CalcTextSize("00m").x;
-    const float head_w = ImGui::CalcTextSize("LAYER EVENTS").x;
+    const char* head = i18n::tr("LAYER EVENTS", i18n::fa_events_header);
+    const float head_w = ImGui::CalcTextSize(head).x;
     const float width = 8.0f + tag_w + 8.0f + text_w + 8.0f + age_w + 10.0f;
     const float height = 5.0f + lh + 3.0f + float(rows) * (lh + 3.0f) + 4.0f;
     const bool walls_table = rt_walls_table_enabled_ && rt_walls_enabled_;
@@ -1144,7 +1146,7 @@ void ChartWidget::render_realtime_event_feed(ImDrawList* dl, const ImPlotRect& l
                       Theme::u32(Theme::Tokens::PANEL, 0.90f), Theme::Radius::R2);
     dl->AddRect(ImVec2(x, y), ImVec2(x + width, y + height),
                 Theme::u32(Theme::Tokens::BD2), Theme::Radius::R2, 0, 1.0f);
-    dl->AddText(ImVec2(x + 8.0f, y + 5.0f), Theme::u32(Theme::Tokens::TX2), "LAYER EVENTS");
+    dl->AddText(ImVec2(x + 8.0f, y + 5.0f), Theme::u32(Theme::Tokens::TX2), head);
     dl->AddLine(ImVec2(x + 6.0f, y + 5.0f + lh + 1.0f), ImVec2(x + width - 6.0f, y + 5.0f + lh + 1.0f),
                 Theme::u32(Theme::Tokens::BD2), 1.0f);
     float ry = y + 5.0f + lh + 3.0f;
