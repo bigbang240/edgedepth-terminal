@@ -930,6 +930,7 @@ void ChartWidget::render_realtime() {
     // basis ribbon on top (it owns the plot's bottom band).
     render_realtime_whale_trail(dl, limits);
     render_realtime_basis(dl, limits);
+    render_realtime_basis_spot(dl, limits);
     // [SELF-HOST] execution + events: the slippage cone at the live edge, the
     // layer-events corner feed last (a panel, on top of every overlay).
     render_realtime_slippage(dl, limits);

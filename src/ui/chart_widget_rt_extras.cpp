@@ -1073,6 +1073,118 @@ void ChartWidget::render_realtime_basis(ImDrawList* dl, const ImPlotRect& limits
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// [SELF-HOST] Spot-Perp basis heat strip: Binance spot last price vs this
+// chart's perp mid, in bps, binned into heat columns along the bottom of the
+// real-time plot (above the OKX ribbon when both are on). Samples once per
+// second from the shared ticker store - the gateway's ticker-only spot adapter
+// feeds it - so no extra subscription. Perp premium warms green (longs are the
+// ones paying the carry), discount warms red; spot usually leads in stress
+// moves, so the strip flipping colour ahead of price is the tell.
+// ═══════════════════════════════════════════════════════════════════════════════
+static std::string spot_sym_for(const std::string& exchange, const std::string& symbol) {
+    // TickerManager keys are lowercase; spot entries arrive uppercase (BTCUSDT),
+    // so either case works here. hl's symbol alphabet has no spot mirror.
+    if (exchange == "binancef" || exchange == "bybit") return symbol;
+    if (exchange == "okx") {                     // "BTC-USDT-SWAP" -> "BTCUSDT"
+        std::string s;
+        s.reserve(symbol.size());
+        for (const char c : symbol) {
+            if (c == '-') continue;
+            s.push_back(char(std::toupper(static_cast<unsigned char>(c))));
+        }
+        constexpr const char* kSwap = "SWAP";
+        if (s.size() > 4 && s.compare(s.size() - 4, 4, kSwap) == 0)
+            s.resize(s.size() - 4);
+        return s;
+    }
+    return {};
+}
+
+void ChartWidget::render_realtime_basis_spot(ImDrawList* dl, const ImPlotRect& limits) {
+    if (!rt_basis_spot_enabled_ || !rt_mode_) return;
+    const std::string spot_sym = spot_sym_for(pair_.exchange, pair_.symbol);
+    if (spot_sym.empty()) return;
+    const TickerEntry* spot = ctx_.ticker_mgr().get("binancespot", spot_sym);
+    const bool spot_fresh = spot && spot->last_price > 0 &&
+        rt_clock_ms_ - spot->event_time_ms < 20000;
+    if (spot_fresh && rt_book_valid_ && rt_latest_) {
+        const double mid = 0.5 * (rt_latest_->bid + rt_latest_->ask);
+        if (mid > 0 && rt_clock_ms_ - rt_spot_last_sample_ms_ >= 1000) {
+            rt_spot_history_.emplace_back(rt_clock_ms_,
+                (mid - spot->last_price) / spot->last_price * 10000.0);
+            while (rt_spot_history_.size() > 1800) rt_spot_history_.pop_front();
+            rt_spot_last_sample_ms_ = rt_clock_ms_;
+        }
+    }
+    if (rt_spot_history_.empty()) return;
+    const ImVec2 pos = ImPlot::GetPlotPos(), size = ImPlot::GetPlotSize();
+    if (size.x <= 0 || size.y <= 0) return;
+    // Trim to the visible time window (same policy as the OKX ribbon: panning
+    // back past the trim line shows an empty strip, not stale heat).
+    while (!rt_spot_history_.empty() &&
+           rt_spot_history_.front().first < int64_t(limits.X.Min) - 1000)
+        rt_spot_history_.pop_front();
+    if (rt_spot_history_.empty()) return;
+
+    // Band placement: bottom of the plot; stacked above the OKX ribbon when
+    // that layer is on too, so the two never overlap.
+    const float band_h = std::max(20.0f, size.y * 0.10f);
+    float band_top = pos.y + size.y - band_h - 6.0f;
+    if (rt_basis_enabled_)
+        band_top -= std::max(26.0f, size.y * 0.14f) + 10.0f;
+    if (band_top <= pos.y + 4.0f) return;
+
+    // Column heat: bin the visible samples into ~6px columns, average each.
+    const int ncols = std::max(8, int(size.x / 6.0f));
+    std::vector<double> col_sum(ncols, 0.0);
+    std::vector<int> col_n(ncols, 0);
+    const double span = limits.X.Size();
+    for (const auto& s : rt_spot_history_) {
+        if (s.first < int64_t(limits.X.Min) || s.first > int64_t(limits.X.Max)) continue;
+        int c = int((double(s.first) - limits.X.Min) / span * double(ncols));
+        if (c < 0) c = 0;
+        if (c >= ncols) c = ncols - 1;
+        col_sum[c] += s.second;
+        ++col_n[c];
+    }
+    // Adaptive colour scale over the samples actually in view, clamped so a
+    // quiet tape still shows texture and a violent one still shows range.
+    double max_abs = 2.0;
+    for (int c = 0; c < ncols; ++c)
+        if (col_n[c] > 0)
+            max_abs = std::max(max_abs, std::fabs(col_sum[c] / col_n[c]));
+    max_abs = std::min(max_abs, 30.0);
+    const float col_w = size.x / float(ncols);
+    for (int c = 0; c < ncols; ++c) {
+        if (col_n[c] <= 0) continue;
+        const double bps = col_sum[c] / col_n[c];
+        const ImVec4& token = bps >= 0 ? Theme::Tokens::UP : Theme::Tokens::DOWN;
+        const float t = float(std::min(1.0, std::fabs(bps) / max_abs));
+        const float alpha = 0.10f + 0.78f * t;
+        dl->AddRectFilled(ImVec2(pos.x + float(c) * col_w, band_top),
+                          ImVec2(pos.x + float(c + 1) * col_w + 0.5f, band_top + band_h),
+                          ImGui::GetColorU32(ImVec4(token.x, token.y, token.z, alpha)));
+    }
+    // Zero baseline across the strip.
+    dl->AddLine(ImVec2(pos.x, band_top + band_h * 0.5f),
+                ImVec2(pos.x + size.x, band_top + band_h * 0.5f),
+                Theme::u32(Theme::Tokens::TX3), 1.0f);
+    // Readout chip at the strip's right edge.
+    ImGui::PushFont(Theme::Fonts::mono_sm());
+    char label[40];
+    if (spot_fresh) snprintf(label, sizeof(label), "S/P %+.1f bps", rt_spot_history_.back().second);
+    else snprintf(label, sizeof(label), "S/P no feed");
+    const ImVec2 ts = ImGui::CalcTextSize(label);
+    const ImVec2 a(pos.x + size.x - ts.x - 12.0f, band_top + 2.0f);
+    dl->AddRectFilled(ImVec2(a.x - 6.0f, a.y - 2.0f), ImVec2(a.x + ts.x + 6.0f, a.y + ts.y + 2.0f),
+                      Theme::u32(Theme::Tokens::BASE), 4.0f);
+    const double latest = rt_spot_history_.back().second;
+    const ImVec4& token = latest >= 0 ? Theme::Tokens::UP : Theme::Tokens::DOWN;
+    dl->AddText(ImVec2(a.x, a.y), ImGui::GetColorU32(ImVec4(token.x, token.y, token.z, 0.9f)), label);
+    ImGui::PopFont();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // [SELF-HOST] Refill-consumed sweep: the refill store closes a level as
 // exhausted when the liquidity that kept refilling there is traded through.
 // Every such close enters the events feed; when the toggle is on and the

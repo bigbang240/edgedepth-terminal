@@ -501,8 +501,12 @@ private:
     std::deque<std::pair<int64_t, double>> rt_basis_history_;  // (ts_ms, basis bps)
     int64_t rt_basis_last_sample_ms_ = 0;
     std::string rt_basis_inst_;             // cached okx instId for the charted pair
+    bool rt_basis_spot_enabled_ = false;    // spot-vs-perp basis heat strip
+    std::deque<std::pair<int64_t, double>> rt_spot_history_;   // (ts_ms, basis bps)
+    int64_t rt_spot_last_sample_ms_ = 0;
     void render_realtime_whale_trail(ImDrawList* dl, const ImPlotRect& limits);
     void render_realtime_basis(ImDrawList* dl, const ImPlotRect& limits);
+    void render_realtime_basis_spot(ImDrawList* dl, const ImPlotRect& limits);
     // ─── Layer events widget + refill-consumed alerts (self-host) ───
     // The feed collects every detected event regardless of the alert toggles;
     // the corner widget is a passive recent-history view of the same data.

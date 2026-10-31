@@ -143,6 +143,7 @@ Json ChartWidget::save_settings() const {
     j["rt_whale_window_ms"] = rt_whale_window_ms_;
     j["rt_whale_step_ticks"] = rt_whale_step_ticks_; // v2: user-chosen price proximity
     j["rt_basis_okx"] = rt_basis_enabled_;          // self-host: OKX basis ribbon
+    j["rt_basis_spot"] = rt_basis_spot_enabled_;    // self-host: spot-perp basis heat strip
     j["rt_events"] = rt_events_enabled_;            // self-host: layer-events corner feed
     j["rt_slip"] = rt_slip_enabled_;                // self-host: slippage cone
     j["rt_slip_size"] = rt_slip_size_;
@@ -343,6 +344,7 @@ void ChartWidget::load_settings(const Json& j) {
     workspace::read(j, "rt_whale_window_ms", rt_whale_window_ms_, 3000, 30000);
     workspace::read(j, "rt_whale_step_ticks", rt_whale_step_ticks_, 5, 200);
     workspace::read(j, "rt_basis_okx", rt_basis_enabled_);
+    workspace::read(j, "rt_basis_spot", rt_basis_spot_enabled_);   // absent in older saves: keeps off
     workspace::read(j, "rt_events", rt_events_enabled_);           // absent in older saves: keeps on
     workspace::read(j, "rt_slip", rt_slip_enabled_);               // absent in older saves: keeps off
     workspace::read(j, "rt_slip_size", rt_slip_size_, 0.1, 100000.0);

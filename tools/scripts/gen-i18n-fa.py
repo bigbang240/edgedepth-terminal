@@ -147,6 +147,7 @@ TABLE = [
     # rows - new layers
     ("l_whale_trail",  "Whale trail",       "رد پای نهنگ"),
     ("l_venue_basis",  "Venue basis (OKX)", "بیسیس صرافی (OKX)"),
+    ("l_spot_basis",   "Spot-Perp basis",   "بیسیس اسپات-پرپ"),
     ("l_slippage",     "Slippage cone",     "مخروط لغزش"),
     ("l_events",       "Layer events",      "رویدادهای لایه"),
     # rows - neighbours that shipped English (same menu, same fa pass)
@@ -199,6 +200,8 @@ TABLE = [
                                            "Alt+1..0 این لایه‌ها را هرجا عوض می‌کند:\n۱ عمق، ۲ حباب‌ها، ۳ خط معامله، ۴ کندل‌ها، ۵ هایکین آشی،\n۶ CVD، ۷ لیکوییدیشن برآوردی، ۸ حرارت ماندگار، ۹ ری‌فیل، ۰ دیوارها"),
     ("note_okx",       "Cross-venue basis needs an OKX feed; this gateway\nserves Binance futures only.",
                                            "بیسیس چند-صرافی به فید OKX نیاز دارد؛ این گیت‌وی\nفقط فیوچرز بایننس را سرو می‌کند"),
+    ("note_spot",      "Spot-Perp basis needs a Binance spot ticker\nfeed; this gateway serves futures venues only.",
+                                           "بیسیس اسپات-پرپ به فید تیکر اسپات بایننس نیاز دارد؛\nاین گیت‌وی فقط صرافی‌های فیوچرز را سرو می‌کند"),
     ("note_slip",      "Fills are volume-weighted over the stored rows at the\ntouch - an estimate over the visible book, not the\nvenue's full depth.",
                                            "فیل‌ها میانگین حجمی روی ردیف‌های ذخیره‌شدهٔ لمس هستند -\nبرآوردی روی کتاب مرئی، نه عمق کامل صرافی"),
     # ── Whale trail v2 (price step choice) ───────────────────────────────────

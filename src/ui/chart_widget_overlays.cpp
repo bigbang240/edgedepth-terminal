@@ -447,6 +447,19 @@ void ChartWidget::render_overlay_menu(bool liquidations, ImVec2 anchor) {
             } else if (wants(i18n::tr("Venue basis (OKX)", i18n::fa_l_venue_basis))) {
                 Theme::menu_note(i18n::tr("Cross-venue basis needs an OKX feed; this gateway\nserves Binance futures only.", i18n::fa_note_okx));
             }
+            // [SELF-HOST] Spot-Perp basis: Binance spot last vs this chart's
+            // perp mid, drawn as a heat strip (premium warms green, discount
+            // red). Feeds off the gateway's ticker-only spot adapter.
+            if (ctx_.ticker_mgr().has_venue("binancespot")) {
+                if (wants(i18n::tr("Spot-Perp basis", i18n::fa_l_spot_basis)) && layer_row(i18n::tr("Spot-Perp basis", i18n::fa_l_spot_basis), rt_basis_spot_enabled_, false, "spot"))
+                    rt_basis_spot_enabled_ = !rt_basis_spot_enabled_;
+                if (ImGui::IsItemHovered())
+                    Theme::tooltip("Binance spot last price vs this chart's perp mid, in bps, as a\n"
+                                   "heat strip above the bottom edge. Green warmth: perp trades at a\n"
+                                   "premium (longs pay), red: discount. Spot leads in stress moves.");
+            } else if (wants(i18n::tr("Spot-Perp basis", i18n::fa_l_spot_basis))) {
+                Theme::menu_note(i18n::tr("Spot-Perp basis needs a Binance spot ticker\nfeed; this gateway serves futures venues only.", i18n::fa_note_spot));
+            }
             layer_section(i18n::tr("EXECUTION", i18n::fa_sec_execution));
             if (wants(i18n::tr("Slippage cone", i18n::fa_l_slippage)) && layer_row(i18n::tr("Slippage cone", i18n::fa_l_slippage), rt_slip_enabled_, false))
                 rt_slip_enabled_ = !rt_slip_enabled_;

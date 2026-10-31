@@ -541,6 +541,17 @@ static void on_ws_status(const std::string& status) {
             0
         };
         g_app.stream_mgr->send_subscribe(ticker24h_okx_key);
+
+        // Binance SPOT 24h ticker - ticker24h.binancespot.global, the gateway's
+        // ticker-only spot adapter (!ticker@arr, ~1/s). Seeds the Spot-Perp
+        // basis layer: spot last vs this chart's perp mid in bps. Keyed by
+        // exchange in TickerManager like every other venue.
+        StreamKey ticker24h_spot_key{
+            Terminal::Pair{"binancespot", "global"},
+            Terminal::Stream::Ticker24h,
+            0
+        };
+        g_app.stream_mgr->send_subscribe(ticker24h_spot_key);
     }
 }
 
